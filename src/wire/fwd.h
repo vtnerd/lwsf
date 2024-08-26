@@ -62,6 +62,7 @@
 
 namespace wire
 {
+  struct basic_value;
   class reader;
   struct writer;
 }

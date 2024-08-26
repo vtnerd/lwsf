@@ -25,17 +25,18 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "read.h"
+#include "serialization/wire/json/read.h"
 
 #include <algorithm>
 #include <limits>
 #include <rapidjson/memorystream.h>
 #include <stdexcept>
 
-#include "common/expect.h" // monero/src
-#include "hex.h"           // monero/contrib/epee/include
-#include "wire/error.h"
-#include "wire/json/error.h"
+#include "byte_stream.h"
+#include "hex.h"
+#include "serialization/wire/basic_value.h"
+#include "serialization/wire/error.h"
+#include "serialization/wire/json/error.h"
 
 namespace
 {
@@ -50,8 +51,7 @@ namespace
   //! \throw std::system_error by converting `code` into a std::error_code
   [[noreturn]] void throw_json_error(const epee::span<const std::uint8_t> source, const rapidjson::Reader& reader, const wire::error::schema expected)
   {
-    const std::size_t offset = std::min(source.size(), reader.GetErrorOffset());
-    const std::size_t start = offset;//std::max(snippet_size / 2, offset) - (snippet_size / 2);
+    const std::size_t start = std::min(source.size(), reader.GetErrorOffset());
     const std::size_t end = start + std::min(snippet_size, source.size() - start);
 
     const boost::string_ref text{reinterpret_cast<const char*>(source.data()) + start, end - start};
@@ -64,7 +64,7 @@ namespace
     case rapidjson::kParseErrorTermination: // the handler returned false
       break;
     }
-    WIRE_DLOG_THROW(expected, "near '" << text << '\'');
+    WIRE_DLOG_THROW(expected, "near \"" << text << '"');
   }
 }
 
@@ -72,36 +72,37 @@ namespace wire
 {
   struct json_reader::rapidjson_sax
   {
-    struct string_contents
-    {
-       const char* ptr;
-       std::size_t length;
-    };
-
     union
     {
       bool boolean;
       std::intmax_t integer;
       std::uintmax_t unsigned_integer;
       double number;
-      string_contents string;
     } value;
 
-    error::schema expected_;
+    std::string* const string_;
+    const error::schema expected_;
+    error::schema actual_;
     bool negative;
 
-    explicit rapidjson_sax(error::schema expected) noexcept
-      : expected_(expected), negative(false)
+    rapidjson_sax(error::schema expected) noexcept
+      : string_(nullptr), expected_(expected), actual_(error::schema::maximum_depth), negative(false)
     {}
 
-    bool Null() const noexcept
+    explicit rapidjson_sax(std::string& string, error::schema expected) noexcept
+      : string_(std::addressof(string)), expected_(expected), actual_(error::schema::maximum_depth), negative(false)
+    {}
+
+    bool Null() noexcept
     {
+      actual_ = error::schema::none;
       return expected_ == error::schema::none;
     }
 
     bool Bool(bool i) noexcept
     {
       value.boolean = i;
+      actual_ = error::schema::boolean;
       return expected_ == error::schema::boolean || expected_ == error::schema::none;
     }
 
@@ -120,13 +121,14 @@ namespace wire
       {
       default:
         return false;
+      case error::schema::none:
       case error::schema::integer:
         value.integer = i;
+        actual_ = error::schema::integer;
         break;
       case error::schema::number:
         value.number = i;
-        break;
-      case error::schema::none:
+        actual_ = error::schema::number;
         break;
       }
       return true;
@@ -137,13 +139,14 @@ namespace wire
       {
       default:
         return false;
+      case error::schema::none:
       case error::schema::integer:
         value.unsigned_integer = i;
+        actual_ = error::schema::integer;
         break;
       case error::schema::number:
         value.number = i;
-        break;
-      case error::schema::none:
+        actual_ = error::schema::number;
         break;
       }
       return true;
@@ -152,17 +155,20 @@ namespace wire
     bool Double(double i) noexcept
     {
       value.number = i;
+      actual_ = error::schema::number;
       return expected_ == error::schema::number || expected_ == error::schema::none;
     }
 
-    bool RawNumber(const char*, std::size_t, bool) const noexcept
+    static constexpr bool RawNumber(const char*, std::size_t, bool) noexcept
     {
       return false;
     }
 
     bool String(const char* str, std::size_t length, bool) noexcept
     {
-      value.string = {str, length};
+      actual_ = error::schema::string;
+      if (string_)
+        string_->assign(str, length);
       return expected_ == error::schema::string || expected_ == error::schema::none;
     }
     bool Key(const char* str, std::size_t length, bool)
@@ -215,18 +221,57 @@ namespace wire
     read_next_value(accept_all);
   }
 
-  json_reader::json_reader(std::string&& source)
-    : reader(nullptr),
-      source_(std::move(source)),
-      reader_()
+  std::size_t json_reader::do_start_array(std::size_t)
   {
-    remaining_ = {reinterpret_cast<const std::uint8_t*>(source_.data()), source_.size()};
+    if (get_next_token() != '[')
+      WIRE_DLOG_THROW_(error::schema::array);
+    remaining_.remove_prefix(1);
+    return 0;
   }
+
+  std::size_t json_reader::do_start_object()
+  {
+    if (get_next_token() != '{')
+      WIRE_DLOG_THROW_(error::schema::object);
+    remaining_.remove_prefix(1);
+    return 0;
+  }
+
+  json_reader::json_reader(epee::span<const char> source)
+    : reader({reinterpret_cast<const std::uint8_t*>(source.data()), source.size()}),
+      str_buffer_(),
+      reader_()
+  {}
 
   void json_reader::check_complete() const
   {
     if (depth())
       WIRE_DLOG_THROW(error::rapidjson_e(rapidjson::kParseErrorUnspecificSyntaxError), "Unexpected end");
+  }
+
+  basic_value json_reader::basic()
+  {
+    rapidjson_sax json_any{str_buffer_, error::schema::none};
+    read_next_value(json_any);
+    switch(json_any.actual_)
+    {
+    default:
+      break;
+    case error::schema::none:
+      return {nullptr};
+    case error::schema::boolean:
+      return {json_any.value.boolean};
+    case error::schema::integer:
+      if (json_any.negative)
+	return {json_any.value.integer};
+      else
+	return {json_any.value.unsigned_integer};
+    case error::schema::number:
+      return {json_any.value.number};
+    case error::schema::string:
+      return {std::move(str_buffer_)};
+    };
+    WIRE_DLOG_THROW(error::schema::number, "expected a boolean, integer, float or string");
   }
 
   bool json_reader::boolean()
@@ -264,24 +309,24 @@ namespace wire
       WIRE_DLOG_THROW_(error::schema::larger_integer);
     return static_cast<std::uintmax_t>(json_uint.value.integer);
   }
-    /*
-  const std::vector<std::uintmax_t>& json_reader::unsigned_integer_array()
-  {
-      read_next_unsigned_array(
-      }*/
 
   std::uintmax_t json_reader::safe_unsigned_integer()
   {
-    if (get_next_token() != '"')
-      WIRE_DLOG_THROW_(error::schema::string);
-    remaining_.remove_prefix(1);
+    bool is_string = false;
+    if (get_next_token() == '"')
+    {
+      remaining_.remove_prefix(1);
+      is_string = true;
+    }
 
     const std::uintmax_t out = unsigned_integer();
 
-    if (get_next_token() != '"')
-      WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorStringMissQuotationMark));
-    remaining_.remove_prefix(1);
-
+    if (is_string)
+    {
+      if (get_next_token() != '"')
+        WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorStringMissQuotationMark));
+      remaining_.remove_prefix(1);
+    }
     return out;
   }
 
@@ -294,38 +339,34 @@ namespace wire
 
   std::string json_reader::string()
   {
-    rapidjson_sax json_string{error::schema::string};
-    read_next_value(json_string);
-    return std::string{json_string.value.string.ptr, json_string.value.string.length};
+    {
+      rapidjson_sax json_string{str_buffer_, error::schema::string};
+      read_next_value(json_string);
+    }
+    return std::string{std::move(str_buffer_)};
   }
 
-  std::vector<std::uint8_t> json_reader::binary()
+  epee::byte_slice json_reader::binary()
   {
     const boost::string_ref value = get_next_string();
 
-    std::vector<std::uint8_t> out;
-    out.resize(value.size() / 2);
+    epee::byte_stream out{};
+    out.put_n(0, value.size() / 2);
 
     if (!epee::from_hex::to_buffer(epee::to_mut_span(out), value))
-      WIRE_DLOG_THROW_(error::schema::binary);
+      WIRE_DLOG_THROW(error::schema::binary, "invalid hex");
 
-    return out;
+    return epee::byte_slice{std::move(out)};
   }
 
-  void json_reader::binary(epee::span<std::uint8_t> dest)
+  std::size_t json_reader::binary(epee::span<std::uint8_t> dest, const bool exact)
   {
     const boost::string_ref value = get_next_string();
+    if (!exact && value.size() / 2 <= dest.size())
+      dest = {dest.data(), value.size() / 2}; // `from_hex` will ensure exact size
     if (!epee::from_hex::to_buffer(dest, value))
-      WIRE_DLOG_THROW(error::schema::fixed_binary, "of size" << dest.size() * 2 << " but got " << value.size());
-  }
-
-  std::size_t json_reader::start_array(std::size_t)
-  {
-    if (get_next_token() != '[')
-      WIRE_DLOG_THROW_(error::schema::array);
-    remaining_.remove_prefix(1);
-    increment_depth();
-    return 0;
+      WIRE_DLOG_THROW(exact ? error::schema::fixed_binary : error::schema::binary, "invalid hex and/or expected size " << dest.size() * 2 << " but got " << value.size());
+    return dest.size();
   }
 
   bool json_reader::is_array_end(const std::size_t count)
@@ -348,21 +389,11 @@ namespace wire
     return false;
   }
 
-  std::size_t json_reader::start_object()
-  {
-    if (get_next_token() != '{')
-      WIRE_DLOG_THROW_(error::schema::object);
-    remaining_.remove_prefix(1);
-    increment_depth();
-    return 0;
-  }
-
   bool json_reader::key(const epee::span<const key_map> map, std::size_t& state, std::size_t& index)
   {
-    rapidjson_sax json_key{error::schema::string};
-    const auto process_key = [map] (const rapidjson_sax::string_contents value)
+    rapidjson_sax json_key{str_buffer_, error::schema::string};
+    const auto process_key = [map] (const boost::string_ref key)
     {
-      const boost::string_ref key{value.ptr, value.length};
       for (std::size_t i = 0; i < map.size(); ++i)
       {
         if (map[i].name == key)
@@ -395,7 +426,7 @@ namespace wire
 
       // parse key
       read_next_value(json_key);
-      index = process_key(json_key.value.string);
+      index = process_key(str_buffer_);
       if (get_next_token() != ':')
         WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorObjectMissColon));
       remaining_.remove_prefix(1);

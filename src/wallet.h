@@ -30,7 +30,9 @@
 
 #include "lws_frontend.h"
 
+#include <boost/thread/mutex.hpp>
 #include <boost/thread/thread.hpp>
+#include <memory>
 #include <string>
 #include "cryptonote_basic/account.h" // monero/src
 #include "net/http_client.h"          // monero/contrib/epee/include
@@ -41,15 +43,28 @@ namespace internal
 {
   namespace backend { struct wallet; }
 
+
   //! \TODO Mark final when completely implemented
   class wallet : public lwsf::Wallet
   {
     const std::shared_ptr<backend::wallet> data_;
-    std::string filename_;
+    const std::string filename_;
+    std::string password_;
+    std::string exception_error_;
+    std::error_code status_;
     boost::thread thread_;
-    
-public:
-    explicit wallet(std::string filename, std::shared_ptr<backend::wallet> data);
+    const std::uint64_t iterations_;
+    mutable boost::mutex sync_;
+
+    void set_error(const std::error_code status);
+    void set_critical(const std::exception& e);
+
+  public:
+    struct create_tag{};
+    struct open_tag{};
+
+    wallet(create_tag, NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data);
+    wallet(open_tag, NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data);
 
     wallet(const wallet&) = delete;
     wallet(wallet&&) = delete;
@@ -62,10 +77,12 @@ public:
     virtual std::string getSeedLanguage() const = 0;
     virtual void setSeedLanguage(const std::string &arg) = 0;
 
+    virtual int status() const override;
+    virtual std::string errorString() const override;
     virtual void statusWithErrorString(int& status, std::string& errorString) const override;
 
-    virtual bool setPassword(const std::string &password) = 0;
-    virtual const std::string& getPassword() const = 0;
+    virtual bool setPassword(const std::string &password) override;
+    virtual const std::string& getPassword() const override { return password_; }
 
     virtual bool setDevicePin(const std::string &) override { return false; };
     virtual bool setDevicePassphrase(const std::string &) override { return false; };
@@ -212,8 +229,8 @@ public:
      * @return - true if connected
      */
     virtual ConnectionStatus connected() const override;
-    virtual void setTrustedDaemon(bool arg) = 0;
-    virtual bool trustedDaemon() const = 0;
+    virtual void setTrustedDaemon(bool) override {} 
+    virtual bool trustedDaemon() const override { return true; }
     virtual bool setProxy(const std::string &address) override;
     virtual uint64_t balance(uint32_t accountIndex = 0) const = 0;
     uint64_t balanceAll() const {
@@ -499,7 +516,8 @@ public:
      * \brief disposeTransaction - destroys transaction object
      * \param t -  pointer to the "PendingTransaction" object. Pointer is not valid after function returned;
      */
-    virtual void disposeTransaction(PendingTransaction * t) = 0;
+    virtual void disposeTransaction(PendingTransaction * t) override final
+    {}
 
     /*!
      * \brief Estimates transaction fee.
@@ -507,7 +525,7 @@ public:
      * \return Estimated fee.
      */
     virtual uint64_t estimateTransactionFee(const std::vector<std::pair<std::string, uint64_t>> &destinations,
-                                            PendingTransaction::Priority priority) const = 0;
+                                            PendingTransaction::Priority priority) const override final;
 
    /*!
     * \brief exportKeyImages - exports key images to file
@@ -549,7 +567,7 @@ public:
     virtual std::shared_ptr<AddressBook> addressBook() = 0;
     virtual std::shared_ptr<Subaddress> subaddress() = 0;
     virtual std::shared_ptr<SubaddressAccount> subaddressAccount() = 0;
-    virtual void setListener(WalletListener *) = 0;
+    virtual void setListener(std::shared_ptr<WalletListener>) override;
     /*!
      * \brief defaultMixin - returns number of mixins used in transactions
      * \return

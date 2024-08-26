@@ -28,11 +28,14 @@
 
 #include "lws_frontend.h"
 
+#include <boost/utility/string_ref.hpp>
 #include <chrono>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <system_error>
 #include "backend.h"
+#include "common/dns_utils.h"  // monero/src
 #include "lwsf_config.h"
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
@@ -91,8 +94,9 @@ namespace lwsf
      */
       std::unique_ptr<Wallet> createWallet(const std::string &path, const std::string &password, const std::string &language, NetworkType nettype, uint64_t kdf_rounds) override
       {
-        //! \TODO Complete
-        return std::make_unique<wallet>(path, std::make_shared<backend::wallet>(true));
+        return std::make_unique<wallet>(
+          wallet::create_tag{}, nettype, path, password, kdf_rounds, std::make_shared<backend::wallet>()
+        );
       }
 
     /*!
@@ -107,7 +111,11 @@ namespace lwsf
 
       std::unique_ptr<Wallet> openWallet(const std::string &path, const std::string &password, NetworkType nettype, uint64_t kdf_rounds, std::shared_ptr<WalletListener> listener) override
       {
-        //! \TODO Complete
+        auto back = std::make_shared<backend::wallet>();
+        back->listener = std::move(listener);
+        return std::make_unique<wallet>(
+          wallet::open_tag{}, nettype, path, password, kdf_rounds, std::move(back)
+        );
       }
 
     /*!
@@ -219,7 +227,7 @@ namespace lwsf
      * \param wallet        previously opened / created wallet instance
      * \return              None
      */
-      bool closeWallet(std::unique_ptr<Wallet> wallet, bool store) override
+      bool closeWallet(std::unique_ptr<Wallet> wallet, const bool store) override
       {
         if (wallet && store)
           wallet->store(wallet->filename());
@@ -236,7 +244,7 @@ namespace lwsf
      */
       bool walletExists(const std::string &path) override
       {
-        //! \TODO Complete
+        return std::filesystem::exists(std::filesystem::path{path});
       }
 
     /*!
@@ -324,11 +332,25 @@ namespace lwsf
 
       std::string resolveOpenAlias(const std::string &address, bool &dnssec_valid) const override
       {
-        //! \TODO Complete
+        const boost::string_ref prefix{"oa1:xmr "};
+        std::string real_address =
+          tools::DNSResolver::instance().get_dns_format_from_oa_address(address);
+
+        bool dnssec_available = false;
+        std::vector<std::string> records =
+          tools::DNSResolver::instance().get_txt_record(real_address, dnssec_available, dnssec_valid);
+        for (boost::string_ref record : records)
+        {
+          if (record.starts_with(prefix))
+          {
+            record = record.substr(prefix.size());
+            return std::string{record.data(), record.size()};
+          }
+        }
       }
 
-    //! checks for an update and returns version, hash and url
-    static std::tuple<bool, std::string, std::string, std::string, std::string> checkUpdates(
+      //! checks for an update and returns version, hash and url
+      static std::tuple<bool, std::string, std::string, std::string, std::string> checkUpdates(
         const std::string &software,
         std::string subdir,
         const char *buildtag = nullptr,

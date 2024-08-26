@@ -32,8 +32,8 @@
 #include <string>
 #include <tuple>
 #include <type_traits>
-#include <vector>
 
+#include "byte_slice.h"    // monero/contrib/epee/include
 #include "common/expect.h" // monero/src
 #include "span.h"          // monero/contrib/epee/include
 #include "wire/error.h"
@@ -106,7 +106,7 @@ namespace wire
     virtual std::string string() = 0;
 
     // ! \throw wire::exception if next value cannot be read as binary
-    virtual std::vector<std::uint8_t> binary() = 0;
+    virtual epee::byte_slice binary() = 0;
 
     //! \throw wire::exception if next value cannot be read as binary into `dest`.
     virtual void binary(epee::span<std::uint8_t> dest) = 0;
@@ -163,7 +163,7 @@ namespace wire
   { dest = source.string(); }
 
   template<typename R>
-  inline void read_bytes(R& source, std::vector<std::uint8_t>& dest)
+  inline void read_bytes(R& source, epee::byte_slice& dest)
   { dest = source.binary(); }
 
   template<typename R, typename T>

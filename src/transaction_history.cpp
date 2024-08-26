@@ -34,7 +34,7 @@
 
 #include "transaction_info.h"
 
-#include "string_tools.h" // monero/contrib/epee/include
+#include "hex.h" // monero/contrib/epee/include
 
 namespace lwsf { namespace internal
 {
@@ -59,17 +59,15 @@ namespace lwsf { namespace internal
   std::shared_ptr<TransactionInfo> transaction_history::transaction(int index) const
   {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (std::numeric_limits<int>::max() < data_->primary.txes.size())
-      throw std::runtime_error{"Exceeded max int size in transaction_history:transaction"};
-    if (data_->primary.txes.size() < index || index < 0)
+    if (index < 0 || data_->primary.txes.size() < unsigned(index))
       throw std::runtime_error{"index provided to transaction invalid"};
-    return std::make_shared<transaction_info>(data_, data_->primary.txes.nth(index)->second);
+    return std::make_shared<transaction_info>(data_, data_->primary.txes.nth(unsigned(index))->second);
   }
 
   std::shared_ptr<TransactionInfo> transaction_history::transaction(const std::string &id) const
   {
     crypto::hash binary_id{};
-    if (!epee::string_tools::hex_to_pod(id, binary_id))
+    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(binary_id), id))
       throw std::runtime_error{"transaction_history given invalid hex id"};
 
     const boost::lock_guard<boost::mutex> lock{data_->sync};   

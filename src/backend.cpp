@@ -31,8 +31,10 @@
 #include <boost/thread/lock_guard.hpp>
 #include "cryptonote_basic/cryptonote_basic_impl.h" // monero/src
 #include "lwsf_config.h"
+#include "ringct/rctOps.h"
 #include "wire.h"
 #include "wire/adapted/crypto.h"
+#include "wire/adapted/pair.h"
 #include "wire/msgpack.h"
 #include "wire/wrapper/trusted_array.h"
 
@@ -81,24 +83,14 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_FIELD(amount),
         WIRE_FIELD(recipient),
         WIRE_FIELD(index),
-        WIRE_FIELD(output_pub),
-        WIRE_FIELD(rct_mask)
+        WIRE_OPTIONAL_FIELD(rct_mask),
+        WIRE_FIELD(tx_pub)
       );
     }
- }
-    static void read_bytes(wire::reader& source, std::pair<crypto::public_key, transfer_in>& dest)
-    {
-      read_bytes(source, dest.second);
-      dest.first = dest.second.output_pub;
-    }
-    static void write_bytes(wire::writer& dest, const std::pair<const crypto::public_key, transfer_in>& source)
-    {
-      write_bytes(dest, source.second);
-    }
+  } // anonymous
 
-namespace 
-{
-
+  namespace 
+  {
     template<typename F, typename T>
     void map_transaction(F& format, T& self)
     {
@@ -113,27 +105,29 @@ namespace
         WIRE_OPTIONAL_FIELD(height),
         WIRE_FIELD(unlock_time),
         WIRE_FIELD(direction),
-        WIRE_OPTIONAL_FIELD(tx_secret),
         WIRE_FIELD(id),
+        WIRE_FIELD(prefix),
         WIRE_FIELD(coinbase)
       );
     }
-}
+  } // anonymous
 
-    static void read_bytes(wire::reader& source, std::pair<crypto::hash, std::shared_ptr<transaction>>& dest)
-    {
-      if (!dest.second)
-        dest.second = std::make_shared<transaction>(transaction{});
-      read_bytes(source, *dest.second);
-      dest.first = dest.second->id;
-    }
-    static void write_bytes(wire::writer& dest, const std::pair<const crypto::hash, std::shared_ptr<transaction>>& source)
-    {
-      if (!source.second)
-        WIRE_DLOG_THROW(wire::error::schema::object, "Unexpected nullptr");
-      write_bytes(dest, *source.second);
-    }
-namespace {
+  static void read_bytes(wire::reader& source, std::pair<crypto::hash, std::shared_ptr<transaction>>& dest)
+  {
+    if (!dest.second)
+      dest.second = std::make_shared<transaction>();
+    read_bytes(source, *dest.second);
+    dest.first = dest.second->id;
+  }
+  static void write_bytes(wire::writer& dest, const std::pair<crypto::hash, std::shared_ptr<transaction>>& source)
+  {
+    if (!source.second)
+      WIRE_DLOG_THROW(wire::error::schema::object, "Unexpected nullptr");
+    write_bytes(dest, *source.second);
+  }
+
+  namespace 
+  {
     template<typename F, typename T>
     void map_keypair(F& format, T& self)
     {
@@ -148,12 +142,64 @@ namespace {
         wire::field("txes", wire::trusted_array(std::ref(self.txes))),
         WIRE_FIELD(type),
         WIRE_FIELD(view),
-        WIRE_FIELD(spend)
+        WIRE_FIELD(spend),
+        WIRE_FIELD(generated_locally)
       );
     }
- 
-    void new_tx(const account& self, transaction& out, const rpc::transaction& source)
+
+    rct::key get_mask(const crypto::secret_key& view_key, const rpc::output& source)
     {
+      crypto::key_derivation derived{};
+      if (!crypto::generate_key_derivation(source.tx_pub_key, view_key, derived))
+        throw std::runtime_error{"generate_key_derivation failure"};
+
+      crypto::secret_key scalar{};
+      crypto::derivation_to_scalar(derived, source.index, scalar);
+
+      rct::ecdhTuple commitment{source.rct.mask};
+      rct::ecdhDecode(commitment, rct::sk2rct(scalar), source.rct.type == rpc::ringct::format::recompute);
+
+      return commitment.mask;
+    } 
+
+    void update_output(transfer_in& out, const rpc::output& source, const crypto::secret_key& view_key)
+    {
+      out.global_index = std::uint64_t(source.global_index);
+      out.amount = std::uint64_t(source.amount);
+      out.recipient = source.recipient.value_or(rpc::address_meta{});
+      out.index = source.index;
+      out.tx_pub = source.tx_pub_key;
+
+      switch (source.rct.type)
+      {
+      default:
+        throw std::runtime_error{"Unexpected ringct mask type"};
+      case rpc::ringct::format::none:
+        out.rct_mask = std::nullopt;
+        break;
+      case rpc::ringct::format::encrypted:
+      case rpc::ringct::format::recompute:
+        out.rct_mask = get_mask(view_key, source);
+        break;
+      case rpc::ringct::format::unencrypted:
+        out.rct_mask = source.rct.mask;
+        break;
+      }
+    }
+
+    void update_spend(transfer_out& out, const rpc::transaction_spend& source)
+    {
+      out.amount = std::uint64_t(source.amount);
+      out.sender = source.sender.value_or(rpc::address_meta{});
+      out.tx_pub = source.tx_pub_key;
+    }
+ 
+    void update_tx(const account& self, transaction& out, const rpc::transaction& source)
+    {
+      /* Let `receives` re-populate in `merge_output`. This works because the
+        server supplies all info - there is no local info to keep. */
+      out.receives.clear();
+
       out.id = source.tx_hash;
       out.timestamp = source.timestamp;
       out.fee = std::uint64_t(source.fee.value_or(rpc::uint64_string(0)));
@@ -178,7 +224,9 @@ namespace {
         crypto::generate_key_image(output_pub, output_secret, image);
         if (image == spend.key_image)
         {
-          out.spends.emplace_back(std::uint64_t(spend.amount), spend.tx_pub_key);
+          /* Frontend will typically know about spend before backend. So only
+            merge and never erase spends. */
+          update_spend(out.spends.try_emplace(image).first->second, spend);
           total_spent += std::uint64_t(spend.amount);
         }
       }
@@ -195,46 +243,95 @@ namespace {
       }
     }
 
-    void merge_output(std::shared_ptr<transaction>& out, const rpc::output& output)
+    void merge_output(const std::shared_ptr<transaction>& out, const rpc::output& source, const crypto::secret_key& view_key)
     {
       if (!out)
         throw std::logic_error{"nullptr transaction in merge_output"};
 
-      out->prefix = output.tx_prefix_hash;
-      const auto receive = out->receives.lower_bound(output.public_key);
-      if (receive == out->receives.end() || receive->first != output.public_key)
-      {
-        out->receives.emplace_hint(receive, output.public_key, transfer_in{output});
-      }
+      out->prefix = source.tx_prefix_hash;
+      update_output(out->receives.try_emplace(source.public_key).first->second, source, view_key);
     }
 
-    bool merge_response(wallet& self, const rpc::get_address_txs& source)
+    std::vector<std::shared_ptr<transaction>> merge_response(wallet& self, const rpc::get_address_txs& source)
     {
-      bool updated_wallet = false;
+      std::vector<std::shared_ptr<transaction>> out;
+
       self.scan_height = source.scanned_block_height;
       self.blockchain_height = source.blockchain_height;
       self.primary.restore_height = source.start_height;
 
-      self.primary.txes.reserve(source.transactions.size());
-      for (const auto& tx : source.transactions)
+      /* Backend server could remove or modify txes (rescan or bug fix); the
+        easiest way to handle this is to start a new copy of the txes. This is
+        what the existing (JS) MyMonero frontend does. This has the benefit
+        of allowing `shared_ptr<transaction>` objects to be "given away" to
+        other parts of the frontend without a mutex. */
+
+      const auto existing_txes = std::move(self.primary.txes);
+      self.primary.txes.clear();
+      self.primary.txes.reserve(
+        std::max(existing_txes.size(), source.transactions.size())
+      );
+
+      /* The frontend will know about the spend first, iff the frontend was
+        used to perform the spend. We copy _all_ transactions that have a
+        spend secret, even if the backend doesn't acknowledge it, otherwise the
+        secret information will be lost in many situations. If the spend
+        never gets confirmed, this will just sit in the transaction list. */
+      for (const auto& tx : existing_txes)
       {
-        auto iter = self.primary.txes.lower_bound(tx.tx_hash);
-        if (iter == self.primary.txes.end() || iter->first != tx.tx_hash)
+        if (tx.second)
         {
-          updated_wallet = true;
-          new_tx(self.primary, *self.primary.txes.emplace_hint(iter, tx.tx_hash, std::make_shared<transaction>(transaction{}))->second, tx);
+          bool copy = false;
+          for (const auto& spend : tx.second->spends)
+          {
+            if (spend.second.secret)
+            {
+              self.primary.txes.emplace_hint(
+                self.primary.txes.end(), tx.first, std::make_shared<transaction>(*tx.second)
+              );
+              break; // inner loop
+            }
+          }
         }
       }
-      return updated_wallet;
+
+      for (const auto& tx : source.transactions)
+      {
+        auto inserted = self.primary.txes.try_emplace(tx.tx_hash, nullptr);
+        if (inserted.second)
+        {
+          const auto existing = existing_txes.find(tx.tx_hash);
+          try
+          {
+            if (existing != existing_txes.end() && existing->second)
+              inserted.first->second = std::make_shared<transaction>(*existing->second);
+            else
+              inserted.first->second = std::make_shared<transaction>();
+          }
+          catch (...)
+          {
+            self.primary.txes.erase(inserted.first);
+            throw;
+          }
+
+          if (existing != existing_txes.end())
+            out.push_back(inserted.first->second);
+        }
+        update_tx(self.primary, *inserted.first->second, tx);
+      }
+
+      return out;
     }
 
-    void merge_response(account& self, const rpc::get_unspent_outs& source)
+    void merge_response(wallet& self, const rpc::get_unspent_outs& source)
     {
+      self.per_byte_fee = source.per_byte_fee;
+      self.fee_mask = source.fee_mask;
       for (const auto& output : source.outputs)
       {
-        auto iter = self.txes.find(output.tx_hash);
-        if (iter != self.txes.end())
-          merge_output(iter->second, output);
+        auto iter = self.primary.txes.find(output.tx_hash);
+        if (iter != self.primary.txes.end())
+          merge_output(iter->second, output, self.primary.view.sec);
       } 
     }
   } // anonymous
@@ -253,39 +350,21 @@ namespace {
   void write_bytes(wire::writer& dest, const account& source)
   { map_account(dest, source); }
 
-  transfer_in::transfer_in()
-    : global_index(0),
-      amount(0),
-      recipient(),
-      index(0),
-      output_pub{},
-      rct_mask{}
-  {}
-
-  transfer_in::transfer_in(const rpc::output& source)
-    : global_index(std::uint64_t(source.global_index)),
-      amount(std::uint64_t(source.amount)),
-      recipient(source.recipient.value_or(rpc::address_meta{})),
-      index(source.index),
-      output_pub(source.public_key),
-      rct_mask(source.rct.mask)
-  {}
-
-  wallet::wallet(const bool generated_locally)
-    : client(),
+  wallet::wallet()
+    : listener(nullptr),
+      client(),
       primary{},
-      status(),
       last_sync(0),
       scan_height(0),
       blockchain_height(0),
-      sync(),
-      generated_locally(generated_locally)
+      sync()
   {}
 
   expect<epee::byte_slice> wallet::to_bytes() const
   {
     epee::byte_stream dest{};
     dest.reserve(config::initial_buffer_size);
+
     const boost::lock_guard<boost::mutex> lock{sync};
     const std::error_code error = wire::msgpack::to_bytes(dest, primary);
     if (error)
@@ -293,16 +372,13 @@ namespace {
     return epee::byte_slice{std::move(dest)}; 
   }
 
-  expect<void> wallet::from_bytes(epee::byte_slice source)
+  std::error_code wallet::from_bytes(epee::byte_slice source)
   {
     const boost::lock_guard<boost::mutex> lock{sync};
-    const std::error_code error = wire::msgpack::from_bytes(std::move(source), primary);
-    if (error)
-      return error;
-    return success();
+    return wire::msgpack::from_bytes(std::move(source), primary);
   }
 
-  void wallet::refresh(const bool mandatory)
+  std::error_code wallet::refresh(const bool mandatory)
   {
     if (!mandatory)
     {
@@ -311,7 +387,7 @@ namespace {
         std::chrono::steady_clock::time_point::duration{last_sync.load()}
       };
       if (now - start < config::refresh_interval)
-        return;
+        return {};
     }
 
     expect<rpc::get_unspent_outs> outs_response{common_error::kInvalidArgument};
@@ -320,21 +396,56 @@ namespace {
     if (txs_response)
       outs_response = rpc::invoke<rpc::get_unspent_outs>(client, login);
 
-    const boost::lock_guard<boost::mutex> lock{sync};
+    boost::unique_lock<boost::mutex> lock{sync};
+
     if (!txs_response)
-    {
-      status = txs_response.error();
-      return;
-    }
+      return txs_response.error();
     if (!outs_response)
+      return outs_response.error();
+
+    const std::uint64_t orig_scan_height = scan_height;
+    const auto new_txes = merge_response(*this, *txs_response);
+    merge_response(*this, *outs_response);
+    last_sync = std::chrono::steady_clock::now().time_since_epoch().count();
+
+    if (!listener)
+      return {};
+
+    // Call listener functions without holding lock, in case a call is made
+    // back into the library.
+    const std::uint64_t new_scan_height = std::max(orig_scan_height, scan_height);
+    lock.unlock();
+
+    listener->refreshed();
+    if (!new_txes.empty())
+      listener->updated();
+
+    for (std::uint64_t i = orig_scan_height; i < new_scan_height; ++i)
+      listener->newBlock(i);
+
+    for (const auto& tx : new_txes)
     {
-      status = outs_response.error();
-      return;
+      const auto txid = epee::string_tools::pod_to_hex(tx->id);
+      if (tx->direction == TransactionInfo::Direction::In)
+      {
+        if (tx->height)
+          listener->moneyReceived(txid, tx->amount);
+        else
+          listener->unconfirmedMoneyReceived(txid, tx->amount);
+      }
+      else
+        listener->moneySpent(txid, tx->amount);
     }
 
-    status = std::error_code{};
-    merge_response(*this, *txs_response);
-    merge_response(primary, *outs_response);
-    last_sync = std::chrono::steady_clock::now().time_since_epoch().count();
+    return {};
+  }
+
+  std::error_code wallet::send_tx(epee::byte_slice tx_bytes)
+  {
+    const rpc::submit_raw_tx_request request{std::move(tx_bytes)};
+    auto response = rpc::invoke<rpc::submit_raw_tx_response>(client, request);
+    if (!response)
+      return response.error();
+    return {};
   }
 }}} // lwsf // internal // backend

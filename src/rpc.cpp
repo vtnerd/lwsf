@@ -33,8 +33,10 @@
 #include <boost/spirit/include/qi_parse_attr.hpp>
 #include <boost/spirit/include/qi_sequence.hpp>
 #include <ctime>
+#include "hex.h"             // monero/contrib/epee/include
 #include "lwsf_config.h"
 #include "net/http_client.h" // monero/contrib/epee/include
+#include "ringct/rctOps.h"   // monero/contrib/epee/include
 #include "wire.h"
 #include "wire/adapted/crypto.h"
 #include "wire/field.h"
@@ -71,14 +73,14 @@ namespace lwsf { namespace internal { namespace rpc
     struct category final : std::error_category
     {
       virtual const char* name() const noexcept override final
-        {
-          return "lwsf::internal::rpc::error_category()";
-        }
+      {
+        return "lwsf::internal::rpc::error_category()";
+      }
 
-        virtual std::string message(int value) const override final
-        {
-          return get_string(error(value));
-        }
+      virtual std::string message(int value) const override final
+      {
+        return get_string(error(value));
+      }
     };
     static const category instance{};
     return instance;
@@ -95,7 +97,7 @@ namespace lwsf { namespace internal { namespace rpc
       return {error::invoke_failure};
     if (!response)
       return {error::invoke_failure};
-    if(response->m_response_code != 200)
+    if(response->m_response_code != 200 && response->m_response_code != 201)
       return {error::wrong_response_code};
 
     return response->m_body;
@@ -149,7 +151,7 @@ namespace lwsf { namespace internal { namespace rpc
     using min_spent = wire::min_element_sizeof<crypto::key_image>;
 
     std::optional<std::string> timestamp;
-    std::optional<std::vector<std::uint8_t>> payment_id;
+    std::optional<epee::byte_slice> payment_id;
     wire::object(source,
       WIRE_FIELD_ARRAY(spent_outputs, min_spent),
       wire::optional_field("payment_id", std::ref(payment_id)),
@@ -159,10 +161,10 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD(unlock_time),
       WIRE_OPTIONAL_FIELD(height),
       WIRE_FIELD(tx_hash),
-      WIRE_FIELD(is_coinbase)
+      WIRE_FIELD(is_coinbase),
+      WIRE_FIELD(mempool)
     );
 
-    
     if (payment_id && !payment_id->empty())
     {
       if (payment_id->size() == sizeof(crypto::hash8))
@@ -207,19 +209,67 @@ namespace lwsf { namespace internal { namespace rpc
     );
   }
 
+  namespace
+  {
+    // This field is a mess between implementations, this cleans it up a bit
+    struct convert_rct
+    {
+      ringct operator()(const std::nullptr_t&) const noexcept
+      {
+        return ringct{{}, ringct::format::none};
+      }
+
+      ringct operator()(const std::string& source) const
+      {
+        struct ringct_triplet
+        {
+          ringct_triplet() = delete;
+          rct::key commitment;
+          rct::key mask;
+          rct::key amount;
+        };
+        static_assert(sizeof(ringct_triplet) == 96);
+
+        if (source.empty())
+          return ringct{{}, ringct::format::none};
+
+        rct::key out{};
+        if (source == "coinbase") // non-standard, openmonero
+          return ringct{rct::identity(), ringct::format::unencrypted}; 
+        else if (source.size() == sizeof(ringct_triplet) * 2)
+        {
+          ringct_triplet rct{};
+          if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(rct), source))
+            WIRE_DLOG_THROW(wire::error::schema::binary, "Invalid hex for ringct");
+          return ringct{rct.mask, ringct::format::encrypted}; 
+        }
+
+        return ringct{{}, ringct::format::recompute};
+      }
+
+      template<typename T>
+      ringct operator()(const T&) const
+      {
+        WIRE_DLOG_THROW(wire::error::schema::string, "Expected string or null");
+      }
+    };
+  }
+
   void read_bytes(wire::json_reader& source, output& self)
   {
+    wire::basic_value raw_rct{};
     wire::object(source,
       WIRE_FIELD(amount),
       WIRE_FIELD(index),
       WIRE_FIELD(global_index),
       WIRE_OPTIONAL_FIELD(recipient),
-      WIRE_FIELD(rct),
+      wire::optional_field("rct", std::ref(raw_rct)),
       WIRE_FIELD(tx_hash),
       WIRE_FIELD(tx_prefix_hash),
       WIRE_FIELD(public_key),
       WIRE_FIELD(tx_pub_key)
     );
+    self.rct = std::visit(convert_rct{}, raw_rct.value);
   }
 
   void read_bytes(wire::json_reader& source, get_unspent_outs& self)
@@ -232,6 +282,17 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD(per_byte_fee),
       WIRE_FIELD(fee_mask)
     );
+  }
+
+
+  void write_bytes(wire::json_writer& dest, const submit_raw_tx_request& self)
+  {
+    wire::object(dest, WIRE_FIELD(tx));
+  }
+
+  void read_bytes(wire::json_reader& source, submit_raw_tx_response& self)
+  {
+    wire::object(source, WIRE_FIELD(status));
   }
 }}} // lwsf // internal // rpc
 

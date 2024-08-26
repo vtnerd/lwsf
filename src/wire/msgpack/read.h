@@ -115,7 +115,7 @@ namespace wire
     std::string string() override final;
 
     //! \throw wire::exception if next token cannot be read as hex
-    std::vector<std::uint8_t> binary() override final;
+    epee::byte_slice binary() override final;
 
     //! \throw wire::exception if next token cannot be read as hex into `dest`.
     void binary(epee::span<std::uint8_t> dest) override final;

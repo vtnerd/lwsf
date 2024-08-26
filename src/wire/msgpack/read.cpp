@@ -413,11 +413,12 @@ namespace wire
     return std::string{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
   }
 
-  std::vector<std::uint8_t> msgpack_reader::binary()
+  epee::byte_slice msgpack_reader::binary()
   {
     update_tags_remaining();
     const epee::span<const std::uint8_t> bytes = read_binary(remaining_, get_tag());
-    return std::vector<std::uint8_t>{bytes.begin(), bytes.end()};
+    const std::size_t begin = bytes.data() - source_.data();
+    return source_.get_slice(begin, begin + bytes.size());
   }
 
   void msgpack_reader::binary(epee::span<std::uint8_t> dest)

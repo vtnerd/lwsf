@@ -425,22 +425,28 @@ struct WalletListener
  */
 struct Wallet
 {
-    enum class Device {
-        Software = 0,
-        Ledger = 1,
-        Trezor = 2
+    enum Device {
+        Device_Software = 0,
+        Device_Ledger = 1,
+        Device_Trezor = 2
     };
 
-    enum class Status {
-        Ok,
-        Error,
-        Critical
+    enum Status {
+        Status_Ok,
+        Status_Error,
+        Status_Critical
     };
 
-    enum class ConnectionStatus {
-        Disconnected,
-        Connected,
-        WrongVersion
+    enum ConnectionStatus {
+        ConnectionStatus_Disconnected,
+        ConnectionStatus_Connected,
+        ConnectionStatus_WrongVersion
+    };
+
+    enum BackgroundSyncType {
+        BackgroundSync_Off = 0,
+        BackgroundSync_ReusePassword = 1,
+        BackgroundSync_CustomPassword = 2
     };
 
     virtual ~Wallet() = 0;
@@ -938,7 +944,7 @@ struct Wallet
     virtual std::shared_ptr<AddressBook> addressBook() = 0;
     virtual std::shared_ptr<Subaddress> subaddress() = 0;
     virtual std::shared_ptr<SubaddressAccount> subaddressAccount() = 0;
-    virtual void setListener(WalletListener *) = 0;
+    virtual void setListener(std::shared_ptr<WalletListener>) = 0;
     /*!
      * \brief defaultMixin - returns number of mixins used in transactions
      * \return

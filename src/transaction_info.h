@@ -55,13 +55,13 @@ namespace lwsf { namespace internal
     transaction_info& operator=(transaction_info&&) = delete;
 
     virtual Direction direction() const override { return data_->direction; }
-    virtual bool isPending() const override { return confirmations() == 0; }
+    virtual bool isPending() const override { return !data_->height; }
     virtual bool isFailed() const override { return false; }
     virtual bool isCoinbase() const override { return data_->coinbase; }
     virtual uint64_t amount() const override { return data_->amount; }
     virtual uint64_t fee() const override { return data_->fee; }
     virtual uint64_t blockHeight() const override { return data_->height.value_or(0); }
-    virtual std::string description() const override { return data_->description; }
+    virtual std::string description() const override;
     virtual std::set<uint32_t> subaddrIndex() const override { return {}; };
     virtual uint32_t subaddrAccount() const override { return 0; }
     virtual std::string label() const override { return data_->label; }

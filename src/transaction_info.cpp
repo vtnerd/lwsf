@@ -54,17 +54,24 @@ namespace lwsf { namespace internal
 
     transfers_.reserve(data_->spends.size());
     for (const auto& spend : data_->spends)
-      transfers_.emplace_back(spend.amount, spend.address);
+      transfers_.emplace_back(spend.second.amount, spend.second.address);
   }
 
   transaction_info::~transaction_info()
   {}
 
+  std::string transaction_info::description() const
+  {
+    const boost::lock_guard<boost::mutex> lock{wallet_->sync};
+    return data_->description;
+  }
+
   uint64_t transaction_info::confirmations() const
   {
-    const auto block_height = blockHeight();
+    if (!data_->height)
+      return 0;
     const boost::lock_guard<boost::mutex> lock{wallet_->sync};
-    return std::max(wallet_->blockchain_height, block_height) - block_height;
+    return std::max(wallet_->blockchain_height, *data_->height) - *data_->height + 1;
   }
 
   std::string transaction_info::hash() const

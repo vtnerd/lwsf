@@ -30,16 +30,16 @@
 
 #include <boost/variant.hpp>
 #include <ctime>
+#include <optional>
 #include <system_error>
 #include "byte_slice.h"  // monero/contrib/epee/include
 #include "byte_stream.h" // moneor/contrib/epee/include
 #include "common/expect.h"   // monero/src
 #include "crypto/crypto.h"   // monero/src
 #include "ringct/rctTypes.h" // monero/src
+#include "wire/basic_value.h"
 #include "wire/fwd.h"
 #include "wire/json.h"
-
- // Contains code for interact
 
 namespace epee { namespace net_utils
 {
@@ -63,7 +63,7 @@ namespace lwsf { namespace internal { namespace rpc
   inline std::error_code make_error_code(const error value) noexcept
   {
     return std::error_code{int(value), error_category()};
-    }
+  }
 
 
   //! Send `payload` to `client` at uri `endpoint`, and \return payload response
@@ -84,7 +84,7 @@ namespace lwsf { namespace internal { namespace rpc
     F out{};
     error = wire::json::from_bytes(std::move(*result), out);
     if (error)
-      return out;
+      return error;
     return out;
   }
 
@@ -123,8 +123,9 @@ namespace lwsf { namespace internal { namespace rpc
 
     std::optional<bool> generated_locally;
   };
-  inline void read_bytes(const wire::json_reader&, const login_response&)
+  inline void read_bytes(const wire::json_reader&, const login_response&) noexcept
   {}
+
 
   struct daemon_status
   {
@@ -181,6 +182,7 @@ namespace lwsf { namespace internal { namespace rpc
     std::optional<std::uint64_t> height;
     crypto::hash tx_hash;
     bool is_coinbase;
+    bool mempool;
 
     transaction()
       : spent_outputs(),
@@ -191,7 +193,8 @@ namespace lwsf { namespace internal { namespace rpc
         unlock_time(0),
         height(),
         tx_hash{},
-        is_coinbase(false)
+        is_coinbase(false),
+        mempool(false)
     {}
   };
   void read_bytes(wire::json_reader&, transaction&);
@@ -212,11 +215,18 @@ namespace lwsf { namespace internal { namespace rpc
   struct ringct
   {
     ringct() = delete;
-    rct::key commitment;
+
+    enum class format : std::uint8_t
+    {
+      none = 0, //!< Not ringct
+      encrypted,
+      recompute,
+      unencrypted
+    };
+
     rct::key mask;
-    rct::key amount;
+    format type;
   };
-  static_assert(sizeof(ringct) == 96);
 
   struct output
   {
@@ -254,6 +264,24 @@ namespace lwsf { namespace internal { namespace rpc
     std::uint64_t fee_mask;
   };
   void read_bytes(wire::json_reader&, get_unspent_outs&);
+
+
+  struct submit_raw_tx_request
+  {
+    submit_raw_tx_request() = delete;
+    epee::byte_slice tx;
+  };
+  void write_bytes(wire::json_writer&, const submit_raw_tx_request&);
+
+  struct submit_raw_tx_response
+  {
+    submit_raw_tx_response() = delete;
+    static constexpr const char* endpoint() noexcept { return "/submit_raw_tx"; }
+
+    std::string status;
+  };
+  void read_bytes(wire::json_reader&, submit_raw_tx_response&);
+     
 }}} // lwsf // internal // rpc
 
 WIRE_DECLARE_BLOB_NS(lwsf::internal::rpc::ringct);

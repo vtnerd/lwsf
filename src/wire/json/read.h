@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "wire/field.h"
+#include "wire/fwd.h"
 #include "wire/json/base.h"
 #include "wire/read.h"
 #include "wire/traits.h"
@@ -63,6 +64,9 @@ namespace wire
     //! \throw wire::exception if JSON parsing is incomplete.
     void check_complete() const override final;
 
+    //! \throw wire::exception if array, object, or end of stream.
+    basic_value basic(); 
+
     //! \throw wire::exception if next token not a boolean.
     bool boolean() override final;
 
@@ -72,7 +76,7 @@ namespace wire
     //! \throw wire::exception if next token not an unsigned integer.
     std::uintmax_t unsigned_integer() override final;
 
-    //! \throw wire::exception if next token is not an integer encoded as string
+    //! \throw wire::exception if next token is not an integer encoded as string OR unsigned integer
     std::uintmax_t safe_unsigned_integer();
 
     //! \throw wire::exception if next token not a valid real number
@@ -82,7 +86,7 @@ namespace wire
     std::string string() override final;
 
     //! \throw wire::exception if next token cannot be read as hex
-    std::vector<std::uint8_t> binary() override final;
+    epee::byte_slice binary() override final;
 
     //! \throw wire::exception if next token cannot be read as hex into `dest`.
     void binary(epee::span<std::uint8_t> dest) override final;

@@ -29,8 +29,26 @@
 include_directories(.)
 
 # For both the server and admin utility.
-set(monero-lwsf_sources backend.cpp rpc.cpp transaction_history.cpp transaction_info.cpp wallet.cpp wallet_manager.cpp)
-set(monero-lwsf_headers backend.h lwsf_config.h rpc.h transaction_history.h transaction_info.h wallet.h)
+set(monero-lwsf_sources
+  backend.cpp
+  error.cpp
+  pending_transaction.cpp
+  rpc.cpp
+  transaction_history.cpp
+  transaction_info.cpp
+  wallet.cpp
+  wallet_manager.cpp
+)
+set(monero-lwsf_headers
+  backend.h
+  error.h
+  lwsf_config.h
+  pending_transaction.h
+  rpc.h
+  transaction_history.h
+  transaction_info.h
+  wallet.h
+)
   
 add_executable(monero-lwsf dummy_main.cpp ${monero-lwsf_sources} ${monero-lwsf_headers})
 target_link_libraries(monero-lwsf

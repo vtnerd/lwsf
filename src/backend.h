@@ -35,11 +35,13 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <optional>
 #include <type_traits>
 #include <variant>
 #include <vector>
 
+#include "byte_slice.h"      // monero/contrib/epee/include
 #include "common/expect.h"   // moneor/src
 #include "crypto/crypto.h"   // monero/src
 #include "crypto/hash.h"     // monero/src
@@ -70,11 +72,7 @@ namespace lwsf { namespace internal { namespace backend
     crypto::public_key tx_pub;
 
     transfer_out()
-      : address(), amount(0), sender(), secret(), tx_pub{}
-    {}
-
-    explicit transfer_out(const std::uint64_t amount, const crypto::public_key& tx_pub)
-      : address(), amount(amount), sender(), secret(), tx_pub(tx_pub)
+      : address(), amount(0), sender{}, secret(), tx_pub{}
     {}
   };
   WIRE_DECLARE_OBJECT(transfer_out);
@@ -85,19 +83,49 @@ namespace lwsf { namespace internal { namespace backend
     std::uint64_t amount;
     rpc::address_meta recipient;
     std::uint16_t index;
-    crypto::public_key output_pub;
-    rct::key rct_mask;
+    std::optional<rct::key> rct_mask;
+    crypto::public_key tx_pub;
 
-    transfer_in();
-    explicit transfer_in(const rpc::output& source); 
+    transfer_in()
+      : global_index(0),
+        amount(0),
+        recipient{},
+        index(0),
+        rct_mask(),
+        tx_pub{}
+    {}
   };
   WIRE_DECLARE_OBJECT(transfer_in);
-  
+
   struct transaction
   {
-    transaction() = delete;
-    std::vector<transfer_out> spends;
-    std::map<crypto::public_key, transfer_in, memory> receives;
+    transaction()
+      : spends(),
+        receives(),
+        description(),
+        label(),
+        timestamp(),
+        amount(0),
+        fee(0),
+        height(),
+        unlock_time(0),
+        direction(TransactionInfo::Direction::Out),
+        payment_id(),
+        id{},
+        prefix{},
+        coinbase(false)
+    {}
+
+    transaction(transaction&&) = default;
+    transaction(const transaction&) = default;
+    transaction& operator=(transaction&&) = default;
+    transaction& operator=(const transaction&) = default;
+
+    /*! flat_map is used here for faster copies/merging. A single allocation
+      is needed in the copy (done every refresh interval), instead of an
+      allocation per key. */
+    boost::container::flat_map<crypto::key_image, transfer_out, memory> spends;
+    boost::container::flat_map<crypto::public_key, transfer_in, memory> receives; //!< Key is output pub
     std::string description;
     std::string label;
     std::optional<std::time_t> timestamp;
@@ -107,8 +135,6 @@ namespace lwsf { namespace internal { namespace backend
     std::uint64_t unlock_time;
     TransactionInfo::Direction direction;
     std::variant<std::nullptr_t, crypto::hash8, crypto::hash> payment_id;
-    std::optional<crypto::secret_key> tx_secret;
-    crypto::public_key pub;
     crypto::hash id;
     crypto::hash prefix;
     bool coinbase;
@@ -132,26 +158,30 @@ namespace lwsf { namespace internal { namespace backend
     NetworkType type;
     keypair view;
     keypair spend;
+    bool generated_locally;
   };
   WIRE_DECLARE_OBJECT(account);
 
   struct wallet
   {
+    std::shared_ptr<WalletListener> listener;
     rpc::http_client client;
     account primary;
-    std::error_code status;
-    std::atomic<std::chrono::steady_clock::time_point::rep> last_sync;
+    std::atomic<std::chrono::steady_clock::time_point::duration::rep> last_sync;
     std::uint64_t scan_height;
     std::uint64_t blockchain_height;
+    std::uint64_t per_byte_fee;
+    std::uint64_t fee_mask;
     mutable boost::mutex sync;
-    const bool generated_locally;
 
-    explicit wallet(bool generated_locally);
+    wallet();
 
     expect<epee::byte_slice> to_bytes() const;
-    expect<void> from_bytes(epee::byte_slice source);
+    std::error_code from_bytes(epee::byte_slice source);
 
     bool login() const;
-    void refresh(bool mandatory = false);
+    std::error_code refresh(bool mandatory = false);
+
+    std::error_code send_tx(epee::byte_slice tx_bytes);
   };
 }}} // lwsf // internal // backend
