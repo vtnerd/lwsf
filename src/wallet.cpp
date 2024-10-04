@@ -39,11 +39,14 @@
 #include <sodium/crypto_pwhash_argon2id.h>
 #include <sodium/randombytes.h>
 #include <sodium/crypto_aead_chacha20poly1305.h>
+#include <string_view>
 #include "backend.h"
 #include "error.h"
 #include "hex.h"       // monero/contrib/epee/include
 #include "lwsf_config.h"
+#include "net/net_parse_helpers.h" // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
+#include "net/socks.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
 #include "transaction_history.h"
 #include "wire.h"
@@ -281,46 +284,114 @@ namespace lwsf { namespace internal
 #else
    #error atomic_file_write not implemented for this platform
 #endif
+
+    struct unknown_exception : std::exception
+    {
+      unknown_exception() noexcept
+        : std::exception()
+      {}
+
+      const char* what() const noexcept override { return "unknown error"; }
+    };
+
+    constexpr boost::chrono::nanoseconds to_boost(const std::chrono::nanoseconds source) noexcept
+    {
+      static_assert(
+        std::is_same<boost::chrono::nanoseconds::rep, std::chrono::nanoseconds::rep>{}
+      );
+      return boost::chrono::nanoseconds{source.count()};
+    }
   } // anonymous
 
-  void wallet::set_error(const std::error_code status)
+  bool wallet::set_error(const std::error_code status)
   {
-    const boost::lock_guard<boost::mutex> lock{sync_};
+    const boost::lock_guard<boost::mutex> lock{error_sync_};
     status_ = status;
     exception_error_.clear();
+    return !status_;
   }
 
   void wallet::set_critical(const std::exception& e)
   {
-    const boost::lock_guard<boost::mutex> lock{sync_};
+    const boost::lock_guard<boost::mutex> lock{error_sync_};
     exception_error_ = e.what();
     status_.clear();
   }
 
-  wallet::wallet(create_tag, NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data)
-    : data_(std::move(data)),
+  void wallet::stop_refresh_loop()
+  {
+    {
+      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+      thread_state_ = state::stop;
+    }
+    refresh_notify_.notify_all();
+    if (thread_.joinable())
+      thread_.join();
+  }
+
+  void wallet::refresh_loop()
+  {
+    try
+    {
+      boost::unique_lock<boost::mutex> lock{refresh_sync_};
+      while (thread_state_ != state::stop)
+      {
+        const bool mandatory_refresh = mandatory_refresh_;
+        mandatory_refresh_ = false;
+
+        if (thread_state_ == state::run || mandatory_refresh)
+        {
+          // refresh has strong exception guarantee - never in partial state.
+          lock.unlock();
+          set_error(data_->refresh(mandatory_refresh));
+          lock.lock();
+        }
+        else if (thread_state_ == state::skip_once)
+          thread_state_ = state::run;
+
+        // check while holding lock and before a wait call
+        if (thread_state_ == state::stop)
+          return;
+
+        refresh_notify_.wait_for(lock, to_boost(config::refresh_interval));
+      }
+    }
+    catch (const std::exception& e)
+    {
+      set_critical(e);
+    }
+    catch (...) 
+    {
+      set_critical(unknown_exception{});
+    }
+  }
+
+  wallet::wallet(create_tag, NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
+    : data_(std::make_shared<backend::wallet>()),
       filename_(std::move(filename)),
       password_(std::move(password)),
       exception_error_(),
       status_(),
       thread_(),
       iterations_(kdf_rounds),
-      sync_()
+      refresh_notify_(),
+      error_sync_(),
+      refresh_sync_(),
+      thread_state_(state::stop),
+      mandatory_refresh_(false)
   {
-    if (!data_)
-      throw std::logic_error{"Unexpected nullptr in internal::wallet"};
     if (sodium_init() < 0)
       throw std::runtime_error{"Failed to initialize libsodium"};
 
     // use libsodium random, more portable
     crypto::secret_key recovery;
     randombytes_buf(std::addressof(unwrap(unwrap(recovery))), sizeof(recovery));
-    
+
     cryptonote::account_base base{};
     base.generate(recovery, true);
 
     const auto& keys = base.get_keys();
-   
+
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     data_->primary.view.sec = keys.m_view_secret_key;
     data_->primary.view.pub = keys.m_account_address.m_view_public_key;
@@ -331,7 +402,7 @@ namespace lwsf { namespace internal
     data_->primary.generated_locally = true;
     data_->primary.type = nettype;
 
-    store("");
+    store(std::string{});
   }
 
   wallet::wallet(open_tag, NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data)
@@ -342,16 +413,20 @@ namespace lwsf { namespace internal
       status_(),
       thread_(),
       iterations_(kdf_rounds),
-      sync_()
+      refresh_notify_(),
+      error_sync_(),
+      refresh_sync_(),
+      thread_state_(state::stop),
+      mandatory_refresh_(false)
   {
     if (!data_)
-      throw std::logic_error{"Unexpected nullptr in internal::wallet"};
+      throw std::logic_error{"backend::wallet cannot be null"};
 
     try
     {
-      epee::byte_slice file = try_load(filename + ".new");
+      epee::byte_slice file = try_load(filename_ + ".new");
       if (file.empty())
-        file = try_load(filename);
+        file = try_load(filename_);
 
       if (!file.empty())
       {
@@ -360,17 +435,20 @@ namespace lwsf { namespace internal
         {
           epee::byte_slice payload = contents.get_payload(password_);
           if (!payload.empty())
-            status_ = data_->from_bytes(std::move(payload));
+          {
+            if (!(status_ = data_->from_bytes(std::move(payload))))
+            {
+              // lock not needed; data_ was created and unique to us
+              if (nettype != data_->primary.type)
+                throw std::runtime_error{"Wallet file NetworkType does not match requested"};                
+            }
+          }
           else
-            status_ = error::crypto_failure;
+            status_ = error::unsupported_format;
         }
       }
       else
         status_ = error::read_failure;
-    }
-    catch (const std::system_error& e)
-    {
-      status_ = e.code();
     }
     catch (const std::exception& e)
     {
@@ -379,8 +457,7 @@ namespace lwsf { namespace internal
     }
   }
 
-  wallet::~wallet()
-  {}
+  wallet::~wallet() { stop_refresh_loop(); }
 
   int wallet::status() const
   {
@@ -400,7 +477,7 @@ namespace lwsf { namespace internal
 
   void wallet::statusWithErrorString(int& status, std::string& errorString) const
   {
-    const boost::lock_guard<boost::mutex> lock{sync_};
+    const boost::lock_guard<boost::mutex> lock{error_sync_};
     if (!exception_error_.empty())
     {
       status = Status_Critical;
@@ -446,6 +523,12 @@ namespace lwsf { namespace internal
     return epee::to_hex::string(epee::as_byte_span(data_->primary.spend.pub));
   }
 
+  void wallet::stop()
+  {
+    const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+    thread_state_ = state::skip_once;
+  }
+
   bool wallet::store(const std::string& path)
   {
     const std::string& real_path = path.empty() ? filename_ : path;
@@ -487,17 +570,14 @@ namespace lwsf { namespace internal
       else
         status = payload.error(); 
     }
-    catch (const std::system_error& e)
-    {
-      status = e.code();
-    }
     catch (const std::exception& e)
     {
       set_critical(e);
+      return false;
     }
 
     // this will clear any existing errors
-    set_error(status); 
+    return set_error(status); 
   }
 
   bool wallet::init(const std::string &daemon_address, uint64_t, const std::string &daemon_username, const std::string &daemon_password, bool use_ssl, bool light_wallet, const std::string &proxy_address)
@@ -505,26 +585,67 @@ namespace lwsf { namespace internal
     if (!light_wallet)
       throw std::logic_error{"Only light_wallets are supported with this instance"};
 
-    const auto split = daemon_address.rfind(':');
-    if (!setProxy(proxy_address))
-      return false; // set_status already set
-
-    std::string host = daemon_address.substr(0, split);
-    std::string port = use_ssl ? "443" : "80";
-    if (split != std::string::npos)
-      port = daemon_address.substr(split + 1);
-
-    epee::net_utils::http::login login{daemon_username, daemon_password};
-    const epee::net_utils::ssl_options_t options{
-      use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_disabled : epee::net_utils::ssl_support_t::e_ssl_support_enabled
+    // on exceptions, reset state
+    struct on_throw
+    {
+      void operator()(wallet* self) const
+      {
+        if (self)
+        {
+          self->stop_refresh_loop();
+          self->data_->client.disconnect();
+        }
+      }
     };
 
-    data_->client.set_server(std::move(host), std::move(port), std::move(login), std::move(options));
+    try
+    {
+      std::unique_ptr<wallet, on_throw> rollback{this};
+      stop_refresh_loop();
+      data_->client.disconnect();
 
-    //! \TODO Login!
+      if (!setProxy(proxy_address))
+        return false;
+
+      epee::net_utils::http::url_content url{};
+      if (!epee::net_utils::parse_url(daemon_address, url))
+        throw std::runtime_error{"Invalid LWS URL: " + daemon_address};
+      if (!url.m_uri_content.m_path.empty())
+        throw std::runtime_error{"LWS URL contains path (unsupported)"};
+
+      if (url.schema == "https")
+        use_ssl = true;
+
+      epee::net_utils::http::login login{daemon_username, daemon_password};
+      const epee::net_utils::ssl_options_t options{
+        use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_disabled : epee::net_utils::ssl_support_t::e_ssl_support_enabled
+      };
+
+      data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
+      if (!connectToDaemon())
+        return false;
+
+      thread_state_ = state::run;
+      thread_ = boost::thread{[this] () { this->refresh_loop(); }};
+      rollback.release();
+    }
+    catch (const std::exception& e)
+    {
+      set_critical(e);
+      return false;
+    }
+
     return true;
   }
 
+  void wallet::setRefreshFromBlockHeight(uint64_t refresh_from_block_height) override
+  {
+    try { set_error(data_->restore_height(refresh_from_block_height)); }
+    catch (const std::exception& e)
+    {
+      set_critical(e);
+    } 
+  }
 
   uint64_t wallet::getRefreshFromBlockHeight() const
   {
@@ -534,9 +655,28 @@ namespace lwsf { namespace internal
 
   bool wallet::connectToDaemon()
   {
+    struct on_throw
+    {
+      void operator()(wallet* self) const
+      {
+        if (self)
+          self->data_->client.disconnect();
+      }
+    };
+
     if (data_->client.is_connected())
       return true;
-    return data_->client.connect(config::connect_timeout);
+
+    std::unique_ptr<wallet, on_throw> disconnect{this};
+    if (data_->client.connect(config::connect_timeout))
+    {
+      const std::error_code status = data_->login();
+      if (!status)
+        disconnect.reset();
+      return set_error(status);
+    }
+    set_error(error::connect_failure);
+    return false;
   }
 
   Wallet::ConnectionStatus wallet::connected() const
@@ -551,8 +691,7 @@ namespace lwsf { namespace internal
     if (!endpoint)
     {
       data_->client.set_connector(null_connector{});
-      set_error(endpoint.error());
-      return false;
+      return set_error(endpoint.error());
     }
     data_->client.set_connector(net::socks::connector{std::move(*endpoint)});
     return true;
@@ -570,6 +709,35 @@ namespace lwsf { namespace internal
   uint64_t wallet::daemonBlockChainTargetHeight() const
   { return blockChainHeight(); }
 
+  void wallet::startRefresh()
+  {
+    {
+      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+      thread_state_ = state::run;
+    }
+    refresh_notify_.notify_all();
+  }
+
+  void wallet::pauseRefresh()
+  {
+    const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+    thread_state_ = state::paused;
+  }
+
+  bool wallet::refresh()
+  {
+    return set_error(data_->refresh(true));
+  }
+
+  void wallet::refreshAsync()
+  {
+    {
+      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+      mandatory_refresh_ = true;
+    }
+    refresh_notify_.notify_all();
+  }
+
   uint64_t wallet::estimateTransactionFee(const std::vector<std::pair<std::string, uint64_t>> &destinations,
                                             PendingTransaction::Priority priority) const
   {
@@ -580,7 +748,6 @@ namespace lwsf { namespace internal
   {
     return std::make_shared<transaction_history>(data_);
   }
-
 
   void wallet::setListener(std::shared_ptr<WalletListener> listener)
   {

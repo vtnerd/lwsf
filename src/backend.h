@@ -70,9 +70,10 @@ namespace lwsf { namespace internal { namespace backend
     rpc::address_meta sender;
     std::optional<crypto::secret_key> secret;
     crypto::public_key tx_pub;
+    crypto::public_key output_pub;
 
     transfer_out()
-      : address(), amount(0), sender{}, secret(), tx_pub{}
+      : address(), amount(0), sender{}, secret(), tx_pub{}, outpub_pub{}
     {}
   };
   WIRE_DECLARE_OBJECT(transfer_out);
@@ -154,6 +155,7 @@ namespace lwsf { namespace internal { namespace backend
     account() = delete;
     std::string address; //!> not serialized, recovered on read_bytes
     boost::container::flat_map<crypto::hash, std::shared_ptr<transaction>, memory> txes;
+    std::uint64_t scan_height;
     std::uint64_t restore_height;
     NetworkType type;
     keypair view;
@@ -168,7 +170,6 @@ namespace lwsf { namespace internal { namespace backend
     rpc::http_client client;
     account primary;
     std::atomic<std::chrono::steady_clock::time_point::duration::rep> last_sync;
-    std::uint64_t scan_height;
     std::uint64_t blockchain_height;
     std::uint64_t per_byte_fee;
     std::uint64_t fee_mask;
@@ -176,11 +177,19 @@ namespace lwsf { namespace internal { namespace backend
 
     wallet();
 
+    //! Serializate `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
+
+    //! De-serialize `this` from msgpack. Locks+replaces contents.
     std::error_code from_bytes(epee::byte_slice source);
 
-    bool login() const;
+    //! Attempt
+    std::error_code login();
+
+    //! Refreshes txes information. Strong exception guarantee. Locks contents.
     std::error_code refresh(bool mandatory = false);
+
+    std::error_code restore_height(const std::uint64_t height);
 
     std::error_code send_tx(epee::byte_slice tx_bytes);
   };

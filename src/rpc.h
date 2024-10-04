@@ -121,10 +121,9 @@ namespace lwsf { namespace internal { namespace rpc
     login_response() = delete;
     static constexpr const char* endpoint() noexcept { return "/login"; }
 
-    std::optional<bool> generated_locally;
+    std::optional<std::uint64_t> start_height;
   };
-  inline void read_bytes(const wire::json_reader&, const login_response&) noexcept
-  {}
+  void read_bytes(wire::json_reader&, login_response&);
 
 
   struct daemon_status
@@ -264,6 +263,15 @@ namespace lwsf { namespace internal { namespace rpc
     std::uint64_t fee_mask;
   };
   void read_bytes(wire::json_reader&, get_unspent_outs&);
+
+
+  struct import_response
+  {
+    import_response() = delete;
+    std::optional<uint64_string> import_fee;
+    bool request_fulfilled;
+  };
+  void read_bytes(wire::json_reader&, import_response&);
 
 
   struct submit_raw_tx_request

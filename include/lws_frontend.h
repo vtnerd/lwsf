@@ -416,7 +416,7 @@ struct WalletListener
     /**
      * @brief If the listener is created before the wallet this enables to set created wallet object
      */
-    virtual void onSetWallet(Wallet * wallet) { (void)wallet; };
+    virtual void onSetWallet(std::shared_ptr<Wallet> wallet) { (void)wallet; };
 };
 
 
@@ -1129,8 +1129,8 @@ struct WalletManager
      * \param  listener       Wallet listener to set to the wallet after creation
      * \return                Wallet instance (Wallet::status() needs to be called to check if opened successfully)
      */
-    virtual std::unique_ptr<Wallet> openWallet(const std::string &path, const std::string &password, NetworkType nettype, uint64_t kdf_rounds = 1, std::shared_ptr<WalletListener> listener = nullptr) = 0;
-    std::unique_ptr<Wallet> openWallet(const std::string &path, const std::string &password, bool testnet = false)     // deprecated
+    virtual std::shared_ptr<Wallet> openWallet(const std::string &path, const std::string &password, NetworkType nettype, uint64_t kdf_rounds = 1, std::shared_ptr<WalletListener> listener = nullptr) = 0;
+    std::shared_ptr<Wallet> openWallet(const std::string &path, const std::string &password, bool testnet = false)     // deprecated
     {
         return openWallet(path, password, testnet ? TESTNET : MAINNET);
     }

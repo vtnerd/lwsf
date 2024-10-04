@@ -71,7 +71,8 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_FIELD(amount),
         WIRE_FIELD(sender),
         WIRE_OPTIONAL_FIELD(secret),
-        WIRE_FIELD(tx_pub)
+        WIRE_FIELD(tx_pub),
+        WIRE_FIELD(output_pub)
       );
     }
 
@@ -138,8 +139,9 @@ namespace lwsf { namespace internal { namespace backend
     void map_account(F& format, T& self)
     {
       wire::object(format,
-        WIRE_FIELD(restore_height),
         wire::field("txes", wire::trusted_array(std::ref(self.txes))),
+        WIRE_FIELD(scan_height),
+        WIRE_FIELD(restore_height),
         WIRE_FIELD(type),
         WIRE_FIELD(view),
         WIRE_FIELD(spend),
@@ -252,24 +254,24 @@ namespace lwsf { namespace internal { namespace backend
       update_output(out->receives.try_emplace(source.public_key).first->second, source, view_key);
     }
 
-    std::vector<std::shared_ptr<transaction>> merge_response(wallet& self, const rpc::get_address_txs& source)
+    std::vector<std::shared_ptr<transaction>>
+      merge_response(wallet& self, const rpc::get_address_txs& source, const rpc::get_unspent_outs& unspents)
     {
       std::vector<std::shared_ptr<transaction>> out;
-
-      self.scan_height = source.scanned_block_height;
-      self.blockchain_height = source.blockchain_height;
-      self.primary.restore_height = source.start_height;
 
       /* Backend server could remove or modify txes (rescan or bug fix); the
         easiest way to handle this is to start a new copy of the txes. This is
         what the existing (JS) MyMonero frontend does. This has the benefit
         of allowing `shared_ptr<transaction>` objects to be "given away" to
-        other parts of the frontend without a mutex. */
+        other parts of the frontend without a mutex.
 
-      const auto existing_txes = std::move(self.primary.txes);
-      self.primary.txes.clear();
-      self.primary.txes.reserve(
-        std::max(existing_txes.size(), source.transactions.size())
+        ADDITIONALLY, the strong exception guarantee is provided by the
+        `refresh()` method; the wallet is never in a partial-state. Swapping
+        the transactions at the end helps with this guarantee. */
+
+      boost::container::flat_map<crypto::hash, std::shared_ptr<transaction>, memory> updated_txes;
+      updated_txes.reserve(
+        std::max(self.primary.txes.size(), source.transactions.size())
       );
 
       /* The frontend will know about the spend first, iff the frontend was
@@ -277,17 +279,16 @@ namespace lwsf { namespace internal { namespace backend
         spend secret, even if the backend doesn't acknowledge it, otherwise the
         secret information will be lost in many situations. If the spend
         never gets confirmed, this will just sit in the transaction list. */
-      for (const auto& tx : existing_txes)
+      for (const auto& tx : self.primary.txes)
       {
         if (tx.second)
         {
-          bool copy = false;
           for (const auto& spend : tx.second->spends)
           {
             if (spend.second.secret)
             {
-              self.primary.txes.emplace_hint(
-                self.primary.txes.end(), tx.first, std::make_shared<transaction>(*tx.second)
+              updated_txes.emplace_hint(
+                updated_txes.end(), tx.first, std::make_shared<transaction>(*tx.second)
               );
               break; // inner loop
             }
@@ -297,42 +298,39 @@ namespace lwsf { namespace internal { namespace backend
 
       for (const auto& tx : source.transactions)
       {
-        auto inserted = self.primary.txes.try_emplace(tx.tx_hash, nullptr);
+        auto inserted = updated_txes.try_emplace(tx.tx_hash, nullptr);
         if (inserted.second)
         {
-          const auto existing = existing_txes.find(tx.tx_hash);
-          try
-          {
-            if (existing != existing_txes.end() && existing->second)
-              inserted.first->second = std::make_shared<transaction>(*existing->second);
-            else
-              inserted.first->second = std::make_shared<transaction>();
-          }
-          catch (...)
-          {
-            self.primary.txes.erase(inserted.first);
-            throw;
-          }
+          const auto existing = self.primary.txes.find(tx.tx_hash);
+          if (existing != self.primary.txes.end() && existing->second)
+            inserted.first->second = std::make_shared<transaction>(*existing->second);
+          else
+            inserted.first->second = std::make_shared<transaction>();
 
-          if (existing != existing_txes.end())
+          if (existing != self.primary.txes.end())
             out.push_back(inserted.first->second);
         }
         update_tx(self.primary, *inserted.first->second, tx);
       }
 
-      return out;
-    }
-
-    void merge_response(wallet& self, const rpc::get_unspent_outs& source)
-    {
-      self.per_byte_fee = source.per_byte_fee;
-      self.fee_mask = source.fee_mask;
-      for (const auto& output : source.outputs)
+      for (const auto& output : unspents.outputs)
       {
-        auto iter = self.primary.txes.find(output.tx_hash);
-        if (iter != self.primary.txes.end())
+        auto iter = updated_txes.find(output.tx_hash);
+        if (iter != updated_txes.end())
           merge_output(iter->second, output, self.primary.view.sec);
       } 
+
+      // don't touch `self` until end to provide strong exception guarantee
+      self.primary.txes.swap(updated_txes);
+
+      self.blockchain_height = source.blockchain_height;
+      self.primary.restore_height = source.start_height;
+      self.primary.scan_height = source.scanned_block_height;
+
+      self.per_byte_fee = unspents.per_byte_fee;
+      self.fee_mask = unspents.fee_mask;
+
+      return out;
     }
   } // anonymous
 
@@ -355,8 +353,8 @@ namespace lwsf { namespace internal { namespace backend
       client(),
       primary{},
       last_sync(0),
-      scan_height(0),
       blockchain_height(0),
+      fee_mask(0),
       sync()
   {}
 
@@ -374,12 +372,43 @@ namespace lwsf { namespace internal { namespace backend
 
   std::error_code wallet::from_bytes(epee::byte_slice source)
   {
+    /* The move call shouldn't throw an exception. So either the entire
+      contents of the file get loaded, or the wallet remains unchanged. */
+
+    account reload{};
+    std::error_code status = wire::msgpack::from_bytes(std::move(source), reload);
+    if (!status)
+    {
+      const boost::lock_guard<boost::mutex> lock{sync};
+      primary = std::move(reload);
+    }
+    return status;
+  }
+
+  std::error_code wallet::login()
+  {
     const boost::lock_guard<boost::mutex> lock{sync};
-    return wire::msgpack::from_bytes(std::move(source), primary);
+
+    const rpc::login_request login{
+      primary.address, primary.view.sec, true, primary.generated_locally
+    };
+
+    const auto response = rpc::invoke<rpc::login_response>(client, login);
+    if (!response)
+      return response.error();
+
+    if (response->start_height)
+      primary.restore_height = *response->start_height;
+
+    return {};
   }
 
   std::error_code wallet::refresh(const bool mandatory)
   {
+    /* Remember that this function provides the strong exception guarantee.
+      The state of the wallet should always be valid and never in a partially
+      updated state. */
+
     if (!mandatory)
     {
       const auto now = std::chrono::steady_clock::now();
@@ -391,21 +420,23 @@ namespace lwsf { namespace internal { namespace backend
     }
 
     expect<rpc::get_unspent_outs> outs_response{common_error::kInvalidArgument};
+
+    boost::unique_lock<boost::mutex> lock{sync};
     const rpc::login login{primary.address, primary.view.sec};
+    lock.unlock();
+
     const auto txs_response = rpc::invoke<rpc::get_address_txs>(client, login);
     if (txs_response)
       outs_response = rpc::invoke<rpc::get_unspent_outs>(client, login);
-
-    boost::unique_lock<boost::mutex> lock{sync};
 
     if (!txs_response)
       return txs_response.error();
     if (!outs_response)
       return outs_response.error();
 
-    const std::uint64_t orig_scan_height = scan_height;
-    const auto new_txes = merge_response(*this, *txs_response);
-    merge_response(*this, *outs_response);
+    lock.lock();
+    const std::uint64_t orig_scan_height = primary.scan_height;
+    const auto new_txes = merge_response(*this, *txs_response, *outs_response);
     last_sync = std::chrono::steady_clock::now().time_since_epoch().count();
 
     if (!listener)
@@ -413,15 +444,17 @@ namespace lwsf { namespace internal { namespace backend
 
     // Call listener functions without holding lock, in case a call is made
     // back into the library.
-    const std::uint64_t new_scan_height = std::max(orig_scan_height, scan_height);
+    const std::uint64_t new_scan_height =
+      std::max(orig_scan_height, primary.scan_height);
+    const std::shared_ptr<WalletListener> listener_copy = listener;
     lock.unlock();
 
-    listener->refreshed();
+    listener_copy->refreshed();
     if (!new_txes.empty())
-      listener->updated();
+      listener_copy->updated();
 
     for (std::uint64_t i = orig_scan_height; i < new_scan_height; ++i)
-      listener->newBlock(i);
+      listener_copy->newBlock(i);
 
     for (const auto& tx : new_txes)
     {
@@ -429,12 +462,12 @@ namespace lwsf { namespace internal { namespace backend
       if (tx->direction == TransactionInfo::Direction::In)
       {
         if (tx->height)
-          listener->moneyReceived(txid, tx->amount);
+          listener_copy->moneyReceived(txid, tx->amount);
         else
-          listener->unconfirmedMoneyReceived(txid, tx->amount);
+          listener_copy->unconfirmedMoneyReceived(txid, tx->amount);
       }
       else
-        listener->moneySpent(txid, tx->amount);
+        listener_copy->moneySpent(txid, tx->amount);
     }
 
     return {};

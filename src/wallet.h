@@ -30,6 +30,8 @@
 
 #include "lws_frontend.h"
 
+#include <atomic>
+#include <boost/thread/condition_variable.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/thread.hpp>
 #include <memory>
@@ -47,6 +49,8 @@ namespace internal
   //! \TODO Mark final when completely implemented
   class wallet : public lwsf::Wallet
   {
+    enum class state : std::uint8_t { stop = 0, paused, skip_once, run };
+
     const std::shared_ptr<backend::wallet> data_;
     const std::string filename_;
     std::string password_;
@@ -54,16 +58,23 @@ namespace internal
     std::error_code status_;
     boost::thread thread_;
     const std::uint64_t iterations_;
-    mutable boost::mutex sync_;
+    boost::condition_variable refresh_notify_;
+    mutable boost::mutex error_sync_;
+    boost::mutex refresh_sync_;
+    state thread_state_;
+    bool mandatory_refresh_;
 
-    void set_error(const std::error_code status);
+    bool set_error(std::error_code status);
     void set_critical(const std::exception& e);
+
+    void stop_refresh_loop();
+    void refresh_loop();
 
   public:
     struct create_tag{};
     struct open_tag{};
 
-    wallet(create_tag, NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data);
+    wallet(create_tag, NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds);
     wallet(open_tag, NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data);
 
     wallet(const wallet&) = delete;
@@ -142,7 +153,7 @@ namespace internal
     /*!
      * \brief stop - interrupts wallet refresh() loop once (doesn't stop background refresh thread)
      */
-    virtual void stop() = 0;
+    virtual void stop() override;
 
     /*!
      * \brief store - stores wallet to file.
@@ -188,7 +199,7 @@ namespace internal
     *
     * \param refresh_from_block_height - blockchain start height
     */
-    virtual void setRefreshFromBlockHeight(uint64_t refresh_from_block_height) = 0;
+    virtual void setRefreshFromBlockHeight(uint64_t refresh_from_block_height) override;
 
    /*!
     * \brief getRestoreHeight - get wallet creation height
@@ -329,22 +340,22 @@ namespace internal
    /**
     * @brief StartRefresh - Start/resume refresh thread (refresh every 10 seconds)
     */
-    virtual void startRefresh() = 0;
+    virtual void startRefresh() override;
    /**
     * @brief pauseRefresh - pause refresh thread
     */
-    virtual void pauseRefresh() = 0;
+    virtual void pauseRefresh() override;
 
     /**
      * @brief refresh - refreshes the wallet, updating transactions from daemon
      * @return - true if refreshed successfully;
      */
-    virtual bool refresh() = 0;
+    virtual bool refresh() override;
 
     /**
      * @brief refreshAsync - refreshes wallet asynchronously.
      */
-    virtual void refreshAsync() = 0;
+    virtual void refreshAsync() override;
 
     /**
      * @brief rescanBlockchain - rescans the wallet, updating transactions from daemon

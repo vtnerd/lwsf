@@ -109,13 +109,18 @@ namespace lwsf
      * \return                Wallet instance (Wallet::status() needs to be called to check if opened successfully)
      */
 
-      std::unique_ptr<Wallet> openWallet(const std::string &path, const std::string &password, NetworkType nettype, uint64_t kdf_rounds, std::shared_ptr<WalletListener> listener) override
+      std::shared_ptr<Wallet> openWallet(const std::string &path, const std::string &password, NetworkType nettype, uint64_t kdf_rounds, std::shared_ptr<WalletListener> listener) override
       {
-        auto back = std::make_shared<backend::wallet>();
-        back->listener = std::move(listener);
-        return std::make_unique<wallet>(
-          wallet::open_tag{}, nettype, path, password, kdf_rounds, std::move(back)
+        auto data = std::make_shared<backend::wallet>();
+        data->listener = std::move(listener);
+        auto out = std::make_shared<wallet>(
+          wallet::open_tag{}, nettype, path, password, kdf_rounds, data
         );
+
+        // wallet file should be fully loaded in construction of `wallet`.
+        if (data->listener)
+          data->listener->onSetWallet(out);
+        return out;
       }
 
     /*!

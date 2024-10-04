@@ -119,6 +119,11 @@ namespace lwsf { namespace internal { namespace rpc
     );
   }
 
+  void read_bytes(wire::json_reader& source, login_response& self)
+  {
+    wire::object(source, WIRE_OPTIONAL_FIELD(start_height));
+  }
+
   void read_bytes(wire::json_reader& source, uint64_string& dest)
   {
     dest = uint64_string(wire::integer::cast_unsigned<std::uint64_t>(source.safe_unsigned_integer()));
@@ -281,6 +286,15 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD_ARRAY(outputs, min_output_size),
       WIRE_FIELD(per_byte_fee),
       WIRE_FIELD(fee_mask)
+    );
+  }
+
+
+  void read_bytes(wire::json_reader& source, import_response& self)
+  {
+    wire::object(source,
+      WIRE_OPTIONAL_FIELD(import_fee),
+      WIRE_FIELD(request_fulfilled)
     );
   }
 
