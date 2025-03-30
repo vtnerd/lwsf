@@ -1,21 +1,20 @@
-// Copyright (c) 2024, The Monero Project
-// 
+// Copyright (c) 2022, The Monero Project
 // All rights reserved.
-// 
+//
 // Redistribution and use in source and binary forms, with or without modification, are
 // permitted provided that the following conditions are met:
-// 
+//
 // 1. Redistributions of source code must retain the above copyright notice, this list of
 //    conditions and the following disclaimer.
-// 
+//
 // 2. Redistributions in binary form must reproduce the above copyright notice, this list
 //    of conditions and the following disclaimer in the documentation and/or other
 //    materials provided with the distribution.
-// 
+//
 // 3. Neither the name of the copyright holder nor the names of its contributors may be
 //    used to endorse or promote products derived from this software without specific
 //    prior written permission.
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
 // MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -28,35 +27,38 @@
 
 #pragma once
 
-#include <memory>
-#include <unordered_map>
-#include <vector>
-#include "crypto/hash.h"            // monero/src
-#include "wallet/api/wallet2_api.h" // monero/src
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <variant>
 
-namespace lwsf { namespace internal
+#include "wire/fwd.h"
+
+namespace wire
 {
-  namespace backend { class wallet; }
-  class transaction_history : public Monero::TransactionHistory
+  /*! Can hold any non-recursive value. Implements optional field concept
+    requirements. If used in a `optional_field`, the `nullptr` type/value
+    determines whether the field name is omitted or present in an object. If used
+    in a `field` (required), the field name is always present in the object, and
+    the value could be `null`/`nil`. */
+  struct basic_value
   {
-    const std::shared_ptr<backend::wallet> data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
+    using variant_type =
+      std::variant<std::nullptr_t, bool, std::uintmax_t, std::intmax_t, double, std::string>;
+    
+    variant_type value;
 
-  public:
-    explicit transaction_history(std::shared_ptr<backend::wallet> data);
+    // concept requirements for optional fields
 
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
+    explicit operator bool() const noexcept { return value != variant_type{nullptr}; }
+    basic_value& emplace() noexcept { return *this; }
 
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
-    virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
+    basic_value& operator*() noexcept { return *this; }
+    const basic_value& operator*() const noexcept { return *this; }
+
+    void reset();
   };
-}} // lwsf // internal
+
+  void read_bytes(reader& source, basic_value& dest);
+  void write_bytes(writer& dest, const basic_value& source);
+} // wire

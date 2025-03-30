@@ -40,30 +40,97 @@ namespace
       return epee::to_hex::string(epee::as_byte_span(source));
     }
 
-    std::string operator()(const std::nullptr_t) const { return {}; }
+    std::string operator()(const lwsf::internal::rpc::empty&) const { return {}; }
   };
 }
 
 namespace lwsf { namespace internal
 {
-  transaction_info::transaction_info(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<backend::transaction> data)
-    : wallet_(std::move(wallet)), data_(std::move(data)), transfers_()
+  void transaction_info::update_transfers()
   {
-    if (!wallet_ || !data_)
-      throw std::logic_error{"internal::transaction_info cannot be given nullptr"};
-
+    transfers_.clear();
     transfers_.reserve(data_->spends.size());
     for (const auto& spend : data_->spends)
       transfers_.emplace_back(spend.second.amount, spend.second.address);
   }
 
+  transaction_info::transaction_info(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<const backend::transaction> data)
+    : wallet_(std::move(wallet)), data_(std::move(data)), transfers_()
+  {
+    if (!wallet_ || !data_)
+      throw std::invalid_argument{"lwsf::internal::transaction_info cannot be given nullptr"};
+    update_transfers();
+  }
+
   transaction_info::~transaction_info()
   {}
+
+  void transaction_info::update(std::shared_ptr<const backend::transaction> data)
+  {
+    if (!data)
+      throw std::invalid_argument{"lwsf::internal::transaction_info::update cannot be given nullptr"};
+    data_ = std::move(data);
+    update_transfers();
+  }
 
   std::string transaction_info::description() const
   {
     const boost::lock_guard<boost::mutex> lock{wallet_->sync};
     return data_->description;
+  }
+
+  std::set<std::uint32_t> transaction_info::subaddrIndex() const
+  {
+    std::set<std::uint32_t> out;
+    const std::uint32_t major = subaddrAccount();
+
+    for (const auto& receive : data_->receives)
+      out.insert(receive.second.recipient.min_i);
+
+    for (const auto& spend : data_->spends)
+      out.insert(spend.second.sender.min_i);
+
+    return out;
+  }
+
+  std::uint32_t transaction_info::subaddrAccount() const
+  {
+    if (data_->direction == Direction_In)
+    {
+      if (!data_->receives.empty())
+        return  data_->receives.begin()->second.recipient.maj_i;
+    }
+    else if (!data_->spends.empty())
+      return data_->spends.begin()->second.sender.maj_i;
+    return 0;
+  }
+
+  std::string transaction_info::label() const
+  {
+    try // We could be out-of-sync with another wallet adding subaddresses
+    {
+      if (data_->direction == Direction_In)
+      {
+        if (!data_->receives.empty())
+        {
+          const auto& receive = data_->receives.begin()->second;
+          const boost::lock_guard<boost::mutex> lock{wallet_->sync};
+          return wallet_->primary.subaccounts.at(receive.recipient.maj_i).minor.at(receive.recipient.min_i).label;
+        }
+      }
+      else if (!data_->spends.empty())
+      {
+        const auto& spend = data_->spends.begin()->second;
+        const boost::lock_guard<boost::mutex> lock{wallet_->sync};
+        return wallet_->primary.subaccounts.at(spend.sender.maj_i).minor.at(spend.sender.min_i).label;
+      }
+    }
+    catch (const boost::container::out_of_range&)
+    {}
+    catch (const std::out_of_range&)
+    {}
+
+    return {};
   }
 
   uint64_t transaction_info::confirmations() const

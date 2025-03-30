@@ -1,21 +1,20 @@
-// Copyright (c) 2024, The Monero Project
-// 
+// Copyright (c) 2022, The Monero Project
 // All rights reserved.
-// 
+//
 // Redistribution and use in source and binary forms, with or without modification, are
 // permitted provided that the following conditions are met:
-// 
+//
 // 1. Redistributions of source code must retain the above copyright notice, this list of
 //    conditions and the following disclaimer.
-// 
+//
 // 2. Redistributions in binary form must reproduce the above copyright notice, this list
 //    of conditions and the following disclaimer in the documentation and/or other
 //    materials provided with the distribution.
-// 
+//
 // 3. Neither the name of the copyright holder nor the names of its contributors may be
 //    used to endorse or promote products derived from this software without specific
 //    prior written permission.
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
 // MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -26,37 +25,30 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#pragma once
+#include "basic_value.h"
 
-#include <memory>
-#include <unordered_map>
-#include <vector>
-#include "crypto/hash.h"            // monero/src
-#include "wallet/api/wallet2_api.h" // monero/src
+#include <stdexcept>
+#include "wire/read.h"
+#include "wire/write.h"
 
-namespace lwsf { namespace internal
+namespace wire
 {
-  namespace backend { class wallet; }
-  class transaction_history : public Monero::TransactionHistory
+  static void write_bytes(writer& dest, const std::nullptr_t&)
   {
-    const std::shared_ptr<backend::wallet> data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
+    throw std::logic_error{"nullptr output not yet defined for wire::writer"};
+  }
 
-  public:
-    explicit transaction_history(std::shared_ptr<backend::wallet> data);
+  void basic_value::reset()
+  {
+    value = nullptr;
+  }
 
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
-
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
-    virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
-  };
-}} // lwsf // internal
+  void read_bytes(reader& source, basic_value& dest)
+  {
+    dest = source.basic();
+  }
+  void write_bytes(writer& dest, const basic_value& source)
+  {
+    boost::apply_visitor([&dest] (const auto& val) { wire_write::bytes(dest, val); }, source.value);
+  }
+}

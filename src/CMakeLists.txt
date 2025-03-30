@@ -30,10 +30,12 @@ include_directories(.)
 
 # For both the server and admin utility.
 set(monero-lwsf_sources
+  address_book.cpp
   backend.cpp
   error.cpp
   pending_transaction.cpp
   rpc.cpp
+  subaddress_account.cpp
   transaction_history.cpp
   transaction_info.cpp
   wallet.cpp

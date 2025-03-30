@@ -1,4 +1,4 @@
-// Copyright (c) 2024, The Monero Project
+// Copyright (c) 2025, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -28,35 +28,34 @@
 
 #pragma once
 
+#include <cstdint>
 #include <memory>
-#include <unordered_map>
 #include <vector>
-#include "crypto/hash.h"            // monero/src
 #include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf { namespace internal
 {
-  namespace backend { class wallet; }
-  class transaction_history : public Monero::TransactionHistory
+  namespace backend { struct wallet; }
+
+  class subaddress_account final : public ::Monero::SubaddressAccount
   {
     const std::shared_ptr<backend::wallet> data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
+    std::vector<Monero::SubaddressAccountRow*> rows_;
 
   public:
-    explicit transaction_history(std::shared_ptr<backend::wallet> data);
 
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
+    explicit subaddress_account(std::shared_ptr<backend::wallet> data);
 
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
+    subaddress_account(const subaddress_account&) = delete;
+    subaddress_account(subaddress_account&&) = delete;    
+    virtual ~subaddress_account() override;
+    subaddress_account& operator=(const subaddress_account&) = delete;
+    subaddress_account& operator=(subaddress_account&&) = delete;
+
+    virtual std::vector<Monero::SubaddressAccountRow*> getAll() const override { return rows_; }
+    virtual void addRow(const std::string &label) override;
+    virtual void setLabel(uint32_t accountIndex, const std::string &label) override;
     virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
   };
+
 }} // lwsf // internal

@@ -26,37 +26,51 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#pragma once
+#include "pending_transaction.h"
 
-#include <memory>
-#include <unordered_map>
-#include <vector>
-#include "crypto/hash.h"            // monero/src
-#include "wallet/api/wallet2_api.h" // monero/src
+#include <stdexcept>
+#include "backend.h"
+#include "byte_slice.h"   // monero/contrib/epee/include
+#include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
+#include "string_tools.h" // monero/contrib/epee/include
+
 
 namespace lwsf { namespace internal
 {
-  namespace backend { class wallet; }
-  class transaction_history : public Monero::TransactionHistory
+  pending_transaction::pending_transaction(std::shared_ptr<backend::wallet> wallet, cryptonote::transaction&& source, Priority priority)
+    : wallet_(std::move(wallet)), source_(std::move(source)), error_(), priority_(priority)
   {
-    const std::shared_ptr<backend::wallet> data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
+    if (!wallet_)
+      throw std::invalid_argument{"lwsf::internal::pending_transction cannot be given nullptr backend"};
+  }
 
-  public:
-    explicit transaction_history(std::shared_ptr<backend::wallet> data);
+  pending_transaction::~pending_transaction()
+  {}
 
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
+  std::string pending_transaction::errorString() const
+  {
+    if (!error_)
+      return {};
+    return error_.message();
+  }
 
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
-    virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
-  };
+  bool pending_transaction::commit(const std::string &filename, bool)
+  {
+    // saving to file not yet implemented
+    if (!filename.empty())
+      return false;
+
+    error_ = wallet_->send_tx(
+      epee::byte_slice{cryptonote::t_serializable_object_to_blob(source_)}
+    );
+    return !error_;
+  }
+
+  std::uint64_t pending_transaction::fee() const
+  { return get_tx_fee(source_); }
+
+  std::vector<std::string> pending_transaction::txid() const
+  {
+    return {epee::string_tools::pod_to_hex(get_transaction_hash(source_))};
+  }
 }} // lwsf // internal

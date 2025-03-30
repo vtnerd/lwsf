@@ -38,6 +38,7 @@
 #include "net/http_client.h" // monero/contrib/epee/include
 #include "ringct/rctOps.h"   // monero/contrib/epee/include
 #include "wire.h"
+#include "wire/adapted/array.h"
 #include "wire/adapted/crypto.h"
 #include "wire/field.h"
 #include "wire/json.h"
@@ -103,6 +104,10 @@ namespace lwsf { namespace internal { namespace rpc
     return response->m_body;
   }
 
+  void write_bytes(wire::writer& dest, const empty&)
+  { dest.boolean(true); }
+  void read_bytes(wire::reader& source, const empty&)
+  { source.boolean(); }
 
   void write_bytes(wire::json_writer& dest, const login& self)
   {
@@ -186,7 +191,7 @@ namespace lwsf { namespace internal { namespace rpc
         WIRE_DLOG_THROW(wire::error::schema::fixed_binary, "Invalid payment_id size");
     }
     else
-      self.payment_id = nullptr;
+      self.payment_id = empty{};
 
     self.timestamp.reset();
 
@@ -212,6 +217,12 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD(start_height),
       WIRE_FIELD(blockchain_height)
     );
+  }
+
+  void read_bytes(wire::json_reader& source, get_subaddrs& self)
+  {
+    using limits = wire::max_element_count<16384>;
+    wire::object(source, WIRE_FIELD_ARRAY(all_subaddrs, limits));
   }
 
   namespace
@@ -295,6 +306,35 @@ namespace lwsf { namespace internal { namespace rpc
     wire::object(source,
       WIRE_OPTIONAL_FIELD(import_fee),
       WIRE_FIELD(request_fulfilled)
+    );
+  }
+
+
+  void read_bytes(wire::json_reader& source, subaddrs& self)
+  {
+    using limits = wire::min_element_size<2>;
+    wire::object(source, WIRE_FIELD(key), WIRE_FIELD_ARRAY(value, limits));
+  }
+
+  void write_bytes(wire::json_writer& dest, const provision_subaddrs_request& self)
+  {
+    wire::object(dest,
+      wire::field("address", std::cref(self.creds.address)),
+      wire::field("view_key", std::cref(self.creds.view_key)),
+      WIRE_FIELD(maj_i),
+      WIRE_FIELD(min_i),
+      WIRE_FIELD(n_maj),
+      WIRE_FIELD(n_min),
+      WIRE_FIELD(get_all)
+    );
+  }
+
+  void read_bytes(wire::json_reader& source, provision_subaddrs_response& self)
+  {
+    using limits = wire::max_element_count<16384>;
+    wire::object(source,
+      WIRE_FIELD_ARRAY(new_subaddrs, limits), 
+      WIRE_FIELD_ARRAY(all_subaddrs, limits)
     );
   }
 

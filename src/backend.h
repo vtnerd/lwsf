@@ -35,20 +35,22 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <type_traits>
 #include <variant>
 #include <vector>
 
-#include "byte_slice.h"      // monero/contrib/epee/include
-#include "common/expect.h"   // moneor/src
-#include "crypto/crypto.h"   // monero/src
-#include "crypto/hash.h"     // monero/src
-#include "lws_frontend.h"
-#include "net/http_client.h" // monero/contrib/epee/include
-#include "ringct/rctTypes.h" // monero/src
+#include "byte_slice.h"        // monero/contrib/epee/include
+#include "common/expect.h"     // moneor/src
+#include "crypto/crypto.h"     // monero/src
+#include "crypto/hash.h"       // monero/src
+#include "cryptonote_config.h" // monero/src
+#include "net/http_client.h"   // monero/contrib/epee/include
+#include "ringct/rctTypes.h"   // monero/src
 #include "rpc.h"
+#include "wallet/api/wallet2_api.h" // monero/src
 #include "wire/fwd.h"
 
 namespace lwsf { namespace internal { namespace backend
@@ -63,6 +65,26 @@ namespace lwsf { namespace internal { namespace backend
     }
   };
 
+  struct address_book_entry
+  {
+    std::string address;
+    std::string payment_id;
+    std::string description;
+  };
+  WIRE_DECLARE_OBJECT(address_book_entry);
+
+  struct subaddress
+  {
+    std::string label;
+  };
+  WIRE_DECLARE_OBJECT(subaddress);
+
+  struct sub_account
+  {
+    boost::container::flat_map<std::uint32_t, subaddress> minor;
+  };
+  WIRE_DECLARE_OBJECT(sub_account);
+
   struct transfer_out
   {
     std::string address;
@@ -73,13 +95,13 @@ namespace lwsf { namespace internal { namespace backend
     crypto::public_key output_pub;
 
     transfer_out()
-      : address(), amount(0), sender{}, secret(), tx_pub{}, outpub_pub{}
+      : address(), amount(0), sender{}, secret(), tx_pub{}, output_pub{}
     {}
   };
   WIRE_DECLARE_OBJECT(transfer_out);
 
   struct transfer_in
-  {
+ {
     std::uint64_t global_index;
     std::uint64_t amount;
     rpc::address_meta recipient;
@@ -104,13 +126,12 @@ namespace lwsf { namespace internal { namespace backend
       : spends(),
         receives(),
         description(),
-        label(),
         timestamp(),
         amount(0),
         fee(0),
         height(),
         unlock_time(0),
-        direction(TransactionInfo::Direction::Out),
+        direction(Monero::TransactionInfo::Direction_Out),
         payment_id(),
         id{},
         prefix{},
@@ -122,20 +143,21 @@ namespace lwsf { namespace internal { namespace backend
     transaction& operator=(transaction&&) = default;
     transaction& operator=(const transaction&) = default;
 
+    bool is_unlocked(std::uint64_t chain_height, Monero::NetworkType type) const;
+
     /*! flat_map is used here for faster copies/merging. A single allocation
       is needed in the copy (done every refresh interval), instead of an
       allocation per key. */
     boost::container::flat_map<crypto::key_image, transfer_out, memory> spends;
     boost::container::flat_map<crypto::public_key, transfer_in, memory> receives; //!< Key is output pub
     std::string description;
-    std::string label;
     std::optional<std::time_t> timestamp;
     std::uint64_t amount;
     std::uint64_t fee;
     std::optional<std::uint64_t> height;
     std::uint64_t unlock_time;
-    TransactionInfo::Direction direction;
-    std::variant<std::nullptr_t, crypto::hash8, crypto::hash> payment_id;
+    Monero::TransactionInfo::Direction direction;
+    std::variant<rpc::empty, crypto::hash8, crypto::hash> payment_id;
     crypto::hash id;
     crypto::hash prefix;
     bool coinbase;
@@ -153,11 +175,15 @@ namespace lwsf { namespace internal { namespace backend
   struct account
   {
     account() = delete;
+
     std::string address; //!> not serialized, recovered on read_bytes
+    std::vector<address_book_entry> addressbook;
+    std::map<std::uint32_t, sub_account> subaccounts;
     boost::container::flat_map<crypto::hash, std::shared_ptr<transaction>, memory> txes;
+    std::map<std::string, std::string> attributes;
     std::uint64_t scan_height;
     std::uint64_t restore_height;
-    NetworkType type;
+    Monero::NetworkType type;
     keypair view;
     keypair spend;
     bool generated_locally;
@@ -166,7 +192,7 @@ namespace lwsf { namespace internal { namespace backend
 
   struct wallet
   {
-    std::shared_ptr<WalletListener> listener;
+    Monero::WalletListener* listener;
     rpc::http_client client;
     account primary;
     std::atomic<std::chrono::steady_clock::time_point::duration::rep> last_sync;
@@ -174,8 +200,13 @@ namespace lwsf { namespace internal { namespace backend
     std::uint64_t per_byte_fee;
     std::uint64_t fee_mask;
     mutable boost::mutex sync;
+    boost::mutex sync_listener;
 
     wallet();
+
+    cryptonote::network_type get_net_type() const;
+    crypto::public_key get_spend_public(const rpc::address_meta& index) const;
+    std::string get_spend_address(const rpc::address_meta& index) const;
 
     //! Serializate `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
@@ -185,6 +216,8 @@ namespace lwsf { namespace internal { namespace backend
 
     //! Attempt
     std::error_code login();
+
+    std::error_code add_subaccount(std::string label);
 
     //! Refreshes txes information. Strong exception guarantee. Locks contents.
     std::error_code refresh(bool mandatory = false);

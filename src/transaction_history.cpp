@@ -30,79 +30,117 @@
 
 #include <boost/thread/lock_guard.hpp>
 #include <limits>
+#include <map>
 #include <stdexcept>
 
+#include "backend.h"
 #include "transaction_info.h"
 
 #include "hex.h" // monero/contrib/epee/include
 
 namespace lwsf { namespace internal
 {
+  namespace
+  {
+    void free_txes(std::vector<Monero::TransactionInfo*>& txes) noexcept
+    {
+      for (auto tx : txes)
+        delete tx;
+      txes.clear();
+    }
+  }
+
   transaction_history::transaction_history(std::shared_ptr<backend::wallet> data)
-    : data_(std::move(data))
+    : data_(std::move(data)), txes_(), by_id_()
   {
     if (!data_)
-      throw std::logic_error{"transaction_history was given nullptr"};
+      throw std::invalid_argument{"lwsf::internal::transaction_history cannot be given nullptr"};
   }
 
   transaction_history::~transaction_history()
-  {}
-
-  int transaction_history::count() const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (std::numeric_limits<int>::max() < data_->primary.txes.size())
-      throw std::runtime_error{"Exceeded max int size in transaction_history::count"};
-    return data_->primary.txes.size();
+    free_txes(txes_);
   }
 
-  std::shared_ptr<TransactionInfo> transaction_history::transaction(int index) const
+  Monero::TransactionInfo* transaction_history::transaction(int index) const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (index < 0 || data_->primary.txes.size() < unsigned(index))
-      throw std::runtime_error{"index provided to transaction invalid"};
-    return std::make_shared<transaction_info>(data_, data_->primary.txes.nth(unsigned(index))->second);
+    if (index < 0 || txes_.size() <= unsigned(index))
+      return nullptr;
+    return txes_[index];
   }
 
-  std::shared_ptr<TransactionInfo> transaction_history::transaction(const std::string &id) const
+  Monero::TransactionInfo* transaction_history::transaction(const std::string &id) const
   {
     crypto::hash binary_id{};
-    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(binary_id), id))
-      throw std::runtime_error{"transaction_history given invalid hex id"};
+    if (!epee::string_tools::hex_to_pod(id, binary_id))
+      return nullptr;
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};   
-    const auto iter = data_->primary.txes.find(binary_id);
-    if (iter != data_->primary.txes.end())
-      return std::make_shared<transaction_info>(data_, iter->second);
-    return nullptr;
-  }
-
-  std::vector<std::shared_ptr<TransactionInfo>> transaction_history::getAll() const
-  {
-    std::vector<std::shared_ptr<TransactionInfo>> out;
+    // hold the lock during the map lookup, this is const and should be thread-safe
     const boost::lock_guard<boost::mutex> lock{data_->sync};
-    out.reserve(data_->primary.txes.size());
-    for (const auto& tx : data_->primary.txes)
-      out.push_back(std::make_shared<transaction_info>(data_, tx.second));
-    return out;
+    auto& info = by_id_[binary_id];
+    if (!info)
+    {
+      const auto iter = data_->primary.txes.find(binary_id);
+      if (iter == data_->primary.txes.end())
+        return nullptr;
+      info = std::make_unique<transaction_info>(data_, iter->second);
+    }
+    return info.get();
   }
 
   void transaction_history::refresh()
   {
-    data_->refresh(true);
+    data_->refresh(false);
+
+    std::multimap<std::uint64_t, std::shared_ptr<const backend::transaction>> temp;
+    {
+      const boost::lock_guard<boost::mutex> lock{data_->sync};
+      if (std::numeric_limits<int>::max() < data_->primary.txes.size())
+        throw std::runtime_error{"lwsf::internal::transaction_history::refresh exceeds max history size"};
+
+      for (const auto& tx : data_->primary.txes)
+        temp.emplace(tx.second->height.value_or(std::numeric_limits<std::uint64_t>::max()), tx.second);
+    }
+
+    // be careful about exceptions and memory leaks. this should be safe
+
+    for (std::size_t i = temp.size(); i < txes_.size(); ++i)
+    {
+      const std::unique_ptr<Monero::TransactionInfo> destroy{txes_[i]};
+      txes_[i] = nullptr;
+    }
+
+    by_id_.clear();
+    txes_.resize(temp.size());
+
+    try
+    {
+      std::size_t i = 0;
+      for (auto& backend_tx : temp)
+      {
+        if (txes_[i])
+          static_cast<transaction_info*>(txes_[i])->update(std::move(backend_tx.second));
+        else
+          txes_[i] = new transaction_info{data_, std::move(backend_tx.second)};
+        ++i;
+      }
+    }
+    catch (...)
+    {
+      free_txes(txes_);
+      throw;
+    }
   } 
 
   void transaction_history::setTxNote(const std::string &txid, const std::string &note)
   { 
     crypto::hash binary_id{};
     if (!epee::string_tools::hex_to_pod(txid, binary_id))
-      throw std::runtime_error{"transaction_history given invalid hex id"};
+      return; 
 
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     auto iter = data_->primary.txes.find(binary_id);
-    if (iter == data_->primary.txes.end())
-      throw std::runtime_error{"transaction_history setTxNote given invalid id"};
-
-    iter->second->description = note;
+    if (iter != data_->primary.txes.end())
+      iter->second->description = note;
   }
 }} // lwsf // internal

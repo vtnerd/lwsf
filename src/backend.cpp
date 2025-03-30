@@ -30,6 +30,7 @@
 
 #include <boost/thread/lock_guard.hpp>
 #include "cryptonote_basic/cryptonote_basic_impl.h" // monero/src
+#include "error.h"
 #include "lwsf_config.h"
 #include "ringct/rctOps.h"
 #include "wire.h"
@@ -37,30 +38,97 @@
 #include "wire/adapted/pair.h"
 #include "wire/msgpack.h"
 #include "wire/wrapper/trusted_array.h"
+#include "wire/wrapper/variant.h"
 
-namespace lwsf
+namespace Monero
 {
   WIRE_AS_INTEGER(TransactionInfo::Direction);
-  WIRE_AS_INTEGER(NetworkType);
+  WIRE_AS_INTEGER(Monero::NetworkType);
 }
+
 namespace lwsf { namespace internal { namespace backend
 { 
   namespace
   {
-    cryptonote::network_type convert_net_type(const NetworkType in)
+    cryptonote::network_type convert_net_type(const Monero::NetworkType in)
     {
       switch(in)
       {
-      case NetworkType::MAINNET:
+      case Monero::NetworkType::MAINNET:
         return cryptonote::network_type::MAINNET;
-      case NetworkType::TESTNET:
+      case Monero::NetworkType::TESTNET:
         return cryptonote::network_type::TESTNET;
-      case NetworkType::STAGENET:
+      case Monero::NetworkType::STAGENET:
         return cryptonote::network_type::STAGENET;
       default:
         break;
       }
       return cryptonote::network_type::UNDEFINED;
+    }
+
+    bool is_tx_spendtime_unlocked(const std::uint64_t chain_height, const std::uint64_t unlock_time, const std::uint64_t block_height, Monero::NetworkType nettype_in)
+    {
+      const auto nettype = convert_net_type(nettype_in);
+      if(unlock_time < CRYPTONOTE_MAX_BLOCK_NUMBER)
+      {
+        //interpret as block index
+        if(chain_height - 1 + CRYPTONOTE_LOCKED_TX_ALLOWED_DELTA_BLOCKS >= unlock_time)
+          return true;
+        else
+          return false;
+      }else
+      {
+        //interpret as time
+        const uint64_t adjusted_time = std::time(nullptr);
+        // XXX: this needs to be fast, so we'd need to get the starting heights
+        // from the daemon to be correct once voting kicks in
+        uint64_t v2height = nettype == cryptonote::TESTNET ? 624634 : nettype == cryptonote::STAGENET ? 32000  : 1009827;
+        uint64_t leeway = chain_height < v2height ? CRYPTONOTE_LOCKED_TX_ALLOWED_DELTA_SECONDS_V1 : CRYPTONOTE_LOCKED_TX_ALLOWED_DELTA_SECONDS_V2;
+        if(adjusted_time + leeway >= unlock_time)
+          return true;
+        else
+          return false;
+      }
+      return false;
+    }
+
+    crypto::secret_key get_subaddress_secret_key(const crypto::secret_key &a, const std::uint32_t major, const std::uint32_t minor)
+    {
+      char data[sizeof(::config::HASH_KEY_SUBADDRESS) + sizeof(crypto::secret_key) + 2 * sizeof(uint32_t)];
+      memcpy(data, ::config::HASH_KEY_SUBADDRESS, sizeof(::config::HASH_KEY_SUBADDRESS));
+      memcpy(data + sizeof(::config::HASH_KEY_SUBADDRESS), &a, sizeof(crypto::secret_key));
+      std::uint32_t idx = SWAP32LE(major);
+      memcpy(data + sizeof(::config::HASH_KEY_SUBADDRESS) + sizeof(crypto::secret_key), &idx, sizeof(uint32_t));
+      idx = SWAP32LE(minor);
+      memcpy(data + sizeof(::config::HASH_KEY_SUBADDRESS) + sizeof(crypto::secret_key) + sizeof(uint32_t), &idx, sizeof(uint32_t));
+      crypto::secret_key m;
+      crypto::hash_to_scalar(data, sizeof(data), m);
+      return m;
+    }
+
+    template<typename F, typename T>
+    void map_address_book_entry(F& format, T& self)
+    {
+      wire::object(format,
+        WIRE_FIELD(address),
+        WIRE_FIELD(payment_id),
+        WIRE_FIELD(description)
+      );
+    }
+
+    template<typename F, typename T>
+    void map_subaddress(F& format, T& self)
+    {
+      wire::object(format, WIRE_FIELD(label));
+    }
+
+    template<typename F, typename T>
+    void map_sub_account(F& format, T& self)
+    {
+      wire::object(format,
+        wire::field("minor", wire::trusted_array(std::ref(self.minor))),
+        WIRE_FIELD(label)
+      );
     }
 
     template<typename F, typename T>
@@ -88,24 +156,24 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_FIELD(tx_pub)
       );
     }
-  } // anonymous
 
-  namespace 
-  {
     template<typename F, typename T>
     void map_transaction(F& format, T& self)
     {
       //! TODO complete payment_id storage
+      auto payment_id = wire::variant(std::ref(self.payment_id));
       wire::object(format,
         wire::field("spends", wire::trusted_array(std::ref(self.spends))),
         wire::field("receives", wire::trusted_array(std::ref(self.receives))),
         WIRE_FIELD(description),
-        WIRE_FIELD(label),
         WIRE_OPTIONAL_FIELD(timestamp),
         WIRE_FIELD(amount),
         WIRE_OPTIONAL_FIELD(height),
         WIRE_FIELD(unlock_time),
         WIRE_FIELD(direction),
+        WIRE_OPTION("payment_id0", rpc::empty, payment_id),
+        WIRE_OPTION("payment_id8", crypto::hash8, payment_id),
+        WIRE_OPTION("payment_id32", crypto::hash, payment_id),
         WIRE_FIELD(id),
         WIRE_FIELD(prefix),
         WIRE_FIELD(coinbase)
@@ -139,7 +207,10 @@ namespace lwsf { namespace internal { namespace backend
     void map_account(F& format, T& self)
     {
       wire::object(format,
+        wire::field("addressbook", wire::trusted_array(std::ref(self.addressbook))),
+        wire::field("subaccounts", wire::trusted_array(std::ref(self.subaccounts))),
         wire::field("txes", wire::trusted_array(std::ref(self.txes))),
+        wire::field("attributes", wire::trusted_array(std::ref(self.attributes))),
         WIRE_FIELD(scan_height),
         WIRE_FIELD(restore_height),
         WIRE_FIELD(type),
@@ -235,12 +306,12 @@ namespace lwsf { namespace internal { namespace backend
 
       if (rpc::uint64_string(total_spent) < source.total_received)
       {
-        out.direction = TransactionInfo::Direction::In;
+        out.direction = Monero::TransactionInfo::Direction_In;
         out.amount = std::uint64_t(source.total_received) - total_spent;
       }
       else
       {
-        out.direction = TransactionInfo::Direction::Out;
+        out.direction = Monero::TransactionInfo::Direction_Out;
         out.amount = total_spent - std::uint64_t(source.total_received);
       }
     }
@@ -307,7 +378,7 @@ namespace lwsf { namespace internal { namespace backend
           else
             inserted.first->second = std::make_shared<transaction>();
 
-          if (existing != self.primary.txes.end())
+          if (existing == self.primary.txes.end())
             out.push_back(inserted.first->second);
         }
         update_tx(self.primary, *inserted.first->second, tx);
@@ -332,8 +403,33 @@ namespace lwsf { namespace internal { namespace backend
 
       return out;
     }
+
+    void merge_subaddrs(account& self, const epee::span<const rpc::subaddrs> subaddrs)
+    {
+      /* This will purge subaddresses that the server somehow no longer claims
+      as being valid. The existing info per subaddress is moved/preserved. */
+
+      std::map<std::uint32_t, sub_account> subaccounts;
+      subaccounts.swap(self.subaccounts);
+
+      for (const auto& subaddr : subaddrs)
+      {
+        auto& account = self.subaccounts[subaddr.key];
+        auto& old = subaccounts[subaddr.key];
+        for (const auto& minors : subaddr.value)
+        {
+          for (std::uint32_t minor = std::get<0>(minors); minor < std::uint64_t(std::get<1>(minors)) + 1; ++minor)
+          {
+            auto elem = account.minor.try_emplace(minor);
+            if (elem.second)
+              elem.first->second = std::move(old.minor[minor]);
+          }
+        }
+      }
+    }
   } // anonymous
 
+  WIRE_DEFINE_OBJECT(address_book_entry, map_address_book_entry);
   WIRE_DEFINE_OBJECT(transfer_out, map_transfer_out);
   WIRE_DEFINE_OBJECT(transfer_in, map_transfer_in);  
   WIRE_DEFINE_OBJECT(transaction, map_transaction);
@@ -348,6 +444,18 @@ namespace lwsf { namespace internal { namespace backend
   void write_bytes(wire::writer& dest, const account& source)
   { map_account(dest, source); }
 
+  bool transaction::is_unlocked(const std::uint64_t chain_height, const Monero::NetworkType type) const
+  {
+    const std::uint64_t the_height = height.value_or(std::numeric_limits<std::uint64_t>::max());
+    if(!is_tx_spendtime_unlocked(chain_height, unlock_time, the_height, type))
+      return false;
+
+    if(the_height + CRYPTONOTE_DEFAULT_TX_SPENDABLE_AGE > chain_height)
+      return false;
+
+    return true;
+  }
+
   wallet::wallet()
     : listener(nullptr),
       client(),
@@ -356,7 +464,37 @@ namespace lwsf { namespace internal { namespace backend
       blockchain_height(0),
       fee_mask(0),
       sync()
-  {}
+  {
+    primary.subaccounts[0].minor[0];
+  }
+
+  cryptonote::network_type wallet::get_net_type() const
+  { return convert_net_type(primary.type); }
+
+  crypto::public_key wallet::get_spend_public(const rpc::address_meta& index) const
+  {
+    if (index.maj_i == 0 && index.min_i == 0)
+      return primary.spend.pub;
+
+    // m = Hs(a || index_major || index_minor)
+    crypto::secret_key m = get_subaddress_secret_key(primary.view.sec, index.maj_i, index.min_i);
+
+    // M = m*G
+    crypto::public_key M;
+    crypto::secret_key_to_public_key(m, M);
+
+    // D = B + M
+    return rct::rct2pk(rct::addKeys(rct::pk2rct(primary.spend.pub), rct::pk2rct(M))); 
+  }
+
+  std::string wallet::get_spend_address(const rpc::address_meta& index) const
+  {
+    return cryptonote::get_account_address_as_str(
+      get_net_type(),
+      (index.maj_i != 0 || index.min_i != 0),
+      cryptonote::account_public_address{get_spend_public(index), primary.view.pub}
+    );
+  }
 
   expect<epee::byte_slice> wallet::to_bytes() const
   {
@@ -387,18 +525,27 @@ namespace lwsf { namespace internal { namespace backend
 
   std::error_code wallet::login()
   {
-    const boost::lock_guard<boost::mutex> lock{sync};
+    {
+      const rpc::login_request login{
+        primary.address, primary.view.sec, true, primary.generated_locally
+      };
 
-    const rpc::login_request login{
-      primary.address, primary.view.sec, true, primary.generated_locally
-    };
+      const auto response = rpc::invoke<rpc::login_response>(client, login);
+      if (!response)
+        return response.error();
 
-    const auto response = rpc::invoke<rpc::login_response>(client, login);
-    if (!response)
-      return response.error();
+      const boost::lock_guard<boost::mutex> lock{sync};
+      if (response->start_height)
+        primary.restore_height = *response->start_height;
+    }
 
-    if (response->start_height)
-      primary.restore_height = *response->start_height;
+    const rpc::login login{primary.address, primary.view.sec};
+    const auto response = rpc::invoke<rpc::get_subaddrs>(client, login);
+    if (response)
+    {
+      const boost::lock_guard<boost::mutex> lock{sync};
+      merge_subaddrs(primary, epee::to_span(response->all_subaddrs));
+    }
 
     return {};
   }
@@ -439,38 +586,88 @@ namespace lwsf { namespace internal { namespace backend
     const auto new_txes = merge_response(*this, *txs_response, *outs_response);
     last_sync = std::chrono::steady_clock::now().time_since_epoch().count();
 
+    const boost::lock_guard<boost::mutex> lock2{sync_listener};
     if (!listener)
       return {};
 
-    // Call listener functions without holding lock, in case a call is made
+    // Call listener functions without holding `sync`, in case a call is made
     // back into the library.
     const std::uint64_t new_scan_height =
       std::max(orig_scan_height, primary.scan_height);
-    const std::shared_ptr<WalletListener> listener_copy = listener;
     lock.unlock();
 
-    listener_copy->refreshed();
-    if (!new_txes.empty())
-      listener_copy->updated();
+    listener->refreshed();
+    if (!new_txes.empty() || new_scan_height - orig_scan_height)
+      listener->updated();
 
     for (std::uint64_t i = orig_scan_height; i < new_scan_height; ++i)
-      listener_copy->newBlock(i);
+      listener->newBlock(i);
 
     for (const auto& tx : new_txes)
     {
       const auto txid = epee::string_tools::pod_to_hex(tx->id);
-      if (tx->direction == TransactionInfo::Direction::In)
+      if (tx->direction == Monero::TransactionInfo::Direction_In)
       {
         if (tx->height)
-          listener_copy->moneyReceived(txid, tx->amount);
+          listener->moneyReceived(txid, tx->amount);
         else
-          listener_copy->unconfirmedMoneyReceived(txid, tx->amount);
+          listener->unconfirmedMoneyReceived(txid, tx->amount);
       }
       else
-        listener_copy->moneySpent(txid, tx->amount);
+        listener->moneySpent(txid, tx->amount);
     }
 
     return {};
+  }
+
+  std::error_code wallet::add_subaccount(std::string label)
+  {
+    for (unsigned i = 0; i < config::subaddr_retry; ++i)
+    {
+      std::size_t next = -1;
+      {
+        const boost::lock_guard<boost::mutex> lock{sync};
+        for (const auto& account : primary.subaccounts)
+        {
+          if (account.first != next + 1)
+            break;
+          ++next;
+        }
+        ++next;
+      }
+
+      if (std::numeric_limits<std::uint32_t>::max() < next)
+        return {error::rpc_failure};
+
+      const rpc::provision_subaddrs_request request{
+        rpc::login{primary.address, primary.view.sec}, std::uint32_t(next), 0, 1, 1, true
+      };
+      const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, request);
+      if (!response)
+        return response.error();
+
+      bool matched = false;
+      const boost::lock_guard<boost::mutex> lock{sync};
+      for (const auto& major : response->new_subaddrs)
+      {
+        auto& account = primary.subaccounts[major.key];
+        for (const auto& minors : major.value)
+        {
+          for (std::uint32_t i = std::get<0>(minors); i < std::uint64_t(std::get<1>(minors)) + 1; ++i)
+          {
+            account.minor[i].label = std::move(label);
+            label.clear();
+            matched = true;
+          }
+        }
+      }
+
+      if (matched)
+        return {};
+      else
+        merge_subaddrs(primary, epee::to_span(response->all_subaddrs));
+    }
+    return {error::rpc_failure};
   }
 
   std::error_code wallet::send_tx(epee::byte_slice tx_bytes)

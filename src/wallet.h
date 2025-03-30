@@ -38,6 +38,7 @@
 #include <string>
 #include "cryptonote_basic/account.h" // monero/src
 #include "net/http_client.h"          // monero/contrib/epee/include
+#include "wallet/api/wallet2_api.h"   // monero/src
 
 namespace lwsf
 {
@@ -47,25 +48,30 @@ namespace internal
 
 
   //! \TODO Mark final when completely implemented
-  class wallet : public lwsf::Wallet
+  class wallet : public Monero::Wallet
   {
     enum class state : std::uint8_t { stop = 0, paused, skip_once, run };
 
     const std::shared_ptr<backend::wallet> data_;
+    std::unique_ptr<Monero::AddressBook> addressbook_;
+    std::unique_ptr<Monero::TransactionHistory> history_;
+    std::unique_ptr<Monero::SubaddressAccount> subaddresses_;
     const std::string filename_;
     std::string password_;
-    std::string exception_error_;
-    std::error_code status_;
+    mutable std::string exception_error_;
+    mutable std::error_code status_;
     boost::thread thread_;
     const std::uint64_t iterations_;
+    std::chrono::milliseconds refresh_interval_;  
+    std::uint32_t mixin_;
     boost::condition_variable refresh_notify_;
     mutable boost::mutex error_sync_;
     boost::mutex refresh_sync_;
     state thread_state_;
     bool mandatory_refresh_;
 
-    bool set_error(std::error_code status);
-    void set_critical(const std::exception& e);
+    bool set_error(std::error_code status) const;
+    void set_critical(const std::exception& e) const;
 
     void stop_refresh_loop();
     void refresh_loop();
@@ -74,8 +80,8 @@ namespace internal
     struct create_tag{};
     struct open_tag{};
 
-    wallet(create_tag, NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds);
-    wallet(open_tag, NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data);
+    wallet(create_tag, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds);
+    wallet(open_tag, Monero::NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data);
 
     wallet(const wallet&) = delete;
     wallet(wallet&&) = delete;
@@ -98,12 +104,8 @@ namespace internal
     virtual bool setDevicePin(const std::string &) override { return false; };
     virtual bool setDevicePassphrase(const std::string &) override { return false; };
     virtual std::string address(uint32_t accountIndex = 0, uint32_t addressIndex = 0) const override;
-    std::string mainAddress() const { return address(0, 0); }
     virtual std::string path() const = 0;
-    virtual NetworkType nettype() const override;
-    bool mainnet() const { return nettype() == MAINNET; }
-    bool testnet() const { return nettype() == TESTNET; }
-    bool stagenet() const { return nettype() == STAGENET; }
+    virtual Monero::NetworkType nettype() const override;
     //! returns current hard fork info
     virtual void hardForkInfo(uint8_t &version, uint64_t &earliest_height) const = 0;
     //! check if hard fork rules should be used
@@ -313,20 +315,20 @@ namespace internal
     static uint64_t amountFromDouble(double amount);
     static std::string genPaymentId();
     static bool paymentIdValid(const std::string &paiment_id);
-    static bool addressValid(const std::string &str, NetworkType nettype);
+    static bool addressValid(const std::string &str, Monero::NetworkType nettype);
     static bool addressValid(const std::string &str, bool testnet)          // deprecated
     {
-        return addressValid(str, testnet ? TESTNET : MAINNET);
+        return addressValid(str, testnet ? Monero::TESTNET : Monero::MAINNET);
     }
-    static bool keyValid(const std::string &secret_key_string, const std::string &address_string, bool isViewKey, NetworkType nettype, std::string &error);
+    static bool keyValid(const std::string &secret_key_string, const std::string &address_string, bool isViewKey, Monero::NetworkType nettype, std::string &error);
     static bool keyValid(const std::string &secret_key_string, const std::string &address_string, bool isViewKey, bool testnet, std::string &error)     // deprecated
     {
-        return keyValid(secret_key_string, address_string, isViewKey, testnet ? TESTNET : MAINNET, error);
+        return keyValid(secret_key_string, address_string, isViewKey, testnet ? Monero::TESTNET : Monero::MAINNET, error);
     }
-    static std::string paymentIdFromAddress(const std::string &str, NetworkType nettype);
+    static std::string paymentIdFromAddress(const std::string &str, Monero::NetworkType nettype);
     static std::string paymentIdFromAddress(const std::string &str, bool testnet)       // deprecated
     {
-        return paymentIdFromAddress(str, testnet ? TESTNET : MAINNET);
+        return paymentIdFromAddress(str, testnet ? Monero::TESTNET : Monero::MAINNET);
     }
     static uint64_t maximumAllowedAmount();
     // Easylogger wrapper
@@ -372,13 +374,13 @@ namespace internal
      * @brief setAutoRefreshInterval - setup interval for automatic refresh.
      * @param seconds - interval in millis. if zero or less than zero - automatic refresh disabled;
      */
-    virtual void setAutoRefreshInterval(int millis) = 0;
+    virtual void setAutoRefreshInterval(int millis) override;
 
     /**
      * @brief autoRefreshInterval - returns automatic refresh interval in millis
      * @return
      */
-    virtual int autoRefreshInterval() const = 0;
+    virtual int autoRefreshInterval() const override;
 
     /**
      * @brief addSubaddressAccount - appends a new subaddress account at the end of the last major index of existing subaddress accounts
@@ -418,7 +420,7 @@ namespace internal
      * @brief multisig - returns current state of multisig wallet creation process
      * @return MultisigState struct
      */
-    virtual MultisigState multisig() const = 0;
+    virtual Monero::MultisigState multisig() const = 0;
     /**
      * @brief getMultisigInfo
      * @return serialized and signed multisig info string
@@ -461,7 +463,7 @@ namespace internal
      * @param signData encrypted unsigned transaction. Obtained with PendingTransaction::multisigSignData
      * @return PendingTransaction
      */
-    virtual std::unique_ptr<PendingTransaction>  restoreMultisigTransaction(const std::string& signData) = 0;
+    virtual Monero::PendingTransaction*  restoreMultisigTransaction(const std::string& signData) = 0;
 
     /*!
      * \brief createTransactionMultDest creates transaction with multiple destinations. if dst_addr is an integrated address, payment_id is ignored
@@ -476,9 +478,9 @@ namespace internal
      *                                  after object returned
      */
 
-    virtual std::unique_ptr<PendingTransaction> createTransactionMultDest(const std::vector<std::string> &dst_addr, const std::string &payment_id,
-                                                   optional<std::vector<uint64_t>> amount, uint32_t mixin_count,
-                                                   PendingTransaction::Priority = PendingTransaction::Priority::Low,
+    virtual Monero::PendingTransaction* createTransactionMultDest(const std::vector<std::string> &dst_addr, const std::string &payment_id,
+                                                   Monero::optional<std::vector<uint64_t>> amount, uint32_t mixin_count,
+                                                   Monero::PendingTransaction::Priority = Monero::PendingTransaction::Priority_Low,
                                                    uint32_t subaddr_account = 0,
                                                    std::set<uint32_t> subaddr_indices = {}) = 0;
 
@@ -495,9 +497,9 @@ namespace internal
      *                          after object returned
      */
 
-    virtual std::unique_ptr<PendingTransaction> createTransaction(const std::string &dst_addr, const std::string &payment_id,
+    virtual Monero::PendingTransaction* createTransaction(const std::string &dst_addr, const std::string &payment_id,
                                                    std::optional<uint64_t> amount, uint32_t mixin_count,
-                                                   PendingTransaction::Priority = PendingTransaction::Priority::Low,
+                                                   Monero::PendingTransaction::Priority = Monero::PendingTransaction::Priority_Low,
                                                    uint32_t subaddr_account = 0,
                                                    std::set<uint32_t> subaddr_indices = {}) = 0;
 
@@ -507,14 +509,14 @@ namespace internal
      *                          after object returned
      */
 
-    virtual std::unique_ptr<PendingTransaction> createSweepUnmixableTransaction() = 0;
+    virtual Monero::PendingTransaction* createSweepUnmixableTransaction() = 0;
     
    /*!
     * \brief loadUnsignedTx  - creates transaction from unsigned tx file
     * \return                - UnsignedTransaction object. caller is responsible to check UnsignedTransaction::status()
     *                          after object returned
     */
-    virtual std::unique_ptr<UnsignedTransaction> loadUnsignedTx(const std::string &unsigned_filename) = 0;
+    virtual Monero::UnsignedTransaction* loadUnsignedTx(const std::string &unsigned_filename) = 0;
     
    /*!
     * \brief submitTransaction - submits transaction in signed tx file
@@ -527,7 +529,7 @@ namespace internal
      * \brief disposeTransaction - destroys transaction object
      * \param t -  pointer to the "PendingTransaction" object. Pointer is not valid after function returned;
      */
-    virtual void disposeTransaction(PendingTransaction * t) override final
+    virtual void disposeTransaction(Monero::PendingTransaction * t) override final
     {}
 
     /*!
@@ -536,7 +538,7 @@ namespace internal
      * \return Estimated fee.
      */
     virtual uint64_t estimateTransactionFee(const std::vector<std::pair<std::string, uint64_t>> &destinations,
-                                            PendingTransaction::Priority priority) const override final;
+                                            Monero::PendingTransaction::Priority priority) const override final;
 
    /*!
     * \brief exportKeyImages - exports key images to file
@@ -544,51 +546,51 @@ namespace internal
     * \param all - export all key images or only those that have not yet been exported
     * \return                  - true on success
     */
-    virtual bool exportKeyImages(const std::string &filename, bool all = false) = 0;
+    virtual bool exportKeyImages(const std::string &filename, bool all = false) override;
    
    /*!
     * \brief importKeyImages - imports key images from file
     * \param filename
     * \return                  - true on success
     */
-    virtual bool importKeyImages(const std::string &filename) = 0;
+    virtual bool importKeyImages(const std::string &filename) override;
 
     /*!
      * \brief importOutputs - exports outputs to file
      * \param filename
      * \return                  - true on success
      */
-    virtual bool exportOutputs(const std::string &filename, bool all = false) = 0;
+    virtual bool exportOutputs(const std::string &filename, bool all = false) override;
 
     /*!
      * \brief importOutputs - imports outputs from file
      * \param filename
      * \return                  - true on success
      */
-    virtual bool importOutputs(const std::string &filename) = 0;
+    virtual bool importOutputs(const std::string &filename) override;
 
     /*!
      * \brief scanTransactions - scan a list of transaction ids, this operation may reveal the txids to the remote node and affect your privacy
      * \param txids            - list of transaction ids
      * \return                 - true on success
      */
-    virtual bool scanTransactions(const std::vector<std::string> &txids) = 0;
+    virtual bool scanTransactions(const std::vector<std::string> &txids) override;
 
-    virtual std::shared_ptr<TransactionHistory> history() override;
-    virtual std::shared_ptr<AddressBook> addressBook() = 0;
-    virtual std::shared_ptr<Subaddress> subaddress() = 0;
-    virtual std::shared_ptr<SubaddressAccount> subaddressAccount() = 0;
-    virtual void setListener(std::shared_ptr<WalletListener>) override;
+    virtual Monero::TransactionHistory* history() override;
+    virtual Monero::AddressBook* addressBook() override;
+    virtual Monero::Subaddress* subaddress() = 0;
+    virtual Monero::SubaddressAccount* subaddressAccount() override;
+    virtual void setListener(Monero::WalletListener*) override;
     /*!
      * \brief defaultMixin - returns number of mixins used in transactions
      * \return
      */
-    virtual uint32_t defaultMixin() const = 0;
+    virtual uint32_t defaultMixin() const override;
     /*!
      * \brief setDefaultMixin - setum number of mixins to be used for new transactions
      * \param arg
      */
-    virtual void setDefaultMixin(uint32_t arg) = 0;
+    virtual void setDefaultMixin(uint32_t arg) override;
 
     /*!
      * \brief setCacheAttribute - attach an arbitrary string to a wallet cache attribute
@@ -596,7 +598,7 @@ namespace internal
      * \param val - the value
      * \return true if successful, false otherwise
      */
-    virtual bool setCacheAttribute(const std::string &key, const std::string &val) = 0;
+    virtual bool setCacheAttribute(const std::string &key, const std::string &val) override;
     /*!
      * \brief getCacheAttribute - return an arbitrary string attached to a wallet cache attribute
      * \param key - the key
@@ -609,14 +611,14 @@ namespace internal
      * \param note - the note
      * \return true if successful, false otherwise
      */
-    virtual bool setUserNote(const std::string &txid, const std::string &note) = 0;
+    virtual bool setUserNote(const std::string &txid, const std::string &note) override;
     /*!
      * \brief getUserNote - return an arbitrary string note attached to a txid
      * \param txid - the transaction id to attach the note to
      * \return the attached note, or empty string if there is none
      */
-    virtual std::string getUserNote(const std::string &txid) const = 0;
-    virtual std::string getTxKey(const std::string &txid) const = 0;
+    virtual std::string getUserNote(const std::string &txid) const override;
+    virtual std::string getTxKey(const std::string &txid) const override;
     virtual bool checkTxKey(const std::string &txid, std::string tx_key, const std::string &address, uint64_t &received, bool &in_pool, uint64_t &confirmations) = 0;
     virtual std::string getTxProof(const std::string &txid, const std::string &address, const std::string &message) const = 0;
     virtual bool checkTxProof(const std::string &txid, const std::string &address, const std::string &message, const std::string &signature, bool &good, uint64_t &received, bool &in_pool, uint64_t &confirmations) = 0;

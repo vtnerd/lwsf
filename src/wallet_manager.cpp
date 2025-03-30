@@ -37,18 +37,20 @@
 #include "backend.h"
 #include "common/dns_utils.h"  // monero/src
 #include "lwsf_config.h"
+#include "lws_frontend.h"
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
 #include "rpc.h"
 #include "wallet.h"
+#include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf
 {
   namespace internal
   {
     //! \TODO Mark final when completely implemented
-    class wallet_manager : public lwsf::WalletManager
+    class wallet_manager : public Monero::WalletManager
     {
       rpc::http_client client_;
       std::string error_;
@@ -80,7 +82,7 @@ namespace lwsf
         : client_(), error_(), cached_{}, cached_last_(std::chrono::seconds{0})
       {}
 
-      virtual ~wallet_manager() override
+      virtual ~wallet_manager() /* override */
       {}
 
     /*!
@@ -92,11 +94,11 @@ namespace lwsf
      * \param  kdf_rounds     Number of rounds for key derivation function
      * \return                Wallet instance (Wallet::status() needs to be called to check if created successfully)
      */
-      std::unique_ptr<Wallet> createWallet(const std::string &path, const std::string &password, const std::string &language, NetworkType nettype, uint64_t kdf_rounds) override
+      Monero::Wallet* createWallet(const std::string &path, const std::string &password, const std::string &language, Monero::NetworkType nettype, uint64_t kdf_rounds) override
       {
-        return std::make_unique<wallet>(
-          wallet::create_tag{}, nettype, path, password, kdf_rounds, std::make_shared<backend::wallet>()
-        );
+        return new wallet{
+          wallet::create_tag{}, nettype, path, password, kdf_rounds
+        };
       }
 
     /*!
@@ -109,18 +111,18 @@ namespace lwsf
      * \return                Wallet instance (Wallet::status() needs to be called to check if opened successfully)
      */
 
-      std::shared_ptr<Wallet> openWallet(const std::string &path, const std::string &password, NetworkType nettype, uint64_t kdf_rounds, std::shared_ptr<WalletListener> listener) override
+      Monero::Wallet* openWallet(const std::string &path, const std::string &password, Monero::NetworkType nettype, uint64_t kdf_rounds, Monero::WalletListener* listener) override
       {
         auto data = std::make_shared<backend::wallet>();
         data->listener = std::move(listener);
-        auto out = std::make_shared<wallet>(
+        auto out = std::make_unique<wallet>(
           wallet::open_tag{}, nettype, path, password, kdf_rounds, data
         );
 
         // wallet file should be fully loaded in construction of `wallet`.
         if (data->listener)
-          data->listener->onSetWallet(out);
-        return out;
+          data->listener->onSetWallet(out.get());
+        return out.release();
       }
 
     /*!
@@ -134,8 +136,8 @@ namespace lwsf
      * \param  seed_offset    Seed offset passphrase (optional)
      * \return                Wallet instance (Wallet::status() needs to be called to check if recovered successfully)
      */
-      std::unique_ptr<Wallet> recoveryWallet(const std::string &path, const std::string &password, const std::string &mnemonic,
-                                             NetworkType nettype = MAINNET, uint64_t restoreHeight = 0, uint64_t kdf_rounds = 1,
+      Monero::Wallet* recoveryWallet(const std::string &path, const std::string &password, const std::string &mnemonic,
+                                             Monero::NetworkType nettype = Monero::MAINNET, uint64_t restoreHeight = 0, uint64_t kdf_rounds = 1,
                                              const std::string &seed_offset = {}) override final
       {
         //! \TODO Complete
@@ -150,7 +152,7 @@ namespace lwsf
      * \param  restoreHeight  restore from start height
      * \return                Wallet instance (Wallet::status() needs to be called to check if recovered successfully)
      */
-      std::unique_ptr<Wallet> recoveryWallet(const std::string &path, const std::string &mnemonic, NetworkType nettype, uint64_t restoreHeight = 0) override
+      Monero::Wallet* recoveryWallet(const std::string &path, const std::string &mnemonic, Monero::NetworkType nettype, uint64_t restoreHeight = 0) override
       {
       }
 
@@ -167,10 +169,10 @@ namespace lwsf
      * \param  kdf_rounds     Number of rounds for key derivation function
      * \return                Wallet instance (Wallet::status() needs to be called to check if recovered successfully)
      */
-      std::unique_ptr<Wallet> createWalletFromKeys(const std::string &path,
+      Monero::Wallet* createWalletFromKeys(const std::string &path,
                                                    const std::string &password,
                                                    const std::string &language,
-                                                   NetworkType nettype,
+                                                   Monero::NetworkType nettype,
                                                    uint64_t restoreHeight,
                                                    const std::string &addressString,
                                                    const std::string &viewKeyString,
@@ -192,9 +194,9 @@ namespace lwsf
     * \param  spendKeyString spend key (optional)
     * \return                Wallet instance (Wallet::status() needs to be called to check if recovered successfully)
     */
-      std::unique_ptr<Wallet> createWalletFromKeys(const std::string &path, 
+      Monero::Wallet* createWalletFromKeys(const std::string &path, 
                                                    const std::string &language,
-                                                   NetworkType nettype, 
+                                                   Monero::NetworkType nettype, 
                                                    uint64_t restoreHeight,
                                                    const std::string &addressString,
                                                    const std::string &viewKeyString,
@@ -215,14 +217,14 @@ namespace lwsf
      * \param  listener             Wallet listener to set to the wallet after creation
      * \return                      Wallet instance (Wallet::status() needs to be called to check if recovered successfully)
      */
-      std::unique_ptr<Wallet> createWalletFromDevice(const std::string &path,
+      Monero::Wallet* createWalletFromDevice(const std::string &path,
                                             const std::string &password,
-                                            NetworkType nettype,
+                                            Monero::NetworkType nettype,
                                             const std::string &deviceName,
                                             uint64_t restoreHeight,
                                             const std::string &subaddressLookahead,
                                             uint64_t kdf_rounds,
-                                            WalletListener * listener) override
+                                            Monero::WalletListener * listener) override
       {
         //! \TODO Complete
       }
@@ -232,8 +234,9 @@ namespace lwsf
      * \param wallet        previously opened / created wallet instance
      * \return              None
      */
-      bool closeWallet(std::unique_ptr<Wallet> wallet, const bool store) override
+      bool closeWallet(Monero::Wallet* const wallet, const bool store) override
       {
+        const std::unique_ptr<Monero::Wallet> destroy{wallet};
         if (wallet && store)
           wallet->store(wallet->filename());
       }
@@ -279,7 +282,7 @@ namespace lwsf
      * for verification only - determines key storage hardware
      *
      */
-      bool queryWalletDevice(Wallet::Device& device_type, const std::string &keys_file_name, const std::string &password, uint64_t kdf_rounds) const override
+      bool queryWalletDevice(Monero::Wallet::Device& device_type, const std::string &keys_file_name, const std::string &password, uint64_t kdf_rounds) const override
       {
         //! \TODO Complete
       }
@@ -375,9 +378,9 @@ namespace lwsf
     };
   } // internal
 
-  std::unique_ptr<WalletManager> WalletManagerFactory::getWalletManager()
+  Monero::WalletManager* WalletManagerFactory::getWalletManager()
   {
-    return std::make_unique<internal::wallet_manager>();
+    return new internal::wallet_manager{};
   }
 
   void WalletManagerFactory::setLogLevel(int level)

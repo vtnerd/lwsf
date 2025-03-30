@@ -65,7 +65,6 @@ namespace lwsf { namespace internal { namespace rpc
     return std::error_code{int(value), error_category()};
   }
 
-
   //! Send `payload` to `client` at uri `endpoint`, and \return payload response
   expect<std::string> invoke_payload(http_client& client, boost::string_ref endpoint, epee::byte_slice payload);
 
@@ -88,12 +87,8 @@ namespace lwsf { namespace internal { namespace rpc
     return out;
   }
 
-  struct empty
-  {
-    empty() = delete;
-  };
-  inline void write_bytes(const wire::json_writer&, const empty&)
-  {}
+  struct empty {};
+  WIRE_DECLARE_OBJECT(empty);
  
   struct login
   {
@@ -149,6 +144,10 @@ namespace lwsf { namespace internal { namespace rpc
     address_meta() noexcept
       : maj_i(0), min_i(0)
     {}
+
+    address_meta(const std::uint32_t maj, std::uint32_t min) noexcept
+      : maj_i(maj), min_i(min)
+    {}
   };
   WIRE_DECLARE_OBJECT(address_meta);
 
@@ -173,7 +172,7 @@ namespace lwsf { namespace internal { namespace rpc
   struct transaction
   {
     std::vector<transaction_spend> spent_outputs;
-    std::variant<std::nullptr_t, crypto::hash8, crypto::hash> payment_id;
+    std::variant<empty, crypto::hash8, crypto::hash> payment_id;
     std::optional<std::time_t> timestamp;
     std::optional<uint64_string> fee;
     uint64_string total_received;
@@ -209,6 +208,27 @@ namespace lwsf { namespace internal { namespace rpc
     std::uint64_t blockchain_height;
   };
   void read_bytes(wire::json_reader&, get_address_txs&);
+
+
+  struct subaddrs
+  {
+    subaddrs()
+      : key(0), value()
+    {}
+
+    std::uint32_t key;
+    std::vector<std::array<std::uint32_t, 2>> value; 
+  };
+  void read_bytes(wire::json_reader&, subaddrs&);
+
+  struct get_subaddrs
+  {
+    get_subaddrs() = delete;
+    static constexpr const char* endpoint() noexcept { return "/get_subaddrs"; }
+
+    std::vector<subaddrs> all_subaddrs;
+  };
+  void read_bytes(wire::json_reader&, get_subaddrs&);
 
 
   struct ringct
@@ -272,6 +292,29 @@ namespace lwsf { namespace internal { namespace rpc
     bool request_fulfilled;
   };
   void read_bytes(wire::json_reader&, import_response&);
+
+  
+  struct provision_subaddrs_request
+  {
+    provision_subaddrs_request() = delete;
+    login creds;
+    std::uint32_t maj_i;
+    std::uint32_t min_i;
+    std::uint32_t n_maj;
+    std::uint32_t n_min;
+    bool get_all;
+  };
+  void write_bytes(wire::json_writer&, const provision_subaddrs_request&);
+
+  struct provision_subaddrs_response
+  {
+    provision_subaddrs_response() = delete;
+    static constexpr const char* endpoint() noexcept { return "/provision_subaddrs"; }
+
+    std::vector<subaddrs> new_subaddrs;
+    std::vector<subaddrs> all_subaddrs;
+  };
+  void read_bytes(wire::json_reader&, provision_subaddrs_response&);
 
 
   struct submit_raw_tx_request

@@ -1,21 +1,20 @@
 // Copyright (c) 2024, The Monero Project
-// 
 // All rights reserved.
-// 
+//
 // Redistribution and use in source and binary forms, with or without modification, are
 // permitted provided that the following conditions are met:
-// 
+//
 // 1. Redistributions of source code must retain the above copyright notice, this list of
 //    conditions and the following disclaimer.
-// 
+//
 // 2. Redistributions in binary form must reproduce the above copyright notice, this list
 //    of conditions and the following disclaimer in the documentation and/or other
 //    materials provided with the distribution.
-// 
+//
 // 3. Neither the name of the copyright holder nor the names of its contributors may be
 //    used to endorse or promote products derived from this software without specific
 //    prior written permission.
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
 // MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -28,35 +27,42 @@
 
 #pragma once
 
-#include <memory>
-#include <unordered_map>
-#include <vector>
-#include "crypto/hash.h"            // monero/src
-#include "wallet/api/wallet2_api.h" // monero/src
+#include <system_error>
 
-namespace lwsf { namespace internal
+namespace lwsf
 {
-  namespace backend { class wallet; }
-  class transaction_history : public Monero::TransactionHistory
+  enum class error : int
   {
-    const std::shared_ptr<backend::wallet> data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
-
-  public:
-    explicit transaction_history(std::shared_ptr<backend::wallet> data);
-
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
-
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
-    virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
+    none = 0,           //!< Must be zero for `expect<..>`
+    connect_failure,    //!< Connection to server failed
+    crypto_failure,     //!< Failure in crypto
+    invalid_encoding,   //!< Invalid percent encoding
+    invalid_scheme,     //!< Invalid network scheme
+    read_failure,       //!< Failed to read file
+    rpc_failure,        //!< RPC failed
+    unexpected_userinfo,//!< Unexpected user+pass provided
+    unsupported_format, //!< File format could not be unpacked
+    write_failure       //!< Failed to write file
   };
-}} // lwsf // internal
+
+  //! \return Error message string.
+  const char* get_string(error value) noexcept;
+
+  //! \return Category for `schema_error`.
+  const std::error_category& error_category() noexcept;
+
+  //! \return Error code with `value` and `schema_category()`.
+  inline std::error_code make_error_code(const error value) noexcept
+  {
+    return std::error_code{int(value), error_category()};
+  }
+
+} // lwsf
+
+namespace std
+{
+  template<>
+  struct is_error_code_enum<lwsf::error>
+    : true_type
+  {};
+}

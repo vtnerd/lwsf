@@ -40,6 +40,7 @@
 #include <sodium/randombytes.h>
 #include <sodium/crypto_aead_chacha20poly1305.h>
 #include <string_view>
+#include "address_book.h"
 #include "backend.h"
 #include "error.h"
 #include "hex.h"       // monero/contrib/epee/include
@@ -48,6 +49,7 @@
 #include "net/parse.h"         // monero/src
 #include "net/socks.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
+#include "subaddress_account.h"
 #include "transaction_history.h"
 #include "wire.h"
 #include "wire/msgpack.h"
@@ -303,7 +305,7 @@ namespace lwsf { namespace internal
     }
   } // anonymous
 
-  bool wallet::set_error(const std::error_code status)
+  bool wallet::set_error(const std::error_code status) const
   {
     const boost::lock_guard<boost::mutex> lock{error_sync_};
     status_ = status;
@@ -311,7 +313,7 @@ namespace lwsf { namespace internal
     return !status_;
   }
 
-  void wallet::set_critical(const std::exception& e)
+  void wallet::set_critical(const std::exception& e) const
   {
     const boost::lock_guard<boost::mutex> lock{error_sync_};
     exception_error_ = e.what();
@@ -366,7 +368,7 @@ namespace lwsf { namespace internal
     }
   }
 
-  wallet::wallet(create_tag, NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
+  wallet::wallet(create_tag, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
     : data_(std::make_shared<backend::wallet>()),
       filename_(std::move(filename)),
       password_(std::move(password)),
@@ -374,6 +376,8 @@ namespace lwsf { namespace internal
       status_(),
       thread_(),
       iterations_(kdf_rounds),
+      mixin_(config::mixin_default),
+      refresh_interval_(config::refresh_interval),
       refresh_notify_(),
       error_sync_(),
       refresh_sync_(),
@@ -405,7 +409,7 @@ namespace lwsf { namespace internal
     store(std::string{});
   }
 
-  wallet::wallet(open_tag, NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data)
+  wallet::wallet(open_tag, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data)
     : data_(std::move(data)),
       filename_(std::move(filename)),
       password_(std::move(password)),
@@ -413,6 +417,8 @@ namespace lwsf { namespace internal
       status_(),
       thread_(),
       iterations_(kdf_rounds),
+      mixin_(config::mixin_default),
+      refresh_interval_(config::refresh_interval),
       refresh_notify_(),
       error_sync_(),
       refresh_sync_(),
@@ -420,7 +426,7 @@ namespace lwsf { namespace internal
       mandatory_refresh_(false)
   {
     if (!data_)
-      throw std::logic_error{"backend::wallet cannot be null"};
+      throw std::invalid_argument{"lwsf::backend::wallet cannot be null"};
 
     try
     {
@@ -501,7 +507,7 @@ namespace lwsf { namespace internal
     return true;
   }
 
-  NetworkType wallet::nettype() const { return data_->primary.type; }
+  Monero::NetworkType wallet::nettype() const { return data_->primary.type; }
 
   std::string wallet::secretViewKey() const
   {
@@ -583,7 +589,7 @@ namespace lwsf { namespace internal
   bool wallet::init(const std::string &daemon_address, uint64_t, const std::string &daemon_username, const std::string &daemon_password, bool use_ssl, bool light_wallet, const std::string &proxy_address)
   {
     if (!light_wallet)
-      throw std::logic_error{"Only light_wallets are supported with this instance"};
+      throw std::invalid_argument{"Only light_wallets are supported with this instance"};
 
     // on exceptions, reset state
     struct on_throw
@@ -638,7 +644,7 @@ namespace lwsf { namespace internal
     return true;
   }
 
-  void wallet::setRefreshFromBlockHeight(uint64_t refresh_from_block_height) override
+  void wallet::setRefreshFromBlockHeight(uint64_t refresh_from_block_height)
   {
     try { set_error(data_->restore_height(refresh_from_block_height)); }
     catch (const std::exception& e)
@@ -672,14 +678,14 @@ namespace lwsf { namespace internal
     {
       const std::error_code status = data_->login();
       if (!status)
-        disconnect.reset();
+        disconnect.release();
       return set_error(status);
     }
     set_error(error::connect_failure);
     return false;
   }
 
-  Wallet::ConnectionStatus wallet::connected() const
+  Monero::Wallet::ConnectionStatus wallet::connected() const
   {
     return data_->client.is_connected() ?
       ConnectionStatus_Connected : ConnectionStatus_Disconnected;
@@ -738,20 +744,185 @@ namespace lwsf { namespace internal
     refresh_notify_.notify_all();
   }
 
+  void wallet::setAutoRefreshInterval(int millis)
+  {
+    using rep_type = std::chrono::milliseconds::rep;
+    static_assert(std::numeric_limits<int>::max() <= std::numeric_limits<rep_type>::max());
+    if (0 < millis)
+    {
+      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+      refresh_interval_ = std::chrono::milliseconds{millis};
+      if (thread_state_ == state::stop)
+      {
+        thread_state_ = state::run;
+        thread_ = boost::thread{[this] () { this->refresh_loop(); }};
+      }
+    }
+    else
+      return stop_refresh_loop();
+  }
+
+  int wallet::autoRefreshInterval() const
+  {
+    return refresh_interval_.count();
+  }
+
   uint64_t wallet::estimateTransactionFee(const std::vector<std::pair<std::string, uint64_t>> &destinations,
-                                            PendingTransaction::Priority priority) const
+                                          Monero::PendingTransaction::Priority priority) const
   {
     throw std::runtime_error{"Not Implemented yet"};
   }
-
-  std::shared_ptr<TransactionHistory> wallet::history()
+  
+  bool wallet::exportKeyImages(const std::string &filename, bool all)
   {
-    return std::make_shared<transaction_history>(data_);
+    throw std::runtime_error{"exportKeyImages not implemented"};
+  }
+   
+  bool wallet::importKeyImages(const std::string &filename)
+  {
+    throw std::runtime_error{"importKeyImages not implemented"};
   }
 
-  void wallet::setListener(std::shared_ptr<WalletListener> listener)
+  bool wallet::exportOutputs(const std::string &filename, bool all)
+  {
+    throw std::runtime_error{"exportOutputs not implemented"};
+  }
+
+  bool wallet::importOutputs(const std::string &filename)
+  {
+    throw std::runtime_error{"importOutputs not implemented"};
+  }
+
+  bool wallet::scanTransactions(const std::vector<std::string> &txids)
+  {
+    throw std::runtime_error{"scanTransactions not implemented"};
+  }
+
+  Monero::AddressBook* wallet::addressBook()
+  {
+    if (!addressbook_)
+      addressbook_ = std::make_unique<address_book>(data_);
+    return addressbook_.get();
+  }
+
+  Monero::TransactionHistory* wallet::history()
+  {
+    if (!history_)
+      history_ = std::make_unique<transaction_history>(data_);
+    return history_.get();
+  } 
+
+  Monero::SubaddressAccount* wallet::subaddressAccount()
+  {
+    if (!subaddresses_)
+      subaddresses_ = std::make_unique<subaddress_account>(data_);
+    return subaddresses_.get();
+  }
+
+  void wallet::setListener(Monero::WalletListener* listener)
+  {
+    {
+      const boost::lock_guard<boost::mutex> lock{data_->sync_listener};
+      data_->listener = listener;
+    }
+    listener->onSetWallet(this);
+  }
+
+  std::uint32_t wallet::defaultMixin() const
+  {
+    return mixin_;
+  }
+
+  void wallet::setDefaultMixin(const std::uint32_t arg)
+  {
+    mixin_ = arg;
+  }
+
+  bool wallet::setCacheAttribute(const std::string &key, const std::string &val)
   {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
-    data_->listener = std::move(listener);
+    data_->primary.attributes.try_emplace(key).first->second = val;
+  }
+
+  std::string wallet::getCacheAttribute(const std::string &key) const
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    const auto iter = data_->primary.attributes.find(key);
+    if (iter == data_->primary.attributes.end())
+      return {};
+    return iter->second;
+  }
+
+  bool wallet::setUserNote(const std::string &txid, const std::string &note)
+  {
+    crypto::hash binary_id{};
+    if (!epee::string_tools::hex_to_pod(txid, binary_id))
+      return false;
+
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    auto iter = data_->primary.txes.find(binary_id);
+    if (iter == data_->primary.txes.end())
+      return false;
+
+    iter->second->description = note;
+    return true;
+  }
+
+  std::string wallet::getUserNote(const std::string &txid) const
+  {
+    crypto::hash binary_id{};
+    if (!epee::string_tools::hex_to_pod(txid, binary_id))
+    {
+      set_critical(std::runtime_error{"getUserNote given invalid hex id"});
+      return {};
+    }
+
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    auto iter = data_->primary.txes.find(binary_id);
+    if (iter == data_->primary.txes.end())
+      return {};
+    return iter->second->description;
+  }
+
+  std::string wallet::getTxKey(const std::string &txid) const
+  {
+    crypto::hash binary_id{};
+    if (!epee::string_tools::hex_to_pod(txid, binary_id))
+    {
+      set_critical(std::runtime_error{"getTxKey given invalid hex id"});
+      return {};
+    }
+
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    auto iter = data_->primary.txes.find(binary_id);
+    if (iter == data_->primary.txes.end())
+    {
+      set_critical(std::runtime_error{"getTxKey tx not found"});
+      return {};
+    }
+
+    static constexpr const auto hex_size = sizeof(crypto::secret_key) * 2;
+
+    std::string out;
+    out.reserve(iter->second->spends.size() * hex_size);
+
+    for (const auto& spend : iter->second->spends)
+    {
+      if (spend.second.secret)
+      {
+        out.insert(out.end(), hex_size, 0);
+        if (!epee::to_hex::buffer({out.data() + out.size() - hex_size, hex_size}, epee::as_byte_span(unwrap(unwrap(*spend.second.secret)))))
+        {
+          set_critical(std::runtime_error{"getTxKey conversion to hex failure"});
+          return {};
+        }
+      }
+    }
+
+    return out;
+  }
+
+  bool wallet::checkTxKey(const std::string &txid, std::string tx_key, const std::string &address, uint64_t &received, bool &in_pool, uint64_t &confirmations)
+  {
   }
 }} // lwsf // internal
