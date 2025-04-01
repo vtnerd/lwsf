@@ -38,6 +38,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -135,7 +136,8 @@ namespace lwsf { namespace internal { namespace backend
         payment_id(),
         id{},
         prefix{},
-        coinbase(false)
+        coinbase(false),
+        failed(false)
     {}
 
     transaction(transaction&&) = default;
@@ -161,6 +163,7 @@ namespace lwsf { namespace internal { namespace backend
     crypto::hash id;
     crypto::hash prefix;
     bool coinbase;
+    bool failed;
   };
   WIRE_DECLARE_OBJECT(transaction);
 
@@ -180,8 +183,8 @@ namespace lwsf { namespace internal { namespace backend
     std::string language;
     std::vector<address_book_entry> addressbook;
     std::map<std::uint32_t, sub_account> subaccounts;
-    boost::container::flat_map<crypto::hash, std::shared_ptr<transaction>, memory> txes;
-    std::map<std::string, std::string> attributes;
+    std::unordered_map<crypto::hash, std::shared_ptr<transaction>> txes;
+    std::unordered_map<std::string, std::string> attributes;
     std::uint64_t scan_height;
     std::uint64_t restore_height;
     Monero::NetworkType type;
@@ -202,6 +205,7 @@ namespace lwsf { namespace internal { namespace backend
     std::uint64_t fee_mask;
     mutable boost::mutex sync;
     boost::mutex sync_listener;
+    boost::mutex sync_refresh;
 
     wallet();
 

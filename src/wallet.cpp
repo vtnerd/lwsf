@@ -359,8 +359,9 @@ namespace lwsf { namespace internal
 
   void wallet::stop_refresh_loop()
   {
+    const boost::lock_guard<boost::mutex> lock{thread_sync_};
     {
-      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+      const boost::lock_guard<boost::mutex> lock2{refresh_sync_};
       thread_state_ = state::stop;
     }
     refresh_notify_.notify_all();
@@ -370,10 +371,19 @@ namespace lwsf { namespace internal
 
   void wallet::refresh_loop()
   {
+    struct set_stop_
+    {
+      void operator()(state* val) const noexcept 
+      {
+         if (val)
+          *val = state::stop;
+      }
+    };
     try
     {
       boost::unique_lock<boost::mutex> lock{refresh_sync_};
-      while (thread_state_ != state::stop)
+      const std::unique_ptr<state, set_stop_> set_stop{std::addressof(thread_state_)};
+      while (mandatory_refresh_ || thread_state_ != state::stop)
       {
         const bool mandatory_refresh = mandatory_refresh_;
         mandatory_refresh_ = false;
@@ -464,6 +474,7 @@ namespace lwsf { namespace internal
       refresh_notify_(),
       error_sync_(),
       refresh_sync_(),
+      thread_sync_(),
       thread_state_(state::stop),
       mandatory_refresh_(false)
   {
@@ -494,6 +505,7 @@ namespace lwsf { namespace internal
       refresh_notify_(),
       error_sync_(),
       refresh_sync_(),
+      thread_sync_(),
       thread_state_(state::stop),
       mandatory_refresh_(false)
   {
@@ -552,6 +564,7 @@ namespace lwsf { namespace internal
       refresh_notify_(),
       error_sync_(),
       refresh_sync_(),
+      thread_sync_(),
       thread_state_(state::stop),
       mandatory_refresh_(false)
   {
@@ -711,16 +724,12 @@ namespace lwsf { namespace internal
           const std::filesystem::path directory =
             std::filesystem::path{real_path}.remove_filename();
 
-          if (std::filesystem::exists(new_file, status))
-            std::filesystem::remove(file, status);
-          std::filesystem::rename(new_file, file, status);
-        
+          if (std::filesystem::exists(new_file))
+            std::filesystem::rename(new_file, file, status);
+ 
           // blocks until file and directory contents are synced
           if (atomic_file_write(new_file, directory, epee::byte_slice{std::move(buffer)}))
-          {
-            std::filesystem::remove(file, status);
             std::filesystem::rename(new_file, file, status);
-          }
           else
             status = error::write_failure;
         }
@@ -786,8 +795,7 @@ namespace lwsf { namespace internal
       if (!connectToDaemon())
         return false;
 
-      thread_state_ = state::run;
-      thread_ = boost::thread{[this] () { this->refresh_loop(); }};
+      startRefresh();
       rollback.release();
     }
     catch (const std::exception& e)
@@ -930,9 +938,26 @@ namespace lwsf { namespace internal
 
   void wallet::startRefresh()
   {
+    const boost::lock_guard<boost::mutex> lock{thread_sync_};
     {
-      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
-      thread_state_ = state::run;
+      const boost::lock_guard<boost::mutex> lock2{refresh_sync_};
+      const bool no_refresh =
+        refresh_interval_ <= std::chrono::milliseconds{0};
+      if (no_refresh)
+      {
+        thread_state_ = state::stop;
+        if (!mandatory_refresh_)
+          return;
+      }
+
+      const state old_state = thread_state_;
+      thread_state_ = no_refresh ? state::stop : state::run;
+      if (old_state == state::stop)
+      {
+        if (thread_.joinable())
+          thread_.join();
+        thread_ = boost::thread{[this] () { this->refresh_loop(); }};
+      }
     }
     refresh_notify_.notify_all();
   }
@@ -940,12 +965,15 @@ namespace lwsf { namespace internal
   void wallet::pauseRefresh()
   {
     const boost::lock_guard<boost::mutex> lock{refresh_sync_};
-    thread_state_ = state::paused;
+    if (thread_state_ != state::stop)
+      thread_state_ = state::paused;
   }
 
   bool wallet::refresh()
   {
-    return set_error(data_->refresh(false));
+    try { return set_error(data_->refresh(true)); }
+    catch (const std::exception& e) { set_critical(e); }
+    return false;
   }
 
   void wallet::refreshAsync()
@@ -954,25 +982,22 @@ namespace lwsf { namespace internal
       const boost::lock_guard<boost::mutex> lock{refresh_sync_};
       mandatory_refresh_ = true;
     }
-    refresh_notify_.notify_all();
+    startRefresh();
   }
 
   void wallet::setAutoRefreshInterval(int millis)
   {
     using rep_type = std::chrono::milliseconds::rep;
     static_assert(std::numeric_limits<int>::max() <= std::numeric_limits<rep_type>::max());
-    if (0 < millis)
+
+    boost::unique_lock<boost::mutex> lock{refresh_sync_};
+    refresh_interval_ = std::chrono::milliseconds{millis};
+    if (millis <= 0)
     {
-      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
-      refresh_interval_ = std::chrono::milliseconds{millis};
-      if (thread_state_ == state::stop)
-      {
-        thread_state_ = state::run;
-        thread_ = boost::thread{[this] () { this->refresh_loop(); }};
-      }
+      thread_state_ = state::stop;
+      lock.unlock();
+      stop_refresh_loop();
     }
-    else
-      return stop_refresh_loop();
   }
 
   int wallet::autoRefreshInterval() const

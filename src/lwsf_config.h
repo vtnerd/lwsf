@@ -36,6 +36,7 @@ namespace lwsf { namespace config
   constexpr const std::size_t max_txes_in_rpc = 2048;
   constexpr const std::uint32_t mixin_default = 16;
   constexpr const std::chrono::seconds refresh_interval{30};
+  constexpr const std::chrono::seconds refresh_interval_min{5};
   constexpr const std::chrono::seconds rpc_timeout{5};
   constexpr const unsigned subaddr_retry{10};
 }} // lwsf // config

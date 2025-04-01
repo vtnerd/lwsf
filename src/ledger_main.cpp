@@ -190,6 +190,7 @@ namespace
 
     if (!prog.lws_url.empty())
     {
+      wallet->setAutoRefreshInterval(0); // do not start background thread
       if (!wallet->init(prog.lws_url, 0, "", "", (prog.lws_url.substr(0, 8) == "https://"), true) || !wallet->refresh())
         throw std::runtime_error{"Failed to refresh wallet: " + wallet->errorString()};
     }
@@ -204,7 +205,7 @@ namespace
     std::cout << "; Blockchain Height: " << wallet->daemonBlockChainHeight() << std::endl;
     std::cout << "; Start Height: " << wallet->getRefreshFromBlockHeight() << std::endl;
     std::cout << "; Scan Height: " << wallet->blockChainHeight() << std::endl;
-    std::cout << "; Accounts: " << wallet->numSubaddressAccounts() << std::endl << std::endl;
+    std::cout << "; Accounts: " << wallet->numSubaddressAccounts() << std::endl;
 
     Monero::TransactionHistory* history = wallet->history();
     if (!history)
@@ -212,6 +213,9 @@ namespace
 
     history->refresh();
     const std::vector<Monero::TransactionInfo*>& info_list = history->getAll();
+
+    std::cout << "; Transactions: " << info_list.size() << std::endl << std::endl;
+
     for (const Monero::TransactionInfo* info : info_list)
     {
       if (!info)

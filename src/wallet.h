@@ -66,7 +66,8 @@ namespace internal
     std::uint32_t mixin_;
     boost::condition_variable refresh_notify_;
     mutable boost::mutex error_sync_;
-    boost::mutex refresh_sync_;
+    boost::mutex refresh_sync_; //!< Synchronizes with requests from other threads
+    boost::mutex thread_sync_;  //!< Syncrhonizes thread destruction+creation
     state thread_state_;
     bool mandatory_refresh_;
 

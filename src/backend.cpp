@@ -189,7 +189,7 @@ namespace lwsf { namespace internal { namespace backend
     read_bytes(source, *dest.second);
     dest.first = dest.second->id;
   }
-  static void write_bytes(wire::writer& dest, const std::pair<crypto::hash, std::shared_ptr<transaction>>& source)
+  static void write_bytes(wire::writer& dest, const std::pair<const crypto::hash, std::shared_ptr<transaction>>& source)
   {
     if (!source.second)
       WIRE_DLOG_THROW(wire::error::schema::object, "Unexpected nullptr");
@@ -364,10 +364,12 @@ namespace lwsf { namespace internal { namespace backend
         `refresh()` method; the wallet is never in a partial-state. Swapping
         the transactions at the end helps with this guarantee. */
 
-      boost::container::flat_map<crypto::hash, std::shared_ptr<transaction>, memory> updated_txes;
+      std::unordered_map<crypto::hash, std::shared_ptr<transaction>> updated_txes;
       updated_txes.reserve(
         std::max(self.primary.txes.size(), source.transactions.size())
       );
+
+      std::unordered_multimap<crypto::key_image, std::shared_ptr<transaction>> images;
 
       /* The frontend will know about the spend first, iff the frontend was
         used to perform the spend. We copy _all_ transactions that have a
@@ -382,10 +384,17 @@ namespace lwsf { namespace internal { namespace backend
           {
             if (spend.second.secret)
             {
-              updated_txes.emplace_hint(
-                updated_txes.end(), tx.first, std::make_shared<transaction>(*tx.second)
+              const auto iter = updated_txes.emplace_hint(
+                updated_txes.end(), tx.first, nullptr
               );
-              break; // inner loop
+              if (!iter->second)
+              {
+                iter->second = std::make_shared<transaction>(*tx.second);
+                iter->second->height = std::nullopt;
+                iter->second->timestamp = std::nullopt;
+                iter->second->failed = false;
+              }
+              images.emplace(spend.first, iter->second);
             }
           }
         }
@@ -405,7 +414,15 @@ namespace lwsf { namespace internal { namespace backend
           if (existing == self.primary.txes.end())
             out.push_back(inserted.first->second);
         }
-        if (!update_tx(self.primary, *inserted.first->second, tx))
+        if (update_tx(self.primary, *inserted.first->second, tx))
+        {
+          for (const auto& spend : inserted.first->second->spends)
+          {
+            for (auto range = images.equal_range(spend.first); range.first != range.second; ++range.first)
+              range.first->second->failed = true;
+          }
+        }
+        else
           updated_txes.erase(tx.hash);
       }
 
@@ -425,7 +442,6 @@ namespace lwsf { namespace internal { namespace backend
 
       self.per_byte_fee = unspents.per_byte_fee;
       self.fee_mask = unspents.fee_mask;
-
       return out;
     }
 
@@ -492,8 +508,11 @@ namespace lwsf { namespace internal { namespace backend
       primary{},
       last_sync(0),
       blockchain_height(0),
+      per_byte_fee(0),
       fee_mask(0),
-      sync()
+      sync(),
+      sync_listener(),
+      sync_refresh()
   {
     primary.subaccounts[0].minor[0];
   }
@@ -592,12 +611,13 @@ namespace lwsf { namespace internal { namespace backend
       const std::chrono::steady_clock::time_point start{
         std::chrono::steady_clock::time_point::duration{last_sync.load()}
       };
-      if (now - start < config::refresh_interval)
+      if (now - start < config::refresh_interval_min)
         return {};
     }
 
     expect<rpc::get_unspent_outs_response> outs_response{common_error::kInvalidArgument};
 
+    boost::unique_lock<boost::mutex> lock_refresh{sync_refresh};
     boost::unique_lock<boost::mutex> lock{sync};
     const auto now = std::chrono::steady_clock::now();
     if (!mandatory) // double-check
@@ -605,10 +625,9 @@ namespace lwsf { namespace internal { namespace backend
       const std::chrono::steady_clock::time_point start{
         std::chrono::steady_clock::time_point::duration{last_sync.load()}
       };
-      if (now - start < config::refresh_interval)
+      if (now - start < config::refresh_interval_min)
         return {};
     }
-    last_sync = now.time_since_epoch().count();
 
     const rpc::login login{primary.address, primary.view.sec};
     lock.unlock();
@@ -625,10 +644,11 @@ namespace lwsf { namespace internal { namespace backend
       return outs_response.error();
 
     lock.lock();
+    last_sync = now.time_since_epoch().count();
     const std::uint64_t orig_scan_height = primary.scan_height;
     const auto new_txes = merge_response(*this, *txs_response, *outs_response);
 
-    const boost::lock_guard<boost::mutex> lock2{sync_listener};
+    const boost::lock_guard<boost::mutex> lock_listener{sync_listener};
     if (!listener)
       return {};
 
@@ -637,6 +657,7 @@ namespace lwsf { namespace internal { namespace backend
     const std::uint64_t new_scan_height =
       std::max(orig_scan_height, primary.scan_height);
     lock.unlock();
+    lock_refresh.unlock();
 
     listener->refreshed();
     if (!new_txes.empty() || new_scan_height - orig_scan_height)

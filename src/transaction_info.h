@@ -60,7 +60,7 @@ namespace lwsf { namespace internal
 
     virtual int direction() const override { return data_->direction; }
     virtual bool isPending() const override { return !data_->height; }
-    virtual bool isFailed() const override { return false; }
+    virtual bool isFailed() const override { return data_->failed; }
     virtual bool isCoinbase() const override { return data_->coinbase; }
     virtual std::uint64_t amount() const override { return data_->amount; }
     virtual std::uint64_t fee() const override { return data_->fee; }
