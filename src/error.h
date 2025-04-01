@@ -34,6 +34,7 @@ namespace lwsf
   enum class error : int
   {
     none = 0,           //!< Must be zero for `expect<..>`
+    configuration,      //!< Bad Configuration
     connect_failure,    //!< Connection to server failed
     crypto_failure,     //!< Failure in crypto
     invalid_encoding,   //!< Invalid percent encoding

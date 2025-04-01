@@ -26,8 +26,8 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-set(monero-lws_wire-json_sources error.cpp read.cpp write.cpp)
-set(monero-lws_wire-json_headers base.h error.h fwd.h read.h write.h)
+set(lwsf_wire-json_sources error.cpp read.cpp write.cpp)
+set(lwsf_wire-json_headers base.h error.h fwd.h read.h write.h)
 
-add_library(monero-lws-wire-json ${monero-lws_wire-json_sources} ${monero-lws-wire-json_headers})
-target_link_libraries(monero-lws-wire-json  monero::libraries monero-lws-wire)
+add_library(lwsf-wire-json ${lwsf_wire-json_sources} ${lwsf-wire-json_headers})
+target_link_libraries(lwsf-wire-json  monero::libraries lwsf-wire)

@@ -1,4 +1,4 @@
-// Copyright (c) 2020, The Monero Project
+// Copyright (c) 2021, The Monero Project
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without modification, are
@@ -42,8 +42,21 @@ void wire::reader::decrement_depth()
   --depth_;
 }
 
-[[noreturn]] void wire::integer::throw_exception(std::intmax_t source, std::intmax_t min, std::intmax_t max)
+std::size_t wire::reader::start_array(std::size_t min_element_size)
 {
+  increment_depth();
+  return do_start_array(min_element_size);
+}
+
+std::size_t wire::reader::start_object()
+{
+  increment_depth();
+  return do_start_object();
+}
+
+[[noreturn]] void wire::integer::throw_exception(const std::intmax_t source, const std::intmax_t min, const std::intmax_t max)
+{
+  static_assert(0 <= std::numeric_limits<std::intmax_t>::max(), "expected 0 <= intmax_t::max");
   static_assert(
     std::numeric_limits<std::intmax_t>::max() <= std::numeric_limits<std::uintmax_t>::max(),
     "expected intmax_t::max <= uintmax_t::max"
@@ -53,9 +66,9 @@ void wire::reader::decrement_depth()
   else
     throw_exception(std::uintmax_t(source), std::uintmax_t(max));
 }
-[[noreturn]] void wire::integer::throw_exception(std::uintmax_t source, std::uintmax_t max)
+[[noreturn]] void wire::integer::throw_exception(const std::uintmax_t source, const std::uintmax_t max)
 {
-  WIRE_DLOG_THROW(error::schema::smaller_integer, source << " given when " << max << "is maximum permitted");
+  WIRE_DLOG_THROW(error::schema::smaller_integer, source << " given when " << max << " is maximum permitted");
 }
 
 [[noreturn]] void wire_read::throw_exception(const wire::error::schema code, const char* display, epee::span<char const* const> names)
@@ -71,5 +84,4 @@ void wire::reader::decrement_depth()
   }
   WIRE_DLOG_THROW(code, display << (name ? name : ""));
 }
-
 

@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2023, The Monero Project
+// Copyright (c) 2023, The Monero Project
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without modification, are
@@ -30,22 +30,51 @@
 #include <cstdint>
 #include <limits>
 #include <string>
-#include <tuple>
 #include <type_traits>
 
-#include "byte_slice.h"    // monero/contrib/epee/include
-#include "common/expect.h" // monero/src
-#include "span.h"          // monero/contrib/epee/include
+#include "byte_slice.h" // monero/contrib/epee/include
 #include "wire/error.h"
 #include "wire/field.h"
+#include "wire/fwd.h"
 #include "wire/traits.h"
+#include "span.h" // monero/contrib/epee/include
+
+/*
+  Custom types (e.g. `type` in namespace `ns`) can define an input function by:
+    * `namespace wire { template<> struct is_blob<ns::type> : std::true_type {}; }`
+    * `namespace wire { void read_bytes(writer&, ns::type&); }`
+    * `namespace ns { void read_bytes(wire::writer&, type&); }`
+
+  See `traits.h` for `is_blob` requirements. `read_bytes` function can also
+  specify derived type for faster output (i.e.
+  `namespace ns { void read_bytes(wire::epee_reader&, type&); }`). Using the
+  derived type allows the compiler to de-virtualize and allows for custom
+  functions not defined by base interface. Using base interface allows for
+  multiple formats with minimal instruction count. */
 
 namespace wire
 {
   //! Interface for converting "wire" (byte) formats to C/C++ objects without a DOM.
   class reader
-  { 
+  {
     std::size_t depth_; //!< Tracks number of recursive objects and arrays
+
+    //! \throw wire::exception if max depth is reached
+    void increment_depth();
+    //! \throw std::logic_error if already `depth() == 0`.
+    void decrement_depth();
+
+    /*! \param min_element_size of each array element in any format - if known.
+          Derived types with explicit element count should verify available
+          space, and throw a `wire::exception` on issues.
+        \throw wire::exception if next value not array
+        \throw wire::exception if not enough bytes for all array elements
+          (with epee/msgpack which has specified number of elements).
+        \return Number of values to read before calling `is_array_end()`. */
+    virtual std::size_t do_start_array(std::size_t min_element_size) = 0;
+
+    //! \throw wire::exception if not object begin. \return State to be given to `key(...)` function.
+    virtual std::size_t do_start_object() = 0;
 
   protected:
     epee::span<const std::uint8_t> remaining_; //!< Derived class tracks unprocessed bytes here
@@ -54,22 +83,16 @@ namespace wire
       : depth_(0), remaining_(remaining)
     {}
 
-    reader(const reader&) = default;
-    reader(reader&&) = default;
-    reader& operator=(const reader&) = default;
-    reader& operator=(reader&&) = default;
-
-    //! \throw wire::exception if max depth is reached
-    void increment_depth();
-
-    //! \throw std::logic_error if already `depth() == 0`.
-    void decrement_depth();
-
+    reader(const reader&) = delete;
+    reader(reader&&) = delete;
+    reader& operator=(const reader&) = delete;
+    reader& operator=(reader&&) = delete;
+ 
   public:
     struct key_map
     {
-        const char* name;
-        unsigned id; //<! For integer key formats;
+      const char* name;
+      unsigned id; //<! For integer key formats;
     };
 
     //! \return Maximum read depth for both objects and arrays before erroring
@@ -90,10 +113,13 @@ namespace wire
     //! \throw wire::exception if parsing is incomplete.
     virtual void check_complete() const = 0;
 
+    //! \throw wire::exception if array, object, or end of stream.
+    virtual basic_value basic() = 0;
+
     //! \throw wire::exception if next value not a boolean.
     virtual bool boolean() = 0;
 
-    //! \throw wire::exception if next value not an integer.
+    //! \throw wire::expception if next value not an integer.
     virtual std::intmax_t integer() = 0;
 
     //! \throw wire::exception if next value not an unsigned integer.
@@ -105,30 +131,40 @@ namespace wire
     //! throw wire::exception if next value not string
     virtual std::string string() = 0;
 
+    /*! Copy upcoming string directly into `dest`.
+      \throw wire::exception if next value not string
+      \throw wire::exception if next string exceeds `dest.size())`
+      \throw wire::exception if `exact == true` and next string is not `dest.size()`
+      \return Number of bytes read into `dest`. */
+    virtual std::size_t string(epee::span<char> dest, bool exact) = 0;
+
     // ! \throw wire::exception if next value cannot be read as binary
     virtual epee::byte_slice binary() = 0;
 
-    //! \throw wire::exception if next value cannot be read as binary into `dest`.
-    virtual void binary(epee::span<std::uint8_t> dest) = 0;
+    /*! Copy upcoming binary directly into `dest`.
+      \throw wire::exception if next value not binary
+      \throw wire::exception if next binary exceeds `dest.size()`
+      \throw wire::exception if `exact == true` and next binary is not `dest.size()`.
+      \return Number of bytes read into `dest`. */
+    virtual std::size_t binary(epee::span<std::uint8_t> dest, const bool exact) = 0;
 
-    /*  \param min_element_size of each array element in any format - if known.
+    /*! \param min_element_size of each array element in any format - if known.
           Derived types with explicit element count should verify available
           space, and throw a `wire::exception` on issues.
         \throw wire::exception if next value not array
         \throw wire::exception if not enough bytes for all array elements
           (with epee/msgpack which has specified number of elements).
-        \return Number of values to read before calling `is_array_end()` */
-    virtual std::size_t start_array(std::size_t min_element_size) = 0;
+        \return Number of values to read before calling `is_array_end()`. */
+    std::size_t start_array(std::size_t min_element_size);
 
     //! \return True if there is another element to read.
     virtual bool is_array_end(std::size_t count) = 0;
 
-    //! \throw wire::exception if array end delimiter not present.
     void end_array() { decrement_depth(); }
 
 
     //! \throw wire::exception if not object begin. \return State to be given to `key(...)` function.
-    virtual std::size_t start_object() = 0;
+    std::size_t start_object();
 
     /*! Read a key of an object field and match against a known list of keys.
        Skips or throws exceptions on unknown fields depending on implementation
@@ -168,7 +204,7 @@ namespace wire
 
   template<typename R, typename T>
   inline std::enable_if_t<is_blob<T>::value> read_bytes(R& source, T& dest)
-  { source.binary(epee::as_mut_byte_span(dest)); }
+  { source.binary(epee::as_mut_byte_span(dest), /*exact=*/ true); }
 
   //! Use `read_bytes(...)` method if available for `T`.
   template<typename R, typename T>
@@ -193,7 +229,7 @@ namespace wire
         "source must be signed integer type"
       );
       if (source < limit::min() || limit::max() < source)
-       throw_exception(source, limit::min(), limit::max());
+        throw_exception(source, limit::min(), limit::max());
       return static_cast<T>(source);
     }
 
@@ -213,7 +249,7 @@ namespace wire
         throw_exception(source, limit::max());
       return static_cast<T>(source);
     }
-  }
+  } // integer
 
   //! read all current and future signed integer types
   template<typename R, typename T>
@@ -234,11 +270,12 @@ namespace wire
 
 namespace wire_read
 {
-    /*! Don't add a function called `read_bytes` to this namespace, it will prevent
-      ADL lookup. ADL lookup delays the function searching until the template
-      is used instead of when its defined. This allows the unqualified calls to
-      `read_bytes` in this namespace to "find" user functions that are declared
-      after these functions (the technique behind `boost::serialization`). */
+    /*! Don't add a function called `read_bytes` to this namespace, it will
+      prevent 2-phase lookup. 2-phase lookup delays the function searching until
+      the template is used instead of when its defined. This allows the
+      unqualified calls to `read_bytes` in this namespace to "find" user
+      functions that are declared after these functions (the technique behind
+      `boost::serialization`). */
 
   [[noreturn]] void throw_exception(wire::error::schema code, const char* display, epee::span<char const* const> name_list);
 
@@ -248,10 +285,13 @@ namespace wire_read
     read_bytes(source, dest); // ADL (searches every associated namespace)
   }
 
-  //! \return `T` converted from `source` or error.
+  //! Use `source` to store information at `dest`
   template<typename R, typename T, typename U>
   inline std::error_code from_bytes(T&& source, U& dest)
   {
+    if (wire::is_optional_root<U>::value && source.empty())
+      return {};
+
     try
     {
       R in{std::forward<T>(source)};
@@ -262,6 +302,7 @@ namespace wire_read
     {
       return e.code();
     }
+
     return {};
   }
 
@@ -273,17 +314,18 @@ namespace wire_read
   }
 
   // Insert to sorted containers
-  template<typename R, typename T, typename V = std::pair<typename T::key_type, typename T::mapped_type>>
+  template<typename R, typename T, typename V = typename T::value_type>
   inline auto array_insert(R& source, T& dest) -> decltype(dest.emplace_hint(dest.end(), std::declval<V>()), bool(true))
   {
-    V val{};
+    using value_type = typename wire::remove_const_key<V>::type;
+    value_type val{};
     wire_read::bytes(source, val);
     dest.emplace_hint(dest.end(), std::move(val));
     return true;
   }
 
   // Insert into unsorted containers
-  template<typename R, typename T, typename V = typename T::value_type>
+  template<typename R, typename T>
   inline auto array_insert(R& source, T& dest) -> decltype(dest.emplace_back(), dest.back(), bool(true))
   {
     // more efficient to process the object in-place in many cases
@@ -306,10 +348,6 @@ namespace wire_read
     // quick check for epee/msgpack formats
     if (max_element_count < count)
       throw_exception(wire::error::schema::array_max_element, "", nullptr);
-
-    // also checked by derived formats when count is known
-    if (min_element_size && (source.remaining().size() / min_element_size) < count)
-      throw_exception(wire::error::schema::array_min_size, "", nullptr);
 
     dest.clear();
     wire::reserve(dest, count);
@@ -360,13 +398,13 @@ namespace wire_read
   }
 
   template<typename R, typename T, unsigned I>
-  inline void unpack_field(std::size_t, R& source, wire::field_<T, true, I>& dest)
+  inline void unpack_field(R& source, wire::field_<T, true, I>& dest)
   {
     bytes(source, dest.get_value());
   }
 
   template<typename R, typename T, unsigned I>
-  inline void unpack_field(std::size_t, R& source, wire::field_<T, false, I>& dest)
+  inline void unpack_field(R& source, wire::field_<T, false, I>& dest)
   {
     if (!bool(dest.get_value()))
       dest.get_value().emplace();
@@ -395,10 +433,9 @@ namespace wire_read
       return (is_required() && !read_) ? field_.name : nullptr;
     }
 
-
     //! Set all entries in `map` related to this field (expand variant types!).
     template<std::size_t N>
-    std::size_t set_mapping(std::size_t index, wire::reader::key_map (&map)[N])
+    std::size_t set_mapping(std::size_t index, wire::reader::key_map (&map)[N]) noexcept
     {
       our_index_ = index;
       map[index].id = field_.id();
@@ -415,7 +452,7 @@ namespace wire_read
       if (read_)
         throw_exception(wire::error::schema::invalid_key, "duplicate", {std::addressof(field_.name), 1});
 
-      unpack_field(index - our_index_, source, field_);
+      unpack_field(source, field_);
       read_ = true;
       return 1 + is_required();
     }
@@ -432,13 +469,11 @@ namespace wire_read
   // `expand_tracker_map` writes all `tracker` types to a table
 
   template<std::size_t N>
-  inline constexpr std::size_t expand_tracker_map(std::size_t index, const wire::reader::key_map (&)[N])
-  {
-    return index;
-  }
+  inline void expand_tracker_map(std::size_t index, const wire::reader::key_map (&)[N]) noexcept
+  {}
 
   template<std::size_t N, typename T, typename... U>
-  inline void expand_tracker_map(std::size_t index, wire::reader::key_map (&map)[N], tracker<T>& head, tracker<U>&... tail)
+  inline void expand_tracker_map(std::size_t index, wire::reader::key_map (&map)[N], tracker<T>& head, tracker<U>&... tail) noexcept
   {
     expand_tracker_map(head.set_mapping(index, map), map, tail...);
   }
@@ -448,15 +483,16 @@ namespace wire_read
   {
     static constexpr const std::size_t total_subfields = wire::sum(fields.count()...);
     static_assert(total_subfields < 100, "algorithm uses too much stack space and linear searching");
+    static_assert(sizeof...(T) <= total_subfields, "subfield parameter pack size mismatch");
 
     std::size_t state = source.start_object();
     std::size_t required = wire::sum(std::size_t(fields.is_required())...);
 
-    wire::reader::key_map map[total_subfields] = {};
+    wire::reader::key_map map[total_subfields + 1] = {}; // +1 for empty object
     expand_tracker_map(0, map, fields...);
 
     std::size_t next = 0;
-    while (source.key(map, state, next))
+    while (source.key({map, total_subfields}, state, next))
     {
       switch (wire::sum(fields.try_read(source, next)...))
       {
@@ -473,7 +509,7 @@ namespace wire_read
 
     if (required)
     {
-      const char* missing[] = {fields.name_if_missing()...};
+      const char* missing[] = {fields.name_if_missing()..., nullptr};
       throw_exception(wire::error::schema::missing_key, "", missing);
     }
 
@@ -501,5 +537,11 @@ namespace wire
   inline std::enable_if_t<std::is_base_of<reader, R>::value> object(R& source, T... fields)
   {
     wire_read::object(source, wire_read::tracker<T>{std::move(fields)}...);
+  }
+
+  template<typename R, typename... T>
+  inline void object_fwd(const std::true_type /*is_read*/, R& source, T&&... fields)
+  {
+    wire::object(source, std::forward<T>(fields)...);
   }
 }

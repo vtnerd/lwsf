@@ -40,22 +40,28 @@ set(MONERO_LIBRARIES
   serialization
   lmdb_lib
   net
+  checkpoints
+  hardforks
   cryptonote_core
   cryptonote_basic
   cryptonote_format_utils_basic
   ringct
   ringct_basic
+  mnemonics
   multisig
   blockchain_db
   common
   lmdb
   device
+  device_trezor
   cncrypto
   randomx
   epee
   easylogging
   version
   unbound
+  wallet
+  wallet_api
 )
 
 set(MONERO_OPTIONAL unbound)
@@ -64,12 +70,19 @@ set(MONERO_SEARCH_PATHS
   "/contrib/epee/src"
   "/external/db_drivers/liblmdb"
   "/external/easylogging++"
+  "/lib"
   "/src"
+  "src/checkpoints"
   "/src/crypto"
   "/src/cryptonote_basic"
+  "/src/cryptonote_core"
+  "/src/device"
+  "/src/device_trezor"
+  "/src/hardforks"
   "/src/lmdb"
   "/src/ringct"
   "/src/rpc"
+  "/src/wallet/api"
 )
 
 

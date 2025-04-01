@@ -26,10 +26,10 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-set(monero-lws-wire_sources variant.cpp)
-set(monero-lws-wire_headers variant.h)
+set(lwsf-wire_sources variant.cpp)
+set(lwsf-wire_headers variant.h)
 
-add_library(monero-lws-wire-wrapper ${monero-lws-wire_sources} ${monero-lws-wire_headers})
-target_include_directories(monero-lws-wire-wrapper PUBLIC "${LMDB_INCLUDE}")
-target_link_libraries(monero-lws-wire-wrapper PRIVATE monero::libraries)
+add_library(lwsf-wire-wrapper ${lwsf-wire_sources} ${lwsf-wire_headers})
+target_include_directories(lwsf-wire-wrapper PUBLIC "${LMDB_INCLUDE}")
+target_link_libraries(lwsf-wire-wrapper PRIVATE monero::libraries)
 

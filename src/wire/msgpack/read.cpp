@@ -36,6 +36,7 @@
 #include <stdexcept>
 #include <type_traits>
 
+#include "wire/basic_value.h"
 #include "wire/error.h"
 #include "wire/msgpack/error.h"
 
@@ -331,7 +332,7 @@ namespace wire
     return read_integer<std::intmax_t>(remaining_, next);
   }
 
-  std::uintmax_t msgpack_reader::do_unsigned_integer(const msgpack::tag next)
+  std::uintmax_t msgpack_reader:: do_unsigned_integer(const msgpack::tag next)
   {
     return read_integer<std::uintmax_t>(remaining_, next);
   }
@@ -364,6 +365,62 @@ namespace wire
   {
     if (tags_remaining_)
       WIRE_DLOG_THROW_(error::msgpack::incomplete);
+  }
+
+  basic_value msgpack_reader::basic()
+  {
+    update_tags_remaining();
+    const auto next = get_tag();
+
+    if (std::uint8_t(next) <= msgpack::ftag_unsigned::max())
+      return {std::uintmax_t(next)};
+    if (msgpack::ftag_signed::matches(next))
+      return {do_integer(next)};
+
+    if (msgpack::ftag_string::matches(next))
+    {
+      const auto bytes = read_string(remaining_, next);
+      return {std::string{reinterpret_cast<const char*>(bytes.data()), bytes.size()}};
+   }
+
+    switch (next)
+    {
+      case msgpack::tag::nil:
+        return {nullptr};
+
+      case msgpack::tag::True:
+        return {true};
+      case msgpack::tag::False:
+        return {false};
+
+      case msgpack::tag::int8:
+      case msgpack::tag::int16:
+      case msgpack::tag::int32:
+      case msgpack::tag::int64:
+        return {do_integer(next)};
+
+      case msgpack::tag::uint8:
+      case msgpack::tag::uint16:
+      case msgpack::tag::uint32:
+      case msgpack::tag::uint64:
+        return {do_unsigned_integer(next)};
+/*
+      case msgpack::tag::binary8:
+      case msgpack::tag::binary16:
+      case msgpack::tag::binary32:
+        return {epee::byte_slice{{read_binary(remaining_, next)}}}; */
+
+      case msgpack::tag::string8:
+      case msgpack::tag::string16:
+      case msgpack::tag::string32:
+      {
+        const auto bytes = read_string(remaining_, next);
+        return {std::string{reinterpret_cast<const char*>(bytes.data()), bytes.size()}};
+      }
+      default:
+        break;
+    }
+    WIRE_DLOG_THROW(error::schema::number, "expected a boolean, integer, float or string");
   }
 
   bool msgpack_reader::boolean()
@@ -413,6 +470,19 @@ namespace wire
     return std::string{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
   }
 
+  std::size_t msgpack_reader::string(epee::span<char> dest, bool exact)
+  {
+    update_tags_remaining();
+    const epee::span<const std::uint8_t> bytes = read_string(remaining_, get_tag());
+
+    if (!exact && bytes.size() < dest.size())
+      dest = {dest.data(), bytes.size()};
+    if (dest.size() != bytes.size())
+      WIRE_DLOG_THROW(error::schema::string, "of size " << dest.size() << " but got " << bytes.size());
+    std::memcpy(dest.data(), bytes.data(), dest.size());
+    return dest.size();
+  }
+
   epee::byte_slice msgpack_reader::binary()
   {
     update_tags_remaining();
@@ -421,16 +491,19 @@ namespace wire
     return source_.get_slice(begin, begin + bytes.size());
   }
 
-  void msgpack_reader::binary(epee::span<std::uint8_t> dest)
+  std::size_t msgpack_reader::binary(epee::span<std::uint8_t> dest, const bool exact)
   {
     update_tags_remaining();
     const epee::span<const std::uint8_t> bytes = read_binary(remaining_, get_tag());
+    if (!exact && bytes.size() < dest.size())
+      dest = {dest.data(), bytes.size()};
     if (dest.size() != bytes.size())
       WIRE_DLOG_THROW(error::schema::fixed_binary, "of size " << dest.size() << " but got " << bytes.size());
     std::memcpy(dest.data(), bytes.data(), dest.size());
+    return dest.size();
   }
 
-  std::size_t msgpack_reader::start_array(const std::size_t min_element_size)
+  std::size_t msgpack_reader::do_start_array(const std::size_t min_element_size)
   {
     const std::size_t upcoming =
       read_count<msgpack::ftag_array, msgpack::array_types>(error::schema::array);
@@ -440,7 +513,6 @@ namespace wire
       WIRE_DLOG_THROW(error::schema::array, upcoming << " array elements of at least " << min_element_size << " bytes each exceeds " << remaining_.size() << " remaining bytes");
 
     tags_remaining_ += upcoming;
-    increment_depth();
     return upcoming;
   }
 
@@ -452,7 +524,7 @@ namespace wire
     return true;
   }
 
-  std::size_t msgpack_reader::start_object()
+  std::size_t msgpack_reader::do_start_object()
   {
     const std::size_t upcoming =
       read_count<msgpack::ftag_object, msgpack::object_types>(error::schema::object);
@@ -461,7 +533,6 @@ namespace wire
     if (limits<std::size_t>::max() - tags_remaining_ < upcoming * 2)
       WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
     tags_remaining_ += upcoming * 2;
-    increment_depth();
     return upcoming;
   }
 

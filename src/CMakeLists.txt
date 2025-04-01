@@ -27,21 +27,23 @@
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 include_directories(.)
+add_subdirectory(wire)
 
 # For both the server and admin utility.
-set(monero-lwsf_sources
+set(lwsf_sources
   address_book.cpp
   backend.cpp
   error.cpp
   pending_transaction.cpp
   rpc.cpp
   subaddress_account.cpp
+  subaddress_minor.cpp
   transaction_history.cpp
   transaction_info.cpp
   wallet.cpp
   wallet_manager.cpp
 )
-set(monero-lwsf_headers
+set(lwsf_headers
   backend.h
   error.h
   lwsf_config.h
@@ -52,9 +54,13 @@ set(monero-lwsf_headers
   wallet.h
 )
   
-add_executable(monero-lwsf dummy_main.cpp ${monero-lwsf_sources} ${monero-lwsf_headers})
-target_link_libraries(monero-lwsf
+add_executable(lwsf-ledger ledger_main.cpp ${lwsf_sources} ${lwsf_headers})
+target_link_libraries(lwsf-ledger
   PRIVATE
+    lwsf-wire
+    lwsf-wire-json
+    lwsf-wire-msgpack
+    lwsf-wire-wrapper
     monero::libraries
     ${Boost_PROGRAM_OPTIONS_LIBRARY}
     ${Boost_FILESYSTEM_LIBRARY}

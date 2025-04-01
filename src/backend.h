@@ -177,6 +177,7 @@ namespace lwsf { namespace internal { namespace backend
     account() = delete;
 
     std::string address; //!> not serialized, recovered on read_bytes
+    std::string language;
     std::vector<address_book_entry> addressbook;
     std::map<std::uint32_t, sub_account> subaccounts;
     boost::container::flat_map<crypto::hash, std::shared_ptr<transaction>, memory> txes;
@@ -217,10 +218,10 @@ namespace lwsf { namespace internal { namespace backend
     //! Attempt
     std::error_code login();
 
-    std::error_code add_subaccount(std::string label);
-
     //! Refreshes txes information. Strong exception guarantee. Locks contents.
     std::error_code refresh(bool mandatory = false);
+
+    std::error_code add_subaccount(std::string label);
 
     std::error_code restore_height(const std::uint64_t height);
 

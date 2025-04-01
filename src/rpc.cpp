@@ -105,9 +105,9 @@ namespace lwsf { namespace internal { namespace rpc
   }
 
   void write_bytes(wire::writer& dest, const empty&)
-  { dest.boolean(true); }
-  void read_bytes(wire::reader& source, const empty&)
-  { source.boolean(); }
+  { wire::object(dest); }
+  void read_bytes(wire::reader& source, empty&)
+  { wire::object(source); }
 
   void write_bytes(wire::json_writer& dest, const login& self)
   {
@@ -127,6 +127,23 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::json_reader& source, login_response& self)
   {
     wire::object(source, WIRE_OPTIONAL_FIELD(start_height));
+  }
+
+  void read_bytes(wire::json_reader& source, daemon_status& self)
+  {
+    wire::object(source, 
+      WIRE_FIELD(outgoing_connections_count),
+      WIRE_FIELD(incoming_connections_count),
+      WIRE_FIELD(height),
+      WIRE_FIELD(target_height)
+    );
+
+  }
+
+  void write_bytes(wire::json_writer& dest, const uint64_string source)
+  {
+    const auto as_string = dest.to_string(std::uintmax_t(source));
+    dest.string({as_string.data()});
   }
 
   void read_bytes(wire::json_reader& source, uint64_string& dest)
@@ -170,8 +187,8 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD(total_received),
       WIRE_FIELD(unlock_time),
       WIRE_OPTIONAL_FIELD(height),
-      WIRE_FIELD(tx_hash),
-      WIRE_FIELD(is_coinbase),
+      WIRE_FIELD(hash),
+      WIRE_FIELD(coinbase),
       WIRE_FIELD(mempool)
     );
 
@@ -200,10 +217,13 @@ namespace lwsf { namespace internal { namespace rpc
       //  %Y-%m-%dT%H:%M:%SZ
       namespace qi = boost::spirit::qi;
       std::tm fields{};
-      if (!qi::parse(timestamp->begin(), timestamp->end(), qi::ushort_ >> '-' >> qi::ushort_ >> '-' >> qi::ushort_ >> 'T' >> qi::ushort_ >> ':' >> qi::ushort_ >> qi::ushort_ >> 'Z', fields.tm_year, fields.tm_mon, fields.tm_mday, fields.tm_hour, fields.tm_min, fields.tm_sec))
+      if (!qi::parse(timestamp->begin(), timestamp->end(), qi::ushort_ >> '-' >> qi::ushort_ >> '-' >> qi::ushort_ >> 'T' >> qi::ushort_ >> ':' >> qi::ushort_ >> ':' >> qi::ushort_ >> 'Z', fields.tm_year, fields.tm_mon, fields.tm_mday, fields.tm_hour, fields.tm_min, fields.tm_sec))
         WIRE_DLOG_THROW(wire::error::schema::string, "Timestamp string invalid format");
-      if ((self.timestamp = std::mktime(std::addressof(fields))) == -1)
-        WIRE_DLOG_THROW(wire::error::schema::string, "Invalid timestamp value");
+
+      fields.tm_year -= 1900;
+      --fields.tm_mon;
+      fields.tm_isdst = 0;
+      self.timestamp = timegm(std::addressof(fields));
     }
   }
 
@@ -288,7 +308,18 @@ namespace lwsf { namespace internal { namespace rpc
     self.rct = std::visit(convert_rct{}, raw_rct.value);
   }
 
-  void read_bytes(wire::json_reader& source, get_unspent_outs& self)
+  void write_bytes(wire::json_writer& dest, const get_unspent_outs_request& self)
+  {
+    wire::object(dest,
+      wire::field("address", std::cref(self.creds.address)),
+      wire::field("view_key", std::cref(self.creds.view_key)),
+      WIRE_FIELD_COPY(amount),
+      WIRE_FIELD_COPY(mixin),
+      WIRE_FIELD_COPY(use_dust)
+    ); 
+  }
+
+  void read_bytes(wire::json_reader& source, get_unspent_outs_response& self)
   {
     using min_output_size = wire::min_element_sizeof<
       ringct, crypto::hash, crypto::hash, crypto::public_key, crypto::public_key

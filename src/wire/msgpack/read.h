@@ -75,6 +75,13 @@ namespace wire
     template<typename T, typename U>
     std::size_t read_count(error::schema);
 
+
+    //! \throw wire::exception if next token not `[`.
+    std::size_t do_start_array(std::size_t min_element_size) override final;
+
+    //! \throw wire::exception if next token not `{`.
+    std::size_t do_start_object() override final;
+
   public:
     explicit msgpack_reader(epee::byte_slice&& source)
       : reader(nullptr), source_(std::move(source)), tags_remaining_(1)
@@ -84,6 +91,9 @@ namespace wire
 
     //! \throw wire::exception if JSON parsing is incomplete.
     void check_complete() const override final;
+
+    //! \throw wire::exception if array, object, or end of stream.
+    basic_value basic() override final;
 
     //! \throw wire::exception if next token not a boolean.
     bool boolean() override final;
@@ -114,23 +124,22 @@ namespace wire
     //! \throw wire::exception if next token not a string
     std::string string() override final;
 
+    /*! Copy upcoming string directly into `dest`.
+      \throw wire::exception if next value not string
+      \throw wire::exception if next string exceeds `dest.size())`
+      \throw wire::exception if `exact == true` and next string is not `dest.size()`
+      \return Number of bytes read into `dest`. */
+    std::size_t string(epee::span<char> dest, bool exact) override final;
+
     //! \throw wire::exception if next token cannot be read as hex
     epee::byte_slice binary() override final;
 
     //! \throw wire::exception if next token cannot be read as hex into `dest`.
-    void binary(epee::span<std::uint8_t> dest) override final;
-
-
-    //! \throw wire::exception if next token not `[`.
-    std::size_t start_array(std::size_t min_element_size) override final;
+    std::size_t binary(epee::span<std::uint8_t> dest, bool exact) override final;
 
     //! \return true when `count == 0`.
     bool is_array_end(const std::size_t count) override final;
-
-
-    //! \throw wire::exception if next token not `{`.
-    std::size_t start_object() override final;
-
+ 
     /*! \throw wire::exception if next token not key or `}`.
         \param[out] index of key match within `map`.
         \return True if another value to read. */

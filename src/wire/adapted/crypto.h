@@ -39,7 +39,7 @@ namespace crypto
   template<typename R>
   void read_bytes(R& source, crypto::secret_key& self)
   {
-    source.binary(epee::as_mut_byte_span(unwrap(unwrap(self))));
+    source.binary(epee::as_mut_byte_span(unwrap(unwrap(self))), /* exact */ true);
   }
 
   template<typename W>
@@ -51,13 +51,13 @@ namespace crypto
 
 namespace wire
 {
-  WIRE_DECLARE_BLOB(crypto::ec_scalar);
-  WIRE_DECLARE_BLOB(crypto::hash);
-  WIRE_DECLARE_BLOB(crypto::hash8);
-  WIRE_DECLARE_BLOB(crypto::key_derivation);
-  WIRE_DECLARE_BLOB(crypto::key_image);
-  WIRE_DECLARE_BLOB(crypto::public_key);
-  WIRE_DECLARE_BLOB(crypto::signature);
-  WIRE_DECLARE_BLOB(crypto::view_tag);
-  WIRE_DECLARE_BLOB(rct::key);
+  WIRE_DECLARE_BLOB_NS(crypto::ec_scalar);
+  WIRE_DECLARE_BLOB_NS(crypto::hash);
+  WIRE_DECLARE_BLOB_NS(crypto::hash8);
+  WIRE_DECLARE_BLOB_NS(crypto::key_derivation);
+  WIRE_DECLARE_BLOB_NS(crypto::key_image);
+  WIRE_DECLARE_BLOB_NS(crypto::public_key);
+  WIRE_DECLARE_BLOB_NS(crypto::signature);
+  WIRE_DECLARE_BLOB_NS(crypto::view_tag);
+  WIRE_DECLARE_BLOB_NS(rct::key);
 }

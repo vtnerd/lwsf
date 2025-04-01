@@ -1,20 +1,21 @@
-// Copyright (c) 2022-2023, The Monero Project
+// Copyright (c) 2025, The Monero Project
+// 
 // All rights reserved.
-//
+// 
 // Redistribution and use in source and binary forms, with or without modification, are
 // permitted provided that the following conditions are met:
-//
+// 
 // 1. Redistributions of source code must retain the above copyright notice, this list of
 //    conditions and the following disclaimer.
-//
+// 
 // 2. Redistributions in binary form must reproduce the above copyright notice, this list
 //    of conditions and the following disclaimer in the documentation and/or other
 //    materials provided with the distribution.
-//
+// 
 // 3. Neither the name of the copyright holder nor the names of its contributors may be
 //    used to endorse or promote products derived from this software without specific
 //    prior written permission.
-//
+// 
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
 // MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -27,32 +28,34 @@
 
 #pragma once
 
-#include <string>
-#include <system_error>
+#include <cstdint>
+#include <memory>
+#include <vector>
+#include "wallet/api/wallet2_api.h" // monero/src
 
-#include "byte_stream.h"
-#include "wire/json/fwd.h"
-#include "wire/read.h"
-#include "wire/write.h"
-
-namespace wire
+namespace lwsf { namespace internal
 {
-  struct json
+  namespace backend { struct wallet; }
+
+  class subaddress_minor final : public ::Monero::Subaddress
   {
-    using input_type = json_reader;
-    using output_type = json_slice_writer;
+    const std::shared_ptr<backend::wallet> data_;
+    std::vector<Monero::SubaddressRow*> rows_;
 
-    template<typename T>
-    static std::error_code from_bytes(const epee::span<const char> source, T& dest)
-    {
-      return wire_read::from_bytes<input_type>(source, dest);
-    }
+  public:
 
-    template<typename T, typename U>
-    static std::error_code to_bytes(T& dest, const U& source)
-    {
-      return wire_write::to_bytes<output_type>(dest, source);
-    }
+    explicit subaddress_minor(std::shared_ptr<backend::wallet> data);
+
+    subaddress_minor(const subaddress_minor&) = delete;
+    subaddress_minor(subaddress_minor&&) = delete;    
+    virtual ~subaddress_minor() override;
+    subaddress_minor& operator=(const subaddress_minor&) = delete;
+    subaddress_minor& operator=(subaddress_minor&&) = delete;
+
+    void refresh(uint32_t accountIndex) override;
+    std::vector<Monero::SubaddressRow*> getAll() const override { return rows_; }
+    void addRow(uint32_t accountIndex, const std::string &label) override;
+    void setLabel(uint32_t accountIndex, uint32_t addressIndex, const std::string &label) override;
   };
-}
 
+}} // lwsf // internal

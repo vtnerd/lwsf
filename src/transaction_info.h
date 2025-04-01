@@ -28,8 +28,6 @@
 
 #pragma once
 
-#include "lws_frontend.h"
-
 #include <memory>
 #include <string>
 #include <vector>

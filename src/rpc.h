@@ -81,7 +81,7 @@ namespace lwsf { namespace internal { namespace rpc
       return result.error();
     
     F out{};
-    error = wire::json::from_bytes(std::move(*result), out);
+    error = wire::json::from_bytes(epee::to_span(*result), out);
     if (error)
       return error;
     return out;
@@ -134,6 +134,7 @@ namespace lwsf { namespace internal { namespace rpc
 
 
   enum class uint64_string : std::uint64_t {};
+  void write_bytes(wire::json_writer&, uint64_string);
   void read_bytes(wire::json_reader&, uint64_string&); 
 
   struct address_meta
@@ -178,8 +179,8 @@ namespace lwsf { namespace internal { namespace rpc
     uint64_string total_received;
     std::uint64_t unlock_time;
     std::optional<std::uint64_t> height;
-    crypto::hash tx_hash;
-    bool is_coinbase;
+    crypto::hash hash;
+    bool coinbase;
     bool mempool;
 
     transaction()
@@ -190,8 +191,8 @@ namespace lwsf { namespace internal { namespace rpc
         total_received(uint64_string(0)),
         unlock_time(0),
         height(),
-        tx_hash{},
-        is_coinbase(false),
+        hash{},
+        coinbase(false),
         mempool(false)
     {}
   };
@@ -273,16 +274,26 @@ namespace lwsf { namespace internal { namespace rpc
   };
   void read_bytes(wire::json_reader&, output&);
 
-  struct get_unspent_outs
+  struct get_unspent_outs_request
   {
-    get_unspent_outs() = delete;
+    get_unspent_outs_request() = delete;
+    login creds;
+    uint64_string amount;
+    std::uint32_t mixin;
+    bool use_dust;
+  };
+  void write_bytes(wire::json_writer&, const get_unspent_outs_request&);
+
+  struct get_unspent_outs_response
+  {
+    get_unspent_outs_response() = delete;
     static constexpr const char* endpoint() noexcept { return "/get_unspent_outs"; }
 
     std::vector<output> outputs;
     std::uint64_t per_byte_fee;
     std::uint64_t fee_mask;
   };
-  void read_bytes(wire::json_reader&, get_unspent_outs&);
+  void read_bytes(wire::json_reader&, get_unspent_outs_response&);
 
 
   struct import_response
@@ -335,7 +346,7 @@ namespace lwsf { namespace internal { namespace rpc
      
 }}} // lwsf // internal // rpc
 
-WIRE_DECLARE_BLOB_NS(lwsf::internal::rpc::ringct);
+WIRE_DECLARE_BLOB(lwsf::internal::rpc::ringct);
 
 namespace std
 {

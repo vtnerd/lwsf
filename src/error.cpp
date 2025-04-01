@@ -33,6 +33,29 @@ namespace lwsf
   {
     switch (value)
     {
+    case error::none:
+      return "No error";
+    case error::configuration:
+      return "Configuration issue";
+    case error::connect_failure:
+      return "Connection to server failed";
+    case error::crypto_failure:
+      return "Cryptography issue";
+    case error::invalid_encoding:
+      return "File had invalid encoding";
+    case error::invalid_scheme:
+      return "Invalid URL scheme";
+    case error::read_failure:
+      return "Failed to read file";
+    case error::rpc_failure:
+      return "RPC failed";
+    case error::unexpected_userinfo:
+      return "Unexpected user+pass field in URL";
+    case error::unsupported_format:
+      return "Could not unpack file";
+    case error::write_failure:
+      return "Failed to write file";
+
     default:
       break;
     }

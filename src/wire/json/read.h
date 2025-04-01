@@ -28,18 +28,14 @@
 #pragma once
 
 #include <boost/utility/string_ref.hpp>
-#include <cstddef>
+#include <cstdint>
 #include <rapidjson/reader.h>
 #include <string>
-#include <type_traits>
-#include <utility>
-#include <vector>
 
-#include "wire/field.h"
+#include "byte_slice.h" // monero/contrib/epee/include
 #include "wire/fwd.h"
-#include "wire/json/base.h"
 #include "wire/read.h"
-#include "wire/traits.h"
+#include "span.h" // monero/contrib/epee/include
 
 namespace wire
 {
@@ -48,7 +44,7 @@ namespace wire
   {
     struct rapidjson_sax;
 
-    std::string source_;
+    std::string str_buffer_;
     rapidjson::Reader reader_;
 
     void read_next_value(rapidjson_sax& handler);
@@ -58,14 +54,21 @@ namespace wire
     //! Skips next value. \throw wire::exception if invalid JSON syntax.
     void skip_value();
 
+    //! \throw wire::exception if next token not `[`.
+    std::size_t do_start_array(std::size_t) override final;
+
+    //! \throw wire::exception if next token not `{`.
+    std::size_t do_start_object() override final;
+
   public:
-    explicit json_reader(std::string&& source);
+    //! `source` must "outlive" `json_reader`.
+    explicit json_reader(epee::span<const char> source);
 
     //! \throw wire::exception if JSON parsing is incomplete.
     void check_complete() const override final;
 
     //! \throw wire::exception if array, object, or end of stream.
-    basic_value basic(); 
+    basic_value basic() override final;
 
     //! \throw wire::exception if next token not a boolean.
     bool boolean() override final;
@@ -76,7 +79,7 @@ namespace wire
     //! \throw wire::exception if next token not an unsigned integer.
     std::uintmax_t unsigned_integer() override final;
 
-    //! \throw wire::exception if next token is not an integer encoded as string OR unsigned integer
+    //! \throw wire::exception if next token is not an integer encoded as string
     std::uintmax_t safe_unsigned_integer();
 
     //! \throw wire::exception if next token not a valid real number
@@ -85,23 +88,30 @@ namespace wire
     //! \throw wire::exception if next token not a string
     std::string string() override final;
 
+    /*! Copy upcoming string directly into `dest`.
+      \throw wire::exception if next value not string
+      \throw wire::exception if next string exceeds `dest.size())`
+      \throw wire::exception if `exact == true` and next string size is not
+        `dest.size()`
+      \return Number of bytes read into `dest`. */
+    std::size_t string(epee::span<char> dest, bool exact) override final;
+
     //! \throw wire::exception if next token cannot be read as hex
     epee::byte_slice binary() override final;
 
-    //! \throw wire::exception if next token cannot be read as hex into `dest`.
-    void binary(epee::span<std::uint8_t> dest) override final;
-
-
-    //! \throw wire::exception if next token not `[`.
-    std::size_t start_array(std::size_t) override final;
+    /* Copy upcoming binary, encoded as a hex string, into `dest`.
+       \throw wire::exception if next value is not a string
+       \throw wire::exception if next string is not valid hex.
+       \throw wire::exception if `dest.size() * 2` is less than next string length
+       \throw wire::exception if `exact == true` and next string length is
+         not exactly `dest.size() * 2`
+       \return Number of bytes read into `dest` (not number of bytes read
+         from wire). */
+    std::size_t binary(epee::span<std::uint8_t> dest, bool exact) override final;
 
     //! Skips whitespace to next token. \return True if next token is eof or ']'.
     bool is_array_end(std::size_t count) override final;
-
-
-    //! \throw wire::exception if next token not `{`.
-    std::size_t start_object() override final;
-
+ 
     /*! \throw wire::exception if next token not key or `}`.
         \param[out] index of key match within `map`.
         \return True if another value to read. */

@@ -42,14 +42,17 @@
 #include <string_view>
 #include "address_book.h"
 #include "backend.h"
+#include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "error.h"
-#include "hex.h"       // monero/contrib/epee/include
+#include "hex.h" // monero/contrib/epee/include
 #include "lwsf_config.h"
+#include "mnemonics/electrum-words.h" // monero/src
 #include "net/net_parse_helpers.h" // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
 #include "net/socks.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
 #include "subaddress_account.h"
+#include "subaddress_minor.h"
 #include "transaction_history.h"
 #include "wire.h"
 #include "wire/msgpack.h"
@@ -59,6 +62,9 @@ namespace lwsf { namespace internal
   
   namespace
   {
+    //! The stored wallet file always has this at beginning
+    static constexpr std::string_view file_magic{"lwsf-wallet-1.0"};
+
     struct null_connector
     {
       boost::unique_future<boost::asio::ip::tcp::socket>
@@ -150,7 +156,7 @@ namespace lwsf { namespace internal
 
         if (max_size() < upayload.size())
           throw std::runtime_error{std::string{"Exceeded max size for "} + cipher_name()};
-        if (tag_size() < std::numeric_limits<std::size_t>::max() - upayload.size())
+        if (std::numeric_limits<std::size_t>::max() - upayload.size() < tag_size())
           throw std::runtime_error{"Exceeded max size_t after authentication tag"};
 
         encrypted_file out{
@@ -201,6 +207,7 @@ namespace lwsf { namespace internal
           throw std::runtime_error{"Failed to initialize libsodium"};
 
         const auto key = get_key(password);
+        static_assert(key_size() == key.size());
                 
         epee::byte_stream buffer;
         buffer.put_n(0, epayload.size());
@@ -208,13 +215,14 @@ namespace lwsf { namespace internal
         static_assert(
           std::numeric_limits<std::size_t>::max() <= std::numeric_limits<unsigned long long>::max()
         );
+
         unsigned long long out_bytes = buffer.size();
         if (crypto_aead_chacha20poly1305_ietf_decrypt(
           buffer.data(), std::addressof(out_bytes),
           nullptr,
           epayload.data(), epayload.size(),
           nullptr, 0,
-          nonce.data(), key.data()) == 0)
+          nonce.data(), key.data()) != 0)
         {
           throw std::runtime_error{std::string{cipher_name()} + " decryption failed"};
         }
@@ -241,18 +249,27 @@ namespace lwsf { namespace internal
 
     epee::byte_slice try_load(const std::string& filename)
     {
-      std::ifstream file{filename, std::ios::binary | std::ios::ate};
+      std::ifstream file{filename, std::ios::binary};
       if (!file.is_open())
         return nullptr;
 
+      {
+        std::string magic;
+        magic.resize(file_magic.size());
+        file.read(magic.data(), magic.size());
+        if (!file.good() || magic != file_magic)
+          return nullptr;
+      }
+
+      file.seekg(0, std::ios::end);
       const auto size = file.tellg();
-      if (size < 0)
+      if (size < 0 || std::size_t(size) < file_magic.size())
         return nullptr;
 
       epee::byte_stream buffer;
-      buffer.put_n(0, std::size_t(size));
+      buffer.put_n(0, std::size_t(size) - file_magic.size());
 
-      file.seekg(0);
+      file.seekg(file_magic.size());
       file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
 
       if (file.good())
@@ -271,7 +288,10 @@ namespace lwsf { namespace internal
       bool rc = false;
       if (0 <= write(fd, contents.data(), contents.size()) && 0 <= fsync(fd))
       {
-        const int dir = open(directory.c_str(), O_RDONLY);
+        const char* cwd = directory.c_str();
+        if (strcmp(cwd, "") == 0)
+          cwd = ".";
+        const int dir = open(cwd, O_RDONLY);
         if (0 <= dir)
         {
           if (0 <= fsync(dir))
@@ -302,6 +322,23 @@ namespace lwsf { namespace internal
         std::is_same<boost::chrono::nanoseconds::rep, std::chrono::nanoseconds::rep>{}
       );
       return boost::chrono::nanoseconds{source.count()};
+    }
+
+    void load_wallet(backend::account& self, const crypto::secret_key& from, const Monero::NetworkType nettype, const bool generated_locally)
+    {
+      cryptonote::account_base base{};
+      base.generate(from, true);
+
+      const auto& keys = base.get_keys();
+
+      self.view.sec = keys.m_view_secret_key;
+      self.view.pub = keys.m_account_address.m_view_public_key;
+
+      self.spend.sec = keys.m_spend_secret_key;
+      self.spend.pub = keys.m_account_address.m_spend_public_key;
+
+      self.generated_locally = generated_locally;
+      self.type = nettype;
     }
   } // anonymous
 
@@ -368,8 +405,54 @@ namespace lwsf { namespace internal
     }
   }
 
-  wallet::wallet(create_tag, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
+  bool wallet::is_wallet_file(const std::string& path)
+  {
+    return !try_load(path).empty();
+  }
+
+  bool wallet::verify_password(std::string path, const std::string& password)
+  {
+    // We don't use a separate keys file, remove the suffix is present
+    static constexpr const std::string_view keys_suffix{".keys"};
+    if (keys_suffix.size() <= path.size() && std::string_view{path.data() + path.size() - keys_suffix.size()} == keys_suffix)
+      path.erase(path.size() - keys_suffix.size());
+
+    epee::byte_slice file = try_load(path);
+    if (file.empty())
+      return false;
+
+    encrypted_file contents{};
+    if (!wire::msgpack::from_bytes(std::move(file), contents))
+      return false;
+    return !contents.get_payload(password).empty();
+  }
+
+  std::vector<std::string> wallet::find(const std::string& path)
+  {
+    std::vector<std::string> out;
+    std::filesystem::path work_dir(path);
+    if(!std::filesystem::is_directory(path))
+        return out;
+ 
+    std::filesystem::recursive_directory_iterator end_itr;
+    for (std::filesystem::recursive_directory_iterator itr(path); itr != end_itr; ++itr)
+    {
+      if (std::filesystem::is_regular_file(itr->status()))
+      {
+        std::string filename = itr->path().filename().string();
+        if (!try_load(filename).empty())
+          out.push_back(std::move(filename));
+      }
+    }
+    return out;
+  }
+
+  wallet::wallet(create, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
     : data_(std::make_shared<backend::wallet>()),
+      addressbook_(),
+      history_(),
+      subaddresses_(),
+      subaddress_minor_(), 
       filename_(std::move(filename)),
       password_(std::move(password)),
       exception_error_(),
@@ -391,26 +474,15 @@ namespace lwsf { namespace internal
     crypto::secret_key recovery;
     randombytes_buf(std::addressof(unwrap(unwrap(recovery))), sizeof(recovery));
 
-    cryptonote::account_base base{};
-    base.generate(recovery, true);
-
-    const auto& keys = base.get_keys();
-
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    data_->primary.view.sec = keys.m_view_secret_key;
-    data_->primary.view.pub = keys.m_account_address.m_view_public_key;
-
-    data_->primary.spend.sec = keys.m_spend_secret_key;
-    data_->primary.spend.pub = keys.m_account_address.m_spend_public_key;
-
-    data_->primary.generated_locally = true;
-    data_->primary.type = nettype;
-
-    store(std::string{});
+    load_wallet(data_->primary, recovery, nettype, true); 
   }
 
-  wallet::wallet(open_tag, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data)
-    : data_(std::move(data)),
+  wallet::wallet(open, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
+    : data_(std::make_shared<backend::wallet>()),
+      addressbook_(),
+      history_(),
+      subaddresses_(),
+      subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
       exception_error_(),
@@ -463,7 +535,81 @@ namespace lwsf { namespace internal
     }
   }
 
+  wallet::wallet(from_mnemonic, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset)
+    : data_(std::make_shared<backend::wallet>()),
+      addressbook_(),
+      history_(),
+      subaddresses_(),
+      subaddress_minor_(),
+      filename_(std::move(filename)),
+      password_(std::move(password)),
+      exception_error_(),
+      status_(),
+      thread_(),
+      iterations_(kdf_rounds),
+      mixin_(config::mixin_default),
+      refresh_interval_(config::refresh_interval),
+      refresh_notify_(),
+      error_sync_(),
+      refresh_sync_(),
+      thread_state_(state::stop),
+      mandatory_refresh_(false)
+  {
+    if (sodium_init() < 0)
+      throw std::runtime_error{"Failed to initialize libsodium"};
+
+    crypto::secret_key recovery;
+    std::string language;
+    if (!crypto::ElectrumWords::words_to_bytes(mnemonic, recovery, language))
+    {
+      exception_error_ = "Electrum-style word list failed verification";
+      return;
+    }
+      
+    if (!seed_offset.empty())
+      recovery = cryptonote::decrypt_key(recovery, seed_offset);
+
+    load_wallet(data_->primary, recovery, nettype, false); 
+  }
+
   wallet::~wallet() { stop_refresh_loop(); }
+
+  std::string wallet::seed(const std::string& seed_offset) const
+  {
+    std::string language;
+    crypto::secret_key key;
+    {
+      const boost::lock_guard<boost::mutex> lock{data_->sync};
+      language = data_->primary.language;
+      key = data_->primary.spend.sec;
+    }
+
+    if (language.empty())
+      language = "English";
+
+    if (!seed_offset.empty())
+      key = cryptonote::encrypt_key(key, seed_offset);
+
+    epee::wipeable_string electrum_words;
+    if (!crypto::ElectrumWords::bytes_to_words(key, electrum_words, language))
+    {
+      set_critical(std::runtime_error{"Failed to crate seed from key for " + language});
+      return {};
+    }
+    return std::string{electrum_words.data(), electrum_words.size()};
+  }
+
+  std::string wallet::getSeedLanguage() const
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    return data_->primary.language;
+  }
+ 
+  void wallet::setSeedLanguage(const std::string &arg)
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    data_->primary.language = arg;
+  }
 
   int wallet::status() const
   {
@@ -505,6 +651,11 @@ namespace lwsf { namespace internal
   {
     password_ = password;
     return true;
+  }
+
+  std::string wallet::address(const std::uint32_t accountIndex, const std::uint32_t addressIndex) const
+  {
+    return data_->get_spend_address({accountIndex, addressIndex});
   }
 
   Monero::NetworkType wallet::nettype() const { return data_->primary.type; }
@@ -551,6 +702,7 @@ namespace lwsf { namespace internal
 
         epee::byte_stream buffer;
         buffer.reserve(payload_size + 2048);
+        buffer.write(file_magic.data(), file_magic.size());
 
         if (!(status = wire::msgpack::to_bytes(buffer, contents)))
         {
@@ -610,7 +762,7 @@ namespace lwsf { namespace internal
       stop_refresh_loop();
       data_->client.disconnect();
 
-      if (!setProxy(proxy_address))
+      if (!proxy_address.empty() && !setProxy(proxy_address))
         return false;
 
       epee::net_utils::http::url_content url{};
@@ -622,9 +774,12 @@ namespace lwsf { namespace internal
       if (url.schema == "https")
         use_ssl = true;
 
-      epee::net_utils::http::login login{daemon_username, daemon_password};
-      const epee::net_utils::ssl_options_t options{
-        use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_disabled : epee::net_utils::ssl_support_t::e_ssl_support_enabled
+      boost::optional<epee::net_utils::http::login> login;
+      if (!daemon_username.empty() || !daemon_password.empty())
+        login.emplace(daemon_username, daemon_password);
+
+      epee::net_utils::ssl_options_t options{
+        use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_enabled : epee::net_utils::ssl_support_t::e_ssl_support_disabled
       };
 
       data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
@@ -703,17 +858,75 @@ namespace lwsf { namespace internal
     return true;
   }
 
+  uint64_t wallet::balance(const uint32_t accountIndex) const
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+
+    std::uint64_t balance = 0;
+    for (const auto& tx : data_->primary.txes)
+    {
+      for (const auto& receive : tx.second->receives)
+      {
+        if (receive.second.recipient.maj_i == accountIndex)
+          balance += receive.second.amount;
+      }
+
+      for (const auto& spend : tx.second->spends)
+      {
+        if (spend.second.sender.maj_i == accountIndex)
+          balance -= spend.second.amount;
+      }
+    }
+
+    return balance;
+  }
+
+  uint64_t wallet::unlockedBalance(const uint32_t accountIndex) const
+  { 
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    const Monero::NetworkType net_type = data_->primary.type;
+    const std::uint32_t chain_height = data_->blockchain_height;
+
+    std::uint64_t balance = 0;
+    for (const auto& tx : data_->primary.txes)
+    {
+      const bool unlocked = tx.second->is_unlocked(chain_height, net_type);
+      for (const auto& receive : tx.second->receives)
+      {
+        if (unlocked && receive.second.recipient.maj_i == accountIndex)
+          balance += receive.second.amount;
+      }
+
+      for (const auto& spend : tx.second->spends)
+      {
+        if (spend.second.sender.maj_i == accountIndex)
+          balance -= spend.second.amount;
+      }
+    }
+
+    return balance;
+  }
+
   uint64_t wallet::blockChainHeight() const
   {
     const boost::unique_lock<boost::mutex> lock{data_->sync};
-    return data_->blockchain_height;
+    return data_->primary.scan_height;
   }
 
   uint64_t wallet::daemonBlockChainHeight() const
-  { return blockChainHeight(); }
+  {
+    const boost::unique_lock<boost::mutex> lock{data_->sync};
+    return data_->blockchain_height; 
+  }
 
   uint64_t wallet::daemonBlockChainTargetHeight() const
-  { return blockChainHeight(); }
+  { return daemonBlockChainHeight(); }
+
+  bool wallet::synchronized() const
+  { 
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    return data_->blockchain_height == data_->primary.scan_height;
+  }
 
   void wallet::startRefresh()
   {
@@ -732,7 +945,7 @@ namespace lwsf { namespace internal
 
   bool wallet::refresh()
   {
-    return set_error(data_->refresh(true));
+    return set_error(data_->refresh(false));
   }
 
   void wallet::refreshAsync()
@@ -765,6 +978,63 @@ namespace lwsf { namespace internal
   int wallet::autoRefreshInterval() const
   {
     return refresh_interval_.count();
+  }
+
+  void wallet::addSubaddressAccount(const std::string& label)
+  {
+    data_->add_subaccount(label);
+  }
+
+  std::size_t wallet::numSubaddressAccounts() const
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    return data_->primary.subaccounts.size();
+  }
+
+
+  std::size_t wallet::numSubaddresses(const std::uint32_t accountIndex) const
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    const auto account = data_->primary.subaccounts.find(accountIndex);
+    if (account != data_->primary.subaccounts.end())
+      return account->second.minor.size();
+    set_critical(std::runtime_error{"numSubaddresses failed, " + std::to_string(accountIndex) + " does not exist"});
+    return 0;
+  }
+
+  std::string wallet::getSubaddressLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex) const
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    const auto major = data_->primary.subaccounts.find(accountIndex);
+    if (major != data_->primary.subaccounts.end())
+    {
+      const auto minor = major->second.minor.find(addressIndex);
+      if (minor != major->second.minor.end())
+        return minor->second.label;
+    }
+    set_critical(std::runtime_error{"getSubaddressLabel failed, " + std::to_string(accountIndex) + "," + std::to_string(addressIndex) + " does not exist"});
+    return {};
+  }
+
+  void wallet::setSubaddressLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex, const std::string &label)
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    auto major = data_->primary.subaccounts.find(accountIndex);
+    if (major != data_->primary.subaccounts.end())
+    {
+      auto minor = major->second.minor.find(addressIndex);
+      if (minor != major->second.minor.end())
+      {
+        minor->second.label = label;
+        return;
+      }
+    }
+    set_critical(std::runtime_error{"setSubaddressLabel failed, " + std::to_string(accountIndex) + "," + std::to_string(addressIndex) + " does not exist"});
+  }
+
+  void wallet::disposeTransaction(Monero::PendingTransaction * t)
+  {
+    delete t;
   }
 
   uint64_t wallet::estimateTransactionFee(const std::vector<std::pair<std::string, uint64_t>> &destinations,
@@ -805,6 +1075,13 @@ namespace lwsf { namespace internal
     return addressbook_.get();
   }
 
+  Monero::Subaddress* wallet::subaddress()
+  {
+    if (!subaddress_minor_)
+      subaddress_minor_ = std::make_unique<subaddress_minor>(data_);
+    return subaddress_minor_.get();
+  }
+
   Monero::TransactionHistory* wallet::history()
   {
     if (!history_)
@@ -825,7 +1102,8 @@ namespace lwsf { namespace internal
       const boost::lock_guard<boost::mutex> lock{data_->sync_listener};
       data_->listener = listener;
     }
-    listener->onSetWallet(this);
+    if (listener)
+      listener->onSetWallet(this);
   }
 
   std::uint32_t wallet::defaultMixin() const
@@ -842,15 +1120,17 @@ namespace lwsf { namespace internal
   {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     data_->primary.attributes.try_emplace(key).first->second = val;
+    return true;
   }
 
   std::string wallet::getCacheAttribute(const std::string &key) const
   {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
-    const auto iter = data_->primary.attributes.find(key);
-    if (iter == data_->primary.attributes.end())
-      return {};
-    return iter->second;
+    const auto attribute = data_->primary.attributes.find(key);
+    if (attribute != data_->primary.attributes.end())
+      return attribute->second;
+    set_critical(std::runtime_error{"attribute " + key + " does not exist"});
+    return {};
   }
 
   bool wallet::setUserNote(const std::string &txid, const std::string &note)
@@ -920,9 +1200,5 @@ namespace lwsf { namespace internal
     }
 
     return out;
-  }
-
-  bool wallet::checkTxKey(const std::string &txid, std::string tx_key, const std::string &address, uint64_t &received, bool &in_pool, uint64_t &confirmations)
-  {
   }
 }} // lwsf // internal

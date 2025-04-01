@@ -49,6 +49,6 @@ namespace wire
   }
   void write_bytes(writer& dest, const basic_value& source)
   {
-    boost::apply_visitor([&dest] (const auto& val) { wire_write::bytes(dest, val); }, source.value);
+    std::visit([&dest] (const auto& val) { wire_write::bytes(dest, val); }, source.value);
   }
 }

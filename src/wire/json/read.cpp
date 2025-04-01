@@ -25,7 +25,7 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "serialization/wire/json/read.h"
+#include "wire/json/read.h"
 
 #include <algorithm>
 #include <limits>
@@ -34,9 +34,9 @@
 
 #include "byte_stream.h"
 #include "hex.h"
-#include "serialization/wire/basic_value.h"
-#include "serialization/wire/error.h"
-#include "serialization/wire/json/error.h"
+#include "wire/basic_value.h"
+#include "wire/error.h"
+#include "wire/json/error.h"
 
 namespace
 {
@@ -344,6 +344,21 @@ namespace wire
       read_next_value(json_string);
     }
     return std::string{std::move(str_buffer_)};
+  }
+  
+  std::size_t json_reader::string(epee::span<char> dest, bool exact)
+  {
+    {
+      rapidjson_sax json_string{str_buffer_, error::schema::string};
+      read_next_value(json_string);
+    }
+
+    if (!exact && str_buffer_.size() < dest.size())
+      dest = {dest.data(), str_buffer_.size()};
+    if (str_buffer_.size() != dest.size())
+      WIRE_DLOG_THROW(error::schema::string, "expected size " << dest.size() << " but got " << str_buffer_.size());
+    return dest.size();
+
   }
 
   epee::byte_slice json_reader::binary()

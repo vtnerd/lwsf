@@ -96,9 +96,7 @@ namespace lwsf
      */
       Monero::Wallet* createWallet(const std::string &path, const std::string &password, const std::string &language, Monero::NetworkType nettype, uint64_t kdf_rounds) override
       {
-        return new wallet{
-          wallet::create_tag{}, nettype, path, password, kdf_rounds
-        };
+        return new wallet{wallet::create{}, nettype, path, password, kdf_rounds};
       }
 
     /*!
@@ -113,15 +111,11 @@ namespace lwsf
 
       Monero::Wallet* openWallet(const std::string &path, const std::string &password, Monero::NetworkType nettype, uint64_t kdf_rounds, Monero::WalletListener* listener) override
       {
-        auto data = std::make_shared<backend::wallet>();
-        data->listener = std::move(listener);
         auto out = std::make_unique<wallet>(
-          wallet::open_tag{}, nettype, path, password, kdf_rounds, data
+          wallet::open{}, nettype, path, password, kdf_rounds
         );
-
-        // wallet file should be fully loaded in construction of `wallet`.
-        if (data->listener)
-          data->listener->onSetWallet(out.get());
+        if (listener)
+          out->setListener(listener);
         return out.release();
       }
 
@@ -140,7 +134,11 @@ namespace lwsf
                                              Monero::NetworkType nettype = Monero::MAINNET, uint64_t restoreHeight = 0, uint64_t kdf_rounds = 1,
                                              const std::string &seed_offset = {}) override final
       {
-        //! \TODO Complete
+        auto out = std::make_unique<wallet>(
+          wallet::from_mnemonic{}, nettype, path, password, kdf_rounds, mnemonic, seed_offset
+        );
+        out->setRefreshFromBlockHeight(restoreHeight);
+        return out.release();
       }
 
     /*!
@@ -154,6 +152,7 @@ namespace lwsf
      */
       Monero::Wallet* recoveryWallet(const std::string &path, const std::string &mnemonic, Monero::NetworkType nettype, uint64_t restoreHeight = 0) override
       {
+        return recoveryWallet(path, "", mnemonic, nettype, restoreHeight);
       }
 
     /*!
@@ -236,9 +235,10 @@ namespace lwsf
      */
       bool closeWallet(Monero::Wallet* const wallet, const bool store) override
       {
-        const std::unique_ptr<Monero::Wallet> destroy{wallet};
-        if (wallet && store)
-          wallet->store(wallet->filename());
+        if (wallet && store && !wallet->store({}))
+          return false;
+        delete wallet;
+        return true;
       }
 
     /*
@@ -252,7 +252,7 @@ namespace lwsf
      */
       bool walletExists(const std::string &path) override
       {
-        return std::filesystem::exists(std::filesystem::path{path});
+        return lwsf::internal::wallet::is_wallet_file(path); 
       }
 
     /*!
@@ -267,9 +267,9 @@ namespace lwsf
      * This function will fail when the wallet keys file is opened because the wallet program locks the keys file.
      * In this case, Wallet::unlockKeysFile() and Wallet::lockKeysFile() need to be called before and after the call to this function, respectively.
      */
-      bool verifyWalletPassword(const std::string &keys_file_name, const std::string &password, bool no_spend_key, uint64_t kdf_rounds) const override
+      bool verifyWalletPassword(const std::string &keys_file_name, const std::string &password, bool, uint64_t) const override
       {
-        //! \TODO Complete
+        lwsf::internal::wallet::verify_password(keys_file_name, password);
       }
 
     /*!
@@ -294,7 +294,7 @@ namespace lwsf
      */
       std::vector<std::string> findWallets(const std::string &path) override
       {
-        //! \TODO Complete
+        return lwsf::internal::wallet::find(path);
       }
 
       std::string errorString() const override { return error_; }
@@ -302,13 +302,28 @@ namespace lwsf
     //! set the daemon address (hostname and port)
       void setDaemonAddress(const std::string &address) override
       {
-        //! \TODO Complete
+        epee::net_utils::http::url_content url{};
+        if (!epee::net_utils::parse_url(address, url))
+          throw std::runtime_error{"Invalid LWS URL: " + address};
+        if (!url.m_uri_content.m_path.empty())
+          throw std::runtime_error{"LWS URL contains path (unsupported)"};
+
+        bool use_ssl = false;
+        if (url.schema == "https")
+          use_ssl = true;
+
+        const epee::net_utils::ssl_options_t options{
+          use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_disabled : epee::net_utils::ssl_support_t::e_ssl_support_enabled
+        };
+
+        client_.set_server(std::move(url.host), std::to_string(url.port), boost::none, std::move(options));
       }
 
     //! returns whether the daemon can be reached, and its version number
       bool connected(uint32_t *version = NULL) override
       {
-        version = 0;
+        if (version)
+          *version = 0;
         return client_.is_connected();
       }
 

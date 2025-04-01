@@ -46,9 +46,7 @@ namespace internal
 {
   namespace backend { struct wallet; }
 
-
-  //! \TODO Mark final when completely implemented
-  class wallet : public Monero::Wallet
+  class wallet final : public Monero::Wallet
   {
     enum class state : std::uint8_t { stop = 0, paused, skip_once, run };
 
@@ -56,8 +54,10 @@ namespace internal
     std::unique_ptr<Monero::AddressBook> addressbook_;
     std::unique_ptr<Monero::TransactionHistory> history_;
     std::unique_ptr<Monero::SubaddressAccount> subaddresses_;
+    std::unique_ptr<Monero::Subaddress> subaddress_minor_;
     const std::string filename_;
     std::string password_;
+    std::string language_;
     mutable std::string exception_error_;
     mutable std::error_code status_;
     boost::thread thread_;
@@ -77,11 +77,19 @@ namespace internal
     void refresh_loop();
 
   public:
-    struct create_tag{};
-    struct open_tag{};
+    struct create{};
+    struct from_keys{};
+    struct from_mnemonic{};
+    struct open{};
 
-    wallet(create_tag, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds);
-    wallet(open_tag, Monero::NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds, std::shared_ptr<backend::wallet> data);
+    static bool is_wallet_file(const std::string& path);
+    static bool verify_password(std::string path, const std::string& password);
+    static std::vector<std::string> find(const std::string& path);
+
+    wallet(create, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds);
+    wallet(open, Monero::NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds);
+    wallet(from_mnemonic, Monero::NetworkType nettype, std::string path, std::string password, std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset);
+    wallet(from_keys, Monero::NetworkType nettype, std::string path, std::string password, std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset);
 
     wallet(const wallet&) = delete;
     wallet(wallet&&) = delete;
@@ -89,10 +97,10 @@ namespace internal
     wallet& operator=(const wallet&) = delete;
     wallet& operator=(wallet&&) = delete;
 
-    virtual std::string seed(const std::string& seed_offset = "") const = 0;
+    virtual std::string seed(const std::string& seed_offset = "") const override;
 
-    virtual std::string getSeedLanguage() const = 0;
-    virtual void setSeedLanguage(const std::string &arg) = 0;
+    virtual std::string getSeedLanguage() const override;
+    virtual void setSeedLanguage(const std::string &arg) override;
 
     virtual int status() const override;
     virtual std::string errorString() const override;
@@ -104,12 +112,12 @@ namespace internal
     virtual bool setDevicePin(const std::string &) override { return false; };
     virtual bool setDevicePassphrase(const std::string &) override { return false; };
     virtual std::string address(uint32_t accountIndex = 0, uint32_t addressIndex = 0) const override;
-    virtual std::string path() const = 0;
+    virtual std::string path() const override { return filename_; }
     virtual Monero::NetworkType nettype() const override;
     //! returns current hard fork info
-    virtual void hardForkInfo(uint8_t &version, uint64_t &earliest_height) const = 0;
+    virtual void hardForkInfo(uint8_t &version, uint64_t &earliest_height) const override { /* TODO */ };
     //! check if hard fork rules should be used
-    virtual bool useForkRules(uint8_t version, int64_t early_blocks) const = 0;  
+    virtual bool useForkRules(uint8_t version, int64_t early_blocks) const override { /* TODO */ return false; };
     /*!
      * \brief integratedAddress - returns integrated address for current wallet address and given payment_id.
      *                            if passed "payment_id" param is an empty string or not-valid payment id string
@@ -119,7 +127,7 @@ namespace internal
      *                            generated
      * \return                  - 106 characters string representing integrated address
      */
-    virtual std::string integratedAddress(const std::string &payment_id) const = 0;
+    virtual std::string integratedAddress(const std::string &payment_id) const override { /* TODO */ return {}; }
     
    /*!
     * \brief secretViewKey     - returns secret view key
@@ -173,7 +181,7 @@ namespace internal
      * \brief keysFilename - returns keys filename. usually this formed as "wallet_filename".keys
      * \return
      */
-    virtual std::string keysFilename() const = 0;
+    virtual std::string keysFilename() const override { return filename_; }
     /*!
      * \brief init - initializes wallet with daemon connection params.
      *               if daemon_address is local address, "trusted daemon" will be set to true forcibly
@@ -194,7 +202,7 @@ namespace internal
     * \param language
     * \return  - true if created successfully
     */
-    virtual bool createWatchOnly(const std::string &path, const std::string &password, const std::string &language) const = 0;
+    virtual bool createWatchOnly(const std::string &path, const std::string &password, const std::string &language) const override { /* TODO */ return false; }
 
    /*!
     * \brief setRefreshFromBlockHeight - start refresh from block height on recover
@@ -214,14 +222,14 @@ namespace internal
     *
     * \param recoveringFromSeed - true/false
     */
-    virtual void setRecoveringFromSeed(bool recoveringFromSeed) = 0;
+    virtual void setRecoveringFromSeed(bool recoveringFromSeed) override { /* TODO */ };
 
    /*!
     * \brief setRecoveringFromDevice - set state to recovering from device
     *
     * \param recoveringFromDevice - true/false
     */
-    virtual void setRecoveringFromDevice(bool recoveringFromDevice) = 0;
+    virtual void setRecoveringFromDevice(bool recoveringFromDevice) override { /* TODO */ }
 
     /*!
      * \brief setSubaddressLookahead - set size of subaddress lookahead
@@ -229,7 +237,7 @@ namespace internal
      * \param major - size fot the major index
      * \param minor - size fot the minor index
      */
-    virtual void setSubaddressLookahead(uint32_t major, uint32_t minor) = 0;
+    virtual void setSubaddressLookahead(uint32_t major, uint32_t minor) override { /* TODO */ }
 
     /**
      * @brief connectToDaemon - connects to the daemon. TODO: check if it can be removed
@@ -245,32 +253,20 @@ namespace internal
     virtual void setTrustedDaemon(bool) override {} 
     virtual bool trustedDaemon() const override { return true; }
     virtual bool setProxy(const std::string &address) override;
-    virtual uint64_t balance(uint32_t accountIndex = 0) const = 0;
-    uint64_t balanceAll() const {
-        uint64_t result = 0;
-        for (uint32_t i = 0; i < numSubaddressAccounts(); ++i)
-            result += balance(i);
-        return result;
-    }
-    virtual uint64_t unlockedBalance(uint32_t accountIndex = 0) const = 0;
-    uint64_t unlockedBalanceAll() const {
-        uint64_t result = 0;
-        for (uint32_t i = 0; i < numSubaddressAccounts(); ++i)
-            result += unlockedBalance(i);
-        return result;
-    }
+    virtual uint64_t balance(uint32_t accountIndex = 0) const override;
+    virtual uint64_t unlockedBalance(uint32_t accountIndex = 0) const override;
 
    /**
     * @brief watchOnly - checks if wallet is watch only
     * @return - true if watch only
     */
-    virtual bool watchOnly() const = 0;
+    virtual bool watchOnly() const override { /* TODO */ return false; }
 
     /**
      * @brief isDeterministic - checks if wallet keys are deterministic
      * @return - true if deterministic
      */
-    virtual bool isDeterministic() const = 0;
+    virtual bool isDeterministic() const override { return true; }
 
     /**
      * @brief blockChainHeight - returns current blockchain height
@@ -282,14 +278,14 @@ namespace internal
     * @brief approximateBlockChainHeight - returns approximate blockchain height calculated from date/time
     * @return
     */
-    virtual uint64_t approximateBlockChainHeight() const = 0;
+    virtual uint64_t approximateBlockChainHeight() const override { /* TODO */ return 0; }
 
     /**
     * @brief estimateBlockChainHeight - returns estimate blockchain height. More accurate than approximateBlockChainHeight,
     *                                   uses daemon height and falls back to calculation from date/time
     * @return
     **/ 
-    virtual uint64_t estimateBlockChainHeight() const = 0;
+    virtual uint64_t estimateBlockChainHeight() const override { /* TODO */ return 0; }
     /**
      * @brief daemonBlockChainHeight - returns daemon blockchain height
      * @return 0 - in case error communicating with the daemon.
@@ -308,36 +304,7 @@ namespace internal
      * @brief synchronized - checks if wallet was ever synchronized
      * @return
      */
-    virtual bool synchronized() const = 0;
-
-    static std::string displayAmount(uint64_t amount);
-    static uint64_t amountFromString(const std::string &amount);
-    static uint64_t amountFromDouble(double amount);
-    static std::string genPaymentId();
-    static bool paymentIdValid(const std::string &paiment_id);
-    static bool addressValid(const std::string &str, Monero::NetworkType nettype);
-    static bool addressValid(const std::string &str, bool testnet)          // deprecated
-    {
-        return addressValid(str, testnet ? Monero::TESTNET : Monero::MAINNET);
-    }
-    static bool keyValid(const std::string &secret_key_string, const std::string &address_string, bool isViewKey, Monero::NetworkType nettype, std::string &error);
-    static bool keyValid(const std::string &secret_key_string, const std::string &address_string, bool isViewKey, bool testnet, std::string &error)     // deprecated
-    {
-        return keyValid(secret_key_string, address_string, isViewKey, testnet ? Monero::TESTNET : Monero::MAINNET, error);
-    }
-    static std::string paymentIdFromAddress(const std::string &str, Monero::NetworkType nettype);
-    static std::string paymentIdFromAddress(const std::string &str, bool testnet)       // deprecated
-    {
-        return paymentIdFromAddress(str, testnet ? Monero::TESTNET : Monero::MAINNET);
-    }
-    static uint64_t maximumAllowedAmount();
-    // Easylogger wrapper
-    static void init(const char *argv0, const char *default_log_base_name) { init(argv0, default_log_base_name, "", true); }
-    static void init(const char *argv0, const char *default_log_base_name, const std::string &log_path, bool console);
-    static void debug(const std::string &category, const std::string &str);
-    static void info(const std::string &category, const std::string &str);
-    static void warning(const std::string &category, const std::string &str);
-    static void error(const std::string &category, const std::string &str);
+    virtual bool synchronized() const override;
 
    /**
     * @brief StartRefresh - Start/resume refresh thread (refresh every 10 seconds)
@@ -363,12 +330,12 @@ namespace internal
      * @brief rescanBlockchain - rescans the wallet, updating transactions from daemon
      * @return - true if refreshed successfully;
      */
-    virtual bool rescanBlockchain() = 0;
+    virtual bool rescanBlockchain() override { /* TODO */ return false; }
 
     /**
      * @brief rescanBlockchainAsync - rescans wallet asynchronously, starting from genesys
      */
-    virtual void rescanBlockchainAsync() = 0;
+    virtual void rescanBlockchainAsync() override { /* TODO */ }
 
     /**
      * @brief setAutoRefreshInterval - setup interval for automatic refresh.
@@ -386,84 +353,93 @@ namespace internal
      * @brief addSubaddressAccount - appends a new subaddress account at the end of the last major index of existing subaddress accounts
      * @param label - the label for the new account (which is the as the label of the primary address (accountIndex,0))
      */
-    virtual void addSubaddressAccount(const std::string& label) = 0;
+    virtual void addSubaddressAccount(const std::string& label) override;
     /**
      * @brief numSubaddressAccounts - returns the number of existing subaddress accounts
      */
-    virtual size_t numSubaddressAccounts() const = 0;
+    virtual size_t numSubaddressAccounts() const override;
     /**
      * @brief numSubaddresses - returns the number of existing subaddresses associated with the specified subaddress account
      * @param accountIndex - the major index specifying the subaddress account
      */
-    virtual size_t numSubaddresses(uint32_t accountIndex) const = 0;
+    virtual size_t numSubaddresses(uint32_t accountIndex) const override;
     /**
      * @brief addSubaddress - appends a new subaddress at the end of the last minor index of the specified subaddress account
      * @param accountIndex - the major index specifying the subaddress account
      * @param label - the label for the new subaddress
      */
-    virtual void addSubaddress(uint32_t accountIndex, const std::string& label) = 0;
+    virtual void addSubaddress(uint32_t accountIndex, const std::string& label) override { /* TODO */ }
     /**
      * @brief getSubaddressLabel - gets the label of the specified subaddress
      * @param accountIndex - the major index specifying the subaddress account
      * @param addressIndex - the minor index specifying the subaddress
      */
-    virtual std::string getSubaddressLabel(uint32_t accountIndex, uint32_t addressIndex) const = 0;
+    virtual std::string getSubaddressLabel(uint32_t accountIndex, uint32_t addressIndex) const override;
     /**
      * @brief setSubaddressLabel - sets the label of the specified subaddress
      * @param accountIndex - the major index specifying the subaddress account
      * @param addressIndex - the minor index specifying the subaddress
      * @param label - the new label for the specified subaddress
      */
-    virtual void setSubaddressLabel(uint32_t accountIndex, uint32_t addressIndex, const std::string &label) = 0;
+    virtual void setSubaddressLabel(uint32_t accountIndex, uint32_t addressIndex, const std::string &label) override;
 
     /**
      * @brief multisig - returns current state of multisig wallet creation process
      * @return MultisigState struct
      */
-    virtual Monero::MultisigState multisig() const = 0;
+    virtual Monero::MultisigState multisig() const override { /* TODO */ return {}; }
     /**
      * @brief getMultisigInfo
      * @return serialized and signed multisig info string
      */
-    virtual std::string getMultisigInfo() const = 0;
+    virtual std::string getMultisigInfo() const override { /* TODO */ return {}; }
     /**
      * @brief makeMultisig - switches wallet in multisig state. The one and only creation phase for N / N wallets
      * @param info - vector of multisig infos from other participants obtained with getMulitisInfo call
      * @param threshold - number of required signers to make valid transaction. Must be <= number of participants
      * @return in case of N / N wallets returns empty string since no more key exchanges needed. For N - 1 / N wallets returns base58 encoded extra multisig info
      */
-    virtual std::string makeMultisig(const std::vector<std::string>& info, uint32_t threshold) = 0;
+    virtual std::string makeMultisig(const std::vector<std::string>& info, uint32_t threshold) override { /* TODO */ return {}; }
     /**
      * @brief exchange_multisig_keys - provides additional key exchange round for arbitrary multisig schemes (like N-1/N, M/N)
      * @param info - base58 encoded key derivations returned by makeMultisig or exchangeMultisigKeys function call
      * @param force_update_use_with_caution - force multisig account to update even if not all signers contribute round messages
      * @return new info string if more rounds required or an empty string if wallet creation is done
      */
-    virtual std::string exchangeMultisigKeys(const std::vector<std::string> &info, const bool force_update_use_with_caution) = 0;
+    virtual std::string exchangeMultisigKeys(const std::vector<std::string> &info, const bool force_update_use_with_caution) override { /* TODO */ return {}; }
+    /**
+     * @brief getMultisigKeyExchangeBooster - obtain partial information for the key exchange round after the in-progress round,
+     *                                        to speed up another signer's key exchange process
+     * @param info - base58 encoded key derivations returned by makeMultisig or exchangeMultisigKeys function call
+     * @param threshold - number of required signers to make valid transaction. Must be <= number of participants.
+     * @param num_signers - total number of multisig participants.
+     * @return new info string if more rounds required or exception if no more rounds (i.e. no rounds to boost)
+     */
+    virtual std::string getMultisigKeyExchangeBooster(const std::vector<std::string> &info, const uint32_t threshold, const uint32_t num_signers) override { /* TODO */ return {}; }
     /**
      * @brief exportMultisigImages - exports transfers' key images
      * @param images - output paramter for hex encoded array of images
      * @return true if success
      */
-    virtual bool exportMultisigImages(std::string& images) = 0;
+    virtual bool exportMultisigImages(std::string& images) override { /* TODO */ return false; }
     /**
      * @brief importMultisigImages - imports other participants' multisig images
      * @param images - array of hex encoded arrays of images obtained with exportMultisigImages
      * @return number of imported images
      */
-    virtual size_t importMultisigImages(const std::vector<std::string>& images) = 0;
+    virtual size_t importMultisigImages(const std::vector<std::string>& images) override { /* TODO */ return false; }
     /**
      * @brief hasMultisigPartialKeyImages - checks if wallet needs to import multisig key images from other participants
      * @return true if there are partial key images
      */
-    virtual bool hasMultisigPartialKeyImages() const = 0;
+    virtual bool hasMultisigPartialKeyImages() const override { /* TODO */ return false; }
 
     /**
      * @brief restoreMultisigTransaction creates PendingTransaction from signData
      * @param signData encrypted unsigned transaction. Obtained with PendingTransaction::multisigSignData
      * @return PendingTransaction
      */
-    virtual Monero::PendingTransaction*  restoreMultisigTransaction(const std::string& signData) = 0;
+    virtual Monero::PendingTransaction*  restoreMultisigTransaction(const std::string& signData) override { /* TODO */ return nullptr; }
 
     /*!
      * \brief createTransactionMultDest creates transaction with multiple destinations. if dst_addr is an integrated address, payment_id is ignored
@@ -482,7 +458,7 @@ namespace internal
                                                    Monero::optional<std::vector<uint64_t>> amount, uint32_t mixin_count,
                                                    Monero::PendingTransaction::Priority = Monero::PendingTransaction::Priority_Low,
                                                    uint32_t subaddr_account = 0,
-                                                   std::set<uint32_t> subaddr_indices = {}) = 0;
+                                                   std::set<uint32_t> subaddr_indices = {}) override { /* TODO */ return nullptr; }
 
     /*!
      * \brief createTransaction creates transaction. if dst_addr is an integrated address, payment_id is ignored
@@ -501,7 +477,7 @@ namespace internal
                                                    std::optional<uint64_t> amount, uint32_t mixin_count,
                                                    Monero::PendingTransaction::Priority = Monero::PendingTransaction::Priority_Low,
                                                    uint32_t subaddr_account = 0,
-                                                   std::set<uint32_t> subaddr_indices = {}) = 0;
+                                                   std::set<uint32_t> subaddr_indices = {}) override { /* TODO */ return nullptr; }
 
     /*!
      * \brief createSweepUnmixableTransaction creates transaction with unmixable outputs.
@@ -509,28 +485,27 @@ namespace internal
      *                          after object returned
      */
 
-    virtual Monero::PendingTransaction* createSweepUnmixableTransaction() = 0;
+    virtual Monero::PendingTransaction* createSweepUnmixableTransaction() override { /* TODO */ return nullptr; }
     
    /*!
     * \brief loadUnsignedTx  - creates transaction from unsigned tx file
     * \return                - UnsignedTransaction object. caller is responsible to check UnsignedTransaction::status()
     *                          after object returned
     */
-    virtual Monero::UnsignedTransaction* loadUnsignedTx(const std::string &unsigned_filename) = 0;
+    virtual Monero::UnsignedTransaction* loadUnsignedTx(const std::string &unsigned_filename) override { /* TODO */ return nullptr; }
     
    /*!
     * \brief submitTransaction - submits transaction in signed tx file
     * \return                  - true on success
     */
-    virtual bool submitTransaction(const std::string &fileName) = 0;
+    virtual bool submitTransaction(const std::string &fileName) override { /* TODO */ return false; }
     
 
     /*!
      * \brief disposeTransaction - destroys transaction object
      * \param t -  pointer to the "PendingTransaction" object. Pointer is not valid after function returned;
      */
-    virtual void disposeTransaction(Monero::PendingTransaction * t) override final
-    {}
+    virtual void disposeTransaction(Monero::PendingTransaction * t) override;
 
     /*!
      * \brief Estimates transaction fee.
@@ -576,9 +551,45 @@ namespace internal
      */
     virtual bool scanTransactions(const std::vector<std::string> &txids) override;
 
+    /*!
+     * \brief setupBackgroundSync       - setup background sync mode with just a view key
+     * \param background_sync_type      - the mode the wallet background syncs in
+     * \param wallet_password
+     * \param background_cache_password - custom password to encrypt background cache, only needed for custom password background sync type
+     * \return                          - true on success
+     */
+    virtual bool setupBackgroundSync(const BackgroundSyncType background_sync_type, const std::string &wallet_password, const Monero::optional<std::string> &background_cache_password) override { return true; }
+
+    /*!
+     * \brief getBackgroundSyncType     - get mode the wallet background syncs in
+     * \return                          - the type, or off if type is unknown
+     */
+    virtual BackgroundSyncType getBackgroundSyncType() const override { return Monero::Wallet::BackgroundSync_ReusePassword; }
+
+    /**
+     * @brief startBackgroundSync - sync the chain in the background with just view key
+     */
+    virtual bool startBackgroundSync() override { return true; }
+
+    /**
+     * @brief stopBackgroundSync  - bring back spend key and process background synced txs
+     * \param wallet_password
+     */
+    virtual bool stopBackgroundSync(const std::string &wallet_password) override { return false; }
+
+    /**
+     * @brief isBackgroundSyncing - returns true if the wallet is background syncing
+     */
+    virtual bool isBackgroundSyncing() const override { return true; }
+
+    /**
+     * @brief isBackgroundWallet - returns true if the wallet is a background wallet
+     */
+    virtual bool isBackgroundWallet() const override { return true; }
+
     virtual Monero::TransactionHistory* history() override;
     virtual Monero::AddressBook* addressBook() override;
-    virtual Monero::Subaddress* subaddress() = 0;
+    virtual Monero::Subaddress* subaddress() override;
     virtual Monero::SubaddressAccount* subaddressAccount() override;
     virtual void setListener(Monero::WalletListener*) override;
     /*!
@@ -604,7 +615,7 @@ namespace internal
      * \param key - the key
      * \return the attached string, or empty string if there is none
      */
-    virtual std::string getCacheAttribute(const std::string &key) const = 0;
+    virtual std::string getCacheAttribute(const std::string &key) const override;
     /*!
      * \brief setUserNote - attach an arbitrary string note to a txid
      * \param txid - the transaction id to attach the note to
@@ -619,24 +630,24 @@ namespace internal
      */
     virtual std::string getUserNote(const std::string &txid) const override;
     virtual std::string getTxKey(const std::string &txid) const override;
-    virtual bool checkTxKey(const std::string &txid, std::string tx_key, const std::string &address, uint64_t &received, bool &in_pool, uint64_t &confirmations) = 0;
-    virtual std::string getTxProof(const std::string &txid, const std::string &address, const std::string &message) const = 0;
-    virtual bool checkTxProof(const std::string &txid, const std::string &address, const std::string &message, const std::string &signature, bool &good, uint64_t &received, bool &in_pool, uint64_t &confirmations) = 0;
-    virtual std::string getSpendProof(const std::string &txid, const std::string &message) const = 0;
-    virtual bool checkSpendProof(const std::string &txid, const std::string &message, const std::string &signature, bool &good) const = 0;
+    virtual bool checkTxKey(const std::string &txid, std::string tx_key, const std::string &address, uint64_t &received, bool &in_pool, uint64_t &confirmations) override { /* TODO */ return false; }
+    virtual std::string getTxProof(const std::string &txid, const std::string &address, const std::string &message) const override { /* TODO */ return {}; }
+    virtual bool checkTxProof(const std::string &txid, const std::string &address, const std::string &message, const std::string &signature, bool &good, uint64_t &received, bool &in_pool, uint64_t &confirmations) override { /* TODO */ return false; }
+    virtual std::string getSpendProof(const std::string &txid, const std::string &message) const override { /* TODO */ return {}; }
+    virtual bool checkSpendProof(const std::string &txid, const std::string &message, const std::string &signature, bool &good) const override { /* TODO */ return false; }
     /*!
      * \brief getReserveProof - Generates a proof that proves the reserve of unspent funds
      *                          Parameters `account_index` and `amount` are ignored when `all` is true
      */
-    virtual std::string getReserveProof(bool all, uint32_t account_index, uint64_t amount, const std::string &message) const = 0;
-    virtual bool checkReserveProof(const std::string &address, const std::string &message, const std::string &signature, bool &good, uint64_t &total, uint64_t &spent) const = 0;
+    virtual std::string getReserveProof(bool all, uint32_t account_index, uint64_t amount, const std::string &message) const override { /* TODO */ return {}; }
+    virtual bool checkReserveProof(const std::string &address, const std::string &message, const std::string &signature, bool &good, uint64_t &total, uint64_t &spent) const override { /* TODO */ return false; }
 
     /*
      * \brief signMessage - sign a message with the spend private key
      * \param message - the message to sign (arbitrary byte data)
      * \return the signature
      */
-    virtual std::string signMessage(const std::string &message, const std::string &address = "") = 0;
+    virtual std::string signMessage(const std::string &message, const std::string &address = "") override { /* TODO */ return {}; }
     /*!
      * \brief verifySignedMessage - verify a signature matches a given message
      * \param message - the message (arbitrary byte data)
@@ -644,14 +655,14 @@ namespace internal
      * \param signature - the signature
      * \return true if the signature verified, false otherwise
      */
-    virtual bool verifySignedMessage(const std::string &message, const std::string &addres, const std::string &signature) const = 0;
+    virtual bool verifySignedMessage(const std::string &message, const std::string &addres, const std::string &signature) const override { /* TODO */ return false; }
 
     /*!
      * \brief signMultisigParticipant   signs given message with the multisig public signer key
      * \param message                   message to sign
      * \return                          signature in case of success. Sets status to Error and return empty string in case of error
      */
-    virtual std::string signMultisigParticipant(const std::string &message) const = 0;
+    virtual std::string signMultisigParticipant(const std::string &message) const override { /* TODO */ return {}; }
     /*!
      * \brief verifyMessageWithPublicKey verifies that message was signed with the given public key
      * \param message                    message
@@ -659,78 +670,78 @@ namespace internal
      * \param signature                  signature of the message
      * \return                           true if the signature is correct. false and sets error state in case of error
      */
-    virtual bool verifyMessageWithPublicKey(const std::string &message, const std::string &publicKey, const std::string &signature) const = 0;
+    virtual bool verifyMessageWithPublicKey(const std::string &message, const std::string &publicKey, const std::string &signature) const override { /* TODO */ return false; }
 
-    virtual bool parse_uri(const std::string &uri, std::string &address, std::string &payment_id, uint64_t &amount, std::string &tx_description, std::string &recipient_name, std::vector<std::string> &unknown_parameters, std::string &error) = 0;
-    virtual std::string make_uri(const std::string &address, const std::string &payment_id, uint64_t amount, const std::string &tx_description, const std::string &recipient_name, std::string &error) const = 0;
+    virtual bool parse_uri(const std::string &uri, std::string &address, std::string &payment_id, uint64_t &amount, std::string &tx_description, std::string &recipient_name, std::vector<std::string> &unknown_parameters, std::string &error) override { /* TODO */ return false; }
+    virtual std::string make_uri(const std::string &address, const std::string &payment_id, uint64_t amount, const std::string &tx_description, const std::string &recipient_name, std::string &error) const override { /* TODO */ return {}; }
 
-    virtual std::string getDefaultDataDir() const = 0;
+    virtual std::string getDefaultDataDir() const override { /* TODO */ return {}; }
    
    /*
     * \brief rescanSpent - Rescan spent outputs - Can only be used with trusted daemon
     * \return true on success
     */
-    virtual bool rescanSpent() = 0;
+    virtual bool rescanSpent() override { return false; }
 
    /*
     * \brief setOffline - toggle set offline on/off
     * \param offline - true/false
     */
-    virtual void setOffline(bool offline) = 0;
-    virtual bool isOffline() const = 0;
+    virtual void setOffline(bool offline) override { /* TODO */ }
+    virtual bool isOffline() const override { /* TODO */ return false; }
     
     //! blackballs a set of outputs
-    virtual bool blackballOutputs(const std::vector<std::string> &outputs, bool add) = 0;
+    virtual bool blackballOutputs(const std::vector<std::string> &outputs, bool add) override { return false; }
 
     //! blackballs an output
-    virtual bool blackballOutput(const std::string &amount, const std::string &offset) = 0;
+    virtual bool blackballOutput(const std::string &amount, const std::string &offset) override { return false; }
 
     //! unblackballs an output
-    virtual bool unblackballOutput(const std::string &amount, const std::string &offset) = 0;
+    virtual bool unblackballOutput(const std::string &amount, const std::string &offset) override { return false; }
 
     //! gets the ring used for a key image, if any
-    virtual bool getRing(const std::string &key_image, std::vector<uint64_t> &ring) const = 0;
+    virtual bool getRing(const std::string &key_image, std::vector<uint64_t> &ring) const override { /* TODO */ return false; }
 
     //! gets the rings used for a txid, if any
-    virtual bool getRings(const std::string &txid, std::vector<std::pair<std::string, std::vector<uint64_t>>> &rings) const = 0;
+    virtual bool getRings(const std::string &txid, std::vector<std::pair<std::string, std::vector<uint64_t>>> &rings) const override { /* TODO */ return false; }
 
     //! sets the ring used for a key image
-    virtual bool setRing(const std::string &key_image, const std::vector<uint64_t> &ring, bool relative) = 0;
+    virtual bool setRing(const std::string &key_image, const std::vector<uint64_t> &ring, bool relative) override { /* TODO */ return false; }
 
     //! sets whether pre-fork outs are to be segregated
-    virtual void segregatePreForkOutputs(bool segregate) = 0;
+    virtual void segregatePreForkOutputs(bool segregate) override { /* TODO */ }
 
     //! sets the height where segregation should occur
-    virtual void segregationHeight(uint64_t height) = 0;
+    virtual void segregationHeight(uint64_t height) override { /* TODO */ }
 
     //! secondary key reuse mitigation
-    virtual void keyReuseMitigation2(bool mitigation) = 0;
+    virtual void keyReuseMitigation2(bool mitigation) override {  /* TODO */ }
 
     //! locks/unlocks the keys file; returns true on success
-    virtual bool lockKeysFile() = 0;
-    virtual bool unlockKeysFile() = 0;
+    virtual bool lockKeysFile() override { return false; }
+    virtual bool unlockKeysFile() override { return true; }
     //! returns true if the keys file is locked
-    virtual bool isKeysFileLocked() = 0;
+    virtual bool isKeysFileLocked() override { return false; }
 
     /*!
      * \brief Queries backing device for wallet keys
      * \return Device they are on
      */
-    virtual Device getDeviceType() const = 0;
+    virtual Device getDeviceType() const override { /* TODO */ return {}; }
 
     //! cold-device protocol key image sync
-    virtual uint64_t coldKeyImageSync(uint64_t &spent, uint64_t &unspent) = 0;
+    virtual uint64_t coldKeyImageSync(uint64_t &spent, uint64_t &unspent) override { /* TODO */ return 0; }
 
     //! shows address on device display
-    virtual void deviceShowAddress(uint32_t accountIndex, uint32_t addressIndex, const std::string &paymentId) = 0;
+    virtual void deviceShowAddress(uint32_t accountIndex, uint32_t addressIndex, const std::string &paymentId) override { /* TODO */ }
 
     //! attempt to reconnect to hardware device
-    virtual bool reconnectDevice() = 0;
+    virtual bool reconnectDevice() override { /* TODO */ return false; }
 
     //! get bytes received
-    virtual uint64_t getBytesReceived() = 0;
+    virtual uint64_t getBytesReceived() override { /* TODO */ return 0; }
 
     //! get bytes sent
-    virtual uint64_t getBytesSent() = 0;
+    virtual uint64_t getBytesSent() override { /* TODO */ return 0; }
   };
 }} // lwsf // internal

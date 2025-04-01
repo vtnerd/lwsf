@@ -1,4 +1,4 @@
-// Copyright (c) 2020, The Monero Project
+// Copyright (c) 2021-2024, The Monero Project
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without modification, are
@@ -27,17 +27,24 @@
 
 #pragma once
 
+#include <cstdint>
 #include <type_traits>
 #include <utility>
 
-#define WIRE_DECLARE_BLOB(type)                 \
-  template<>                                    \
-  struct is_blob<type>                          \
-    : std::true_type                            \
+#define WIRE_DECLARE_BLOB_NS(type) \
+  template<>                       \
+  struct is_blob<type>             \
+    : std::true_type               \
   {}
 
-#define WIRE_DECLARE_BLOB_NS(type)              \
-  namespace wire { WIRE_DECLARE_BLOB(type); }
+#define WIRE_DECLARE_BLOB(type)                  \
+  namespace wire { WIRE_DECLARE_BLOB_NS(type); }
+
+#define WIRE_DECLARE_OPTIONAL_ROOT(type) \
+  template<>                             \
+  struct is_optional_root<type>          \
+    : std::true_type                     \
+  {}
 
 namespace wire
 {
@@ -55,20 +62,32 @@ namespace wire
   template<typename T>
   using unwrap_reference_t = typename unwrap_reference<T>::type;
 
+  template<typename T>
+  struct remove_const_key
+  {
+    using type = T;
+  };
+
+  template<typename K, typename V>
+  struct remove_const_key<std::pair<const K, V>>
+  {
+    using type = std::pair<K, V>;
+  };
+
   /*! Mark `T` as an array for writing, and reading when
-   `default_min_element_size<T::value_type>::value != 0`. See `array_` in
-   `wrapper/array.h`. */
+    `default_min_element_size<T::value_type>::value != 0`. See `array_` in
+    `wrapper/array.h`. */
   template<typename T>
   struct is_array : std::false_type
   {};
 
   /*! Mark `T` as fixed binary data for reading+writing. Concept requirements
-    for reading:
-      * `T` must be compatible with `epee::as_mut_byte_span` (`std::is_pod<T>`
-        and no padding).
-    Concept requirements for writing:
-      * `T` must be compatible with `epee::as_byte_span` (std::is_pod<T>` and
-        no padding). */
+      for reading:
+        * `T` must be compatible with `epee::as_mut_byte_span` (`std::is_pod<T>`
+          and no padding).
+      Concept requirements for writing:
+        * `T` must be compatible with `epee::as_byte_span` (std::is_pod<T>` and
+          no padding). */
   template<typename T>
   struct is_blob : std::false_type
   {};
@@ -82,6 +101,12 @@ namespace wire
   template<typename T>
   struct is_optional_on_empty
     : is_array<T> // all array types in old output engine were optional when empty
+  {};
+
+  //! When `T` is being read as root object, allow an empty read buffer.
+  template<typename T>
+  struct is_optional_root
+    : std::is_empty<T>
   {};
 
   //! A constraint for `wire_read::array` where a max of `N` elements can be read.

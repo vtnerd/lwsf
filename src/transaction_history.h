@@ -37,7 +37,7 @@
 namespace lwsf { namespace internal
 {
   namespace backend { class wallet; }
-  class transaction_history : public Monero::TransactionHistory
+  class transaction_history final : public Monero::TransactionHistory
   {
     const std::shared_ptr<backend::wallet> data_;
     std::vector<Monero::TransactionInfo*> txes_;

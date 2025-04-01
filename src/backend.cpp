@@ -29,6 +29,8 @@
 #include "backend.h"
 
 #include <boost/thread/lock_guard.hpp>
+#include "crypto/crypto.h"     // monero/src
+#include "crypto/crypto-ops.h" // monero/src
 #include "cryptonote_basic/cryptonote_basic_impl.h" // monero/src
 #include "error.h"
 #include "lwsf_config.h"
@@ -126,8 +128,7 @@ namespace lwsf { namespace internal { namespace backend
     void map_sub_account(F& format, T& self)
     {
       wire::object(format,
-        wire::field("minor", wire::trusted_array(std::ref(self.minor))),
-        WIRE_FIELD(label)
+        wire::field("minor", wire::trusted_array(std::ref(self.minor)))
       );
     }
 
@@ -207,6 +208,7 @@ namespace lwsf { namespace internal { namespace backend
     void map_account(F& format, T& self)
     {
       wire::object(format,
+        WIRE_FIELD(language),
         wire::field("addressbook", wire::trusted_array(std::ref(self.addressbook))),
         wire::field("subaccounts", wire::trusted_array(std::ref(self.subaccounts))),
         wire::field("txes", wire::trusted_array(std::ref(self.txes))),
@@ -266,20 +268,34 @@ namespace lwsf { namespace internal { namespace backend
       out.sender = source.sender.value_or(rpc::address_meta{});
       out.tx_pub = source.tx_pub_key;
     }
- 
-    void update_tx(const account& self, transaction& out, const rpc::transaction& source)
+
+    crypto::secret_key get_spend_secret(const account& self, const std::optional<rpc::address_meta>& index)
+    {
+      if (!index || (index->maj_i == 0 && index->min_i == 0))
+        return self.spend.sec;
+
+      // m = Hs(a || index_major || index_minor)
+      const crypto::secret_key m = get_subaddress_secret_key(self.view.sec, index->maj_i, index->min_i);
+
+      // D = B + M
+      crypto::secret_key out;
+      sc_add(to_bytes(out), to_bytes(m), to_bytes(self.spend.sec));
+      return out;
+    }
+
+    bool update_tx(const account& self, transaction& out, const rpc::transaction& source)
     {
       /* Let `receives` re-populate in `merge_output`. This works because the
         server supplies all info - there is no local info to keep. */
       out.receives.clear();
 
-      out.id = source.tx_hash;
+      out.id = source.hash;
       out.timestamp = source.timestamp;
       out.fee = std::uint64_t(source.fee.value_or(rpc::uint64_string(0)));
       out.height = source.height;
       out.unlock_time = source.unlock_time;
       out.payment_id = source.payment_id;
-      out.coinbase = source.is_coinbase;
+      out.coinbase = source.coinbase;
 
       std::uint64_t total_spent = 0; 
       for (const auto& spend : source.spent_outputs)
@@ -291,7 +307,7 @@ namespace lwsf { namespace internal { namespace backend
         if (!crypto::derive_public_key(derivation, spend.out_index, self.spend.pub, output_pub))
           continue;
         crypto::secret_key output_secret{};
-        crypto::derive_secret_key(derivation, spend.out_index, self.spend.sec, output_secret);
+        crypto::derive_secret_key(derivation, spend.out_index, get_spend_secret(self, spend.sender), output_secret);
 
         crypto::key_image image{};
         crypto::generate_key_image(output_pub, output_secret, image);
@@ -304,6 +320,12 @@ namespace lwsf { namespace internal { namespace backend
         }
       }
 
+      if (!std::uint64_t(source.total_received) && !total_spent)
+        return false; // used as decoy
+
+      if (out.fee <= total_spent)
+        total_spent -= out.fee;
+
       if (rpc::uint64_string(total_spent) < source.total_received)
       {
         out.direction = Monero::TransactionInfo::Direction_In;
@@ -314,6 +336,8 @@ namespace lwsf { namespace internal { namespace backend
         out.direction = Monero::TransactionInfo::Direction_Out;
         out.amount = total_spent - std::uint64_t(source.total_received);
       }
+
+      return true;
     }
 
     void merge_output(const std::shared_ptr<transaction>& out, const rpc::output& source, const crypto::secret_key& view_key)
@@ -326,7 +350,7 @@ namespace lwsf { namespace internal { namespace backend
     }
 
     std::vector<std::shared_ptr<transaction>>
-      merge_response(wallet& self, const rpc::get_address_txs& source, const rpc::get_unspent_outs& unspents)
+      merge_response(wallet& self, const rpc::get_address_txs& source, const rpc::get_unspent_outs_response& unspents)
     {
       std::vector<std::shared_ptr<transaction>> out;
 
@@ -369,10 +393,10 @@ namespace lwsf { namespace internal { namespace backend
 
       for (const auto& tx : source.transactions)
       {
-        auto inserted = updated_txes.try_emplace(tx.tx_hash, nullptr);
+        auto inserted = updated_txes.try_emplace(tx.hash, nullptr);
         if (inserted.second)
         {
-          const auto existing = self.primary.txes.find(tx.tx_hash);
+          const auto existing = self.primary.txes.find(tx.hash);
           if (existing != self.primary.txes.end() && existing->second)
             inserted.first->second = std::make_shared<transaction>(*existing->second);
           else
@@ -381,7 +405,8 @@ namespace lwsf { namespace internal { namespace backend
           if (existing == self.primary.txes.end())
             out.push_back(inserted.first->second);
         }
-        update_tx(self.primary, *inserted.first->second, tx);
+        if (!update_tx(self.primary, *inserted.first->second, tx))
+          updated_txes.erase(tx.hash);
       }
 
       for (const auto& output : unspents.outputs)
@@ -412,6 +437,9 @@ namespace lwsf { namespace internal { namespace backend
       std::map<std::uint32_t, sub_account> subaccounts;
       subaccounts.swap(self.subaccounts);
 
+      // Never remove special {0,0} account
+      self.subaccounts[0].minor[0] = std::move(subaccounts[0].minor[0]);
+
       for (const auto& subaddr : subaddrs)
       {
         auto& account = self.subaccounts[subaddr.key];
@@ -421,7 +449,7 @@ namespace lwsf { namespace internal { namespace backend
           for (std::uint32_t minor = std::get<0>(minors); minor < std::uint64_t(std::get<1>(minors)) + 1; ++minor)
           {
             auto elem = account.minor.try_emplace(minor);
-            if (elem.second)
+            if (elem.second && (subaddr.key || minor))
               elem.first->second = std::move(old.minor[minor]);
           }
         }
@@ -430,6 +458,8 @@ namespace lwsf { namespace internal { namespace backend
   } // anonymous
 
   WIRE_DEFINE_OBJECT(address_book_entry, map_address_book_entry);
+  WIRE_DEFINE_OBJECT(subaddress, map_subaddress);
+  WIRE_DEFINE_OBJECT(sub_account, map_sub_account);
   WIRE_DEFINE_OBJECT(transfer_out, map_transfer_out);
   WIRE_DEFINE_OBJECT(transfer_in, map_transfer_in);  
   WIRE_DEFINE_OBJECT(transaction, map_transaction);
@@ -566,15 +596,28 @@ namespace lwsf { namespace internal { namespace backend
         return {};
     }
 
-    expect<rpc::get_unspent_outs> outs_response{common_error::kInvalidArgument};
+    expect<rpc::get_unspent_outs_response> outs_response{common_error::kInvalidArgument};
 
     boost::unique_lock<boost::mutex> lock{sync};
+    const auto now = std::chrono::steady_clock::now();
+    if (!mandatory) // double-check
+    {
+      const std::chrono::steady_clock::time_point start{
+        std::chrono::steady_clock::time_point::duration{last_sync.load()}
+      };
+      if (now - start < config::refresh_interval)
+        return {};
+    }
+    last_sync = now.time_since_epoch().count();
+
     const rpc::login login{primary.address, primary.view.sec};
     lock.unlock();
-
     const auto txs_response = rpc::invoke<rpc::get_address_txs>(client, login);
     if (txs_response)
-      outs_response = rpc::invoke<rpc::get_unspent_outs>(client, login);
+    {
+      const rpc::get_unspent_outs_request request{login, rpc::uint64_string(0), 0, true}; 
+      outs_response = rpc::invoke<rpc::get_unspent_outs_response>(client, request);
+    }
 
     if (!txs_response)
       return txs_response.error();
@@ -584,7 +627,6 @@ namespace lwsf { namespace internal { namespace backend
     lock.lock();
     const std::uint64_t orig_scan_height = primary.scan_height;
     const auto new_txes = merge_response(*this, *txs_response, *outs_response);
-    last_sync = std::chrono::steady_clock::now().time_since_epoch().count();
 
     const boost::lock_guard<boost::mutex> lock2{sync_listener};
     if (!listener)
@@ -668,6 +710,12 @@ namespace lwsf { namespace internal { namespace backend
         merge_subaddrs(primary, epee::to_span(response->all_subaddrs));
     }
     return {error::rpc_failure};
+  }
+
+  std::error_code wallet::restore_height(const std::uint64_t height)
+  {
+    /* TODO */
+    throw std::logic_error{"restore_height not implemented"};
   }
 
   std::error_code wallet::send_tx(epee::byte_slice tx_bytes)
