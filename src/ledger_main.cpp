@@ -199,7 +199,7 @@ namespace
     {
       if (!wallet->store({}))
         throw std::runtime_error{"Failed to store wallet file: " + wallet->errorString()};
-    } 
+    }
 
     std::cout << "; Primary Address: " << wallet->address() << std::endl;
     std::cout << "; Blockchain Height: " << wallet->daemonBlockChainHeight() << std::endl;
@@ -230,18 +230,20 @@ namespace
       if (sizeof(buf) - 1 != std::strftime(buf, sizeof(buf), "%Y/%m/%d", std::addressof(expanded)))
         throw std::runtime_error{"strftime failed"};
 
-      std::cout << buf << " (" << info->hash() << ") " << info->label() << std::endl;
+      std::cout << buf << " (" << info->hash() << ") " << info->description() << std::endl;
 
+      const std::string& label = info->label();
+      const std::string& account = label.empty() ? std::to_string(info->subaddrAccount()) : label;
       if (info->direction() == Monero::TransactionInfo::Direction_In)
       { 
-        std::cout << "    Assets:Monero:" << info->subaddrAccount() << "      " << cryptonote::print_money(info->amount()) << std::endl;
+        std::cout << "    Assets:Monero:" << account << "      " << cryptonote::print_money(info->amount()) << " XMR" << std::endl;
         std::cout << "    Income" << std::endl;
       }
       else
       {
-        std::cout << "    Expenses             " << cryptonote::print_money(info->amount()) << std::endl;
-        std::cout << "    Expenses:Monero:Fee  " << cryptonote::print_money(info->fee()) << std::endl;
-        std::cout << "    Assets:Monero:" << info->subaddrAccount() << std::endl;
+        std::cout << "    Expenses             " << cryptonote::print_money(info->amount()) << " XMR " << std::endl;
+        std::cout << "    Expenses:Monero:Fee  " << cryptonote::print_money(info->fee()) << " XMR" << std::endl;
+        std::cout << "    Assets:Monero:" << account << std::endl;
       }
     }
   }
