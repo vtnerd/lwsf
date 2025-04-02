@@ -76,7 +76,7 @@ namespace lwsf { namespace internal
   std::string transaction_info::description() const
   {
     const boost::lock_guard<boost::mutex> lock{wallet_->sync};
-    return data_->description;
+    return data_->description; // this can change outside of refresh func
   }
 
   std::set<std::uint32_t> transaction_info::subaddrIndex() const
@@ -84,11 +84,16 @@ namespace lwsf { namespace internal
     std::set<std::uint32_t> out;
     const std::uint32_t major = subaddrAccount();
 
-    for (const auto& receive : data_->receives)
-      out.insert(receive.second.recipient.min_i);
-
-    for (const auto& spend : data_->spends)
-      out.insert(spend.second.sender.min_i);
+    if (direction() == Direction_In)
+    {
+      for (const auto& receive : data_->receives)
+        out.insert(receive.second.recipient.min_i);
+    }
+    else
+    {
+      for (const auto& spend : data_->spends)
+        out.insert(spend.second.sender.min_i);
+    }
 
     return out;
   }

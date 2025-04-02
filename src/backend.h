@@ -77,6 +77,8 @@ namespace lwsf { namespace internal { namespace backend
   struct subaddress
   {
     std::string label;
+
+    bool preserve() const noexcept { return !label.empty(); }
   };
   WIRE_DECLARE_OBJECT(subaddress);
 
@@ -128,9 +130,9 @@ namespace lwsf { namespace internal { namespace backend
         receives(),
         description(),
         timestamp(),
+        height(),
         amount(0),
         fee(0),
-        height(),
         unlock_time(0),
         direction(Monero::TransactionInfo::Direction_Out),
         payment_id(),
@@ -154,9 +156,9 @@ namespace lwsf { namespace internal { namespace backend
     boost::container::flat_map<crypto::public_key, transfer_in, memory> receives; //!< Key is output pub
     std::string description;
     std::optional<std::time_t> timestamp;
+    std::optional<std::uint64_t> height;
     std::uint64_t amount;
     std::uint64_t fee;
-    std::optional<std::uint64_t> height;
     std::uint64_t unlock_time;
     Monero::TransactionInfo::Direction direction;
     std::variant<rpc::empty, crypto::hash8, crypto::hash> payment_id;

@@ -34,9 +34,10 @@
 #include <boost/thread/condition_variable.hpp>
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/thread.hpp>
+#include <cstdint>
 #include <memory>
 #include <string>
-#include "cryptonote_basic/account.h" // monero/src
+#include <system_error>
 #include "net/http_client.h"          // monero/contrib/epee/include
 #include "wallet/api/wallet2_api.h"   // monero/src
 
@@ -89,8 +90,8 @@ namespace internal
 
     wallet(create, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds);
     wallet(open, Monero::NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds);
-    wallet(from_mnemonic, Monero::NetworkType nettype, std::string path, std::string password, std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset);
-    wallet(from_keys, Monero::NetworkType nettype, std::string path, std::string password, std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset);
+    wallet(from_mnemonic, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset);
+    wallet(from_keys, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds, const std::string& address_string, const std::string& view_key, const std::string& spend_key);
 
     wallet(const wallet&) = delete;
     wallet(wallet&&) = delete;

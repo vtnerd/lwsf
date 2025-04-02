@@ -1375,4 +1375,4 @@ struct WalletManagerFactory
     static void setLogCategories(const std::string &categories);
 };
 
-}
+} // lwsf

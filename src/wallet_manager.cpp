@@ -28,11 +28,11 @@
 
 #include "lws_frontend.h"
 
-#include <boost/utility/string_ref.hpp>
 #include <chrono>
 #include <filesystem>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include "backend.h"
 #include "common/dns_utils.h"  // monero/src
@@ -178,7 +178,11 @@ namespace lwsf
                                                    const std::string &spendKeyString,
                                                    uint64_t kdf_rounds) override
       {
-        //! \TODO Complete
+        auto out = std::make_unique<wallet>(
+          wallet::from_keys{}, nettype, path, password, kdf_rounds, addressString, viewKeyString, spendKeyString
+        );
+        out->setRefreshFromBlockHeight(restoreHeight);
+        return out.release();
       }
 
    /*!
@@ -201,7 +205,7 @@ namespace lwsf
                                                    const std::string &viewKeyString,
                                                    const std::string &spendKeyString) override
       {
-        //! \TODO Complete
+        return createWalletFromKeys(path, "", language, nettype, restoreHeight, addressString, viewKeyString, spendKeyString, 1);
       }
 
     /*!
@@ -252,7 +256,7 @@ namespace lwsf
      */
       bool walletExists(const std::string &path) override
       {
-        return lwsf::internal::wallet::is_wallet_file(path); 
+        return wallet::is_wallet_file(path); 
       }
 
     /*!
@@ -269,7 +273,7 @@ namespace lwsf
      */
       bool verifyWalletPassword(const std::string &keys_file_name, const std::string &password, bool, uint64_t) const override
       {
-        lwsf::internal::wallet::verify_password(keys_file_name, password);
+        return wallet::verify_password(keys_file_name, password);
       }
 
     /*!
@@ -294,7 +298,7 @@ namespace lwsf
      */
       std::vector<std::string> findWallets(const std::string &path) override
       {
-        return lwsf::internal::wallet::find(path);
+        return wallet::find(path);
       }
 
       std::string errorString() const override { return error_; }
@@ -355,21 +359,23 @@ namespace lwsf
 
       std::string resolveOpenAlias(const std::string &address, bool &dnssec_valid) const override
       {
-        const boost::string_ref prefix{"oa1:xmr "};
+        static constexpr const std::string_view prefix{"oa1:xmr "};
         std::string real_address =
           tools::DNSResolver::instance().get_dns_format_from_oa_address(address);
 
         bool dnssec_available = false;
         std::vector<std::string> records =
           tools::DNSResolver::instance().get_txt_record(real_address, dnssec_available, dnssec_valid);
-        for (boost::string_ref record : records)
+        for (std::string_view record : records)
         {
-          if (record.starts_with(prefix))
+          if (record.substr(0, prefix.size()) == prefix)
           {
             record = record.substr(prefix.size());
             return std::string{record.data(), record.size()};
           }
         }
+
+        return {};
       }
 
       //! checks for an update and returns version, hash and url

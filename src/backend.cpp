@@ -447,8 +447,8 @@ namespace lwsf { namespace internal { namespace backend
 
     void merge_subaddrs(account& self, const epee::span<const rpc::subaddrs> subaddrs)
     {
-      /* This will purge subaddresses that the server somehow no longer claims
-      as being valid. The existing info per subaddress is moved/preserved. */
+      /* Purge subaccounts that do not have info (label) and are not mentioned
+      by the server. */
 
       std::map<std::uint32_t, sub_account> subaccounts;
       subaccounts.swap(self.subaccounts);
@@ -456,6 +456,17 @@ namespace lwsf { namespace internal { namespace backend
       // Never remove special {0,0} account
       self.subaccounts[0].minor[0] = std::move(subaccounts[0].minor[0]);
 
+      // Keep all subaccounts with a info
+      for (auto& account : subaccounts)
+      {
+        for (auto& subaccount : account.second.minor)
+        {
+          if (subaccount.second.preserve())
+            self.subaccounts[account.first].minor[subaccount.first] = std::move(subaccount.second);
+        }
+      } 
+
+      // Keep all subaccounts mentioned by server
       for (const auto& subaddr : subaddrs)
       {
         auto& account = self.subaccounts[subaddr.key];
@@ -463,11 +474,7 @@ namespace lwsf { namespace internal { namespace backend
         for (const auto& minors : subaddr.value)
         {
           for (std::uint32_t minor = std::get<0>(minors); minor < std::uint64_t(std::get<1>(minors)) + 1; ++minor)
-          {
-            auto elem = account.minor.try_emplace(minor);
-            if (elem.second && (subaddr.key || minor))
-              elem.first->second = std::move(old.minor[minor]);
-          }
+            account.minor.try_emplace(minor);
         }
       }
     }

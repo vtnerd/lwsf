@@ -585,6 +585,61 @@ namespace lwsf { namespace internal
     load_wallet(data_->primary, recovery, nettype, false); 
   }
 
+
+  wallet::wallet(from_keys, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const std::string& address_string, const std::string& view_key, const std::string& spend_key)
+    : data_(std::make_shared<backend::wallet>()),
+      addressbook_(),
+      history_(),
+      subaddresses_(),
+      subaddress_minor_(),
+      filename_(std::move(filename)),
+      password_(std::move(password)),
+      exception_error_(),
+      status_(),
+      thread_(),
+      iterations_(kdf_rounds),
+      mixin_(config::mixin_default),
+      refresh_interval_(config::refresh_interval),
+      refresh_notify_(),
+      error_sync_(),
+      refresh_sync_(),
+      thread_sync_(),
+      thread_state_(state::stop),
+      mandatory_refresh_(false)
+  {
+    if (sodium_init() < 0)
+      throw std::runtime_error{"Failed to initialize libsodium"};
+
+    data_->primary.generated_locally = false;
+    data_->primary.type = nettype;
+
+    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(unwrap(unwrap(data_->primary.view.sec))), view_key))
+    {
+      exception_error_ = "view_key contained invalid hex";
+      return;
+    }
+    if (!crypto::secret_key_to_public_key(data_->primary.view.sec, data_->primary.view.pub))
+    {
+      exception_error_ = "view_pub could not be computed";
+      return;
+    }
+
+    crypto::secret_key spend_sec;
+    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(unwrap(unwrap(data_->primary.spend.sec))), spend_key))
+    {
+      exception_error_ = "spend_key contained invalid hex";
+      return;
+    }
+    if (!crypto::secret_key_to_public_key(data_->primary.spend.sec, data_->primary.spend.pub))
+    {
+      exception_error_ = "spend_pub could not be computed";
+      return;
+    }
+    
+    if (data_->get_spend_address({0, 0}) != address_string)
+      exception_error_ = "view_key, spend_key, and address_string do not match";
+  }
+ 
   wallet::~wallet() { stop_refresh_loop(); }
 
   std::string wallet::seed(const std::string& seed_offset) const
