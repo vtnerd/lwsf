@@ -29,7 +29,6 @@
 include_directories(.)
 add_subdirectory(wire)
 
-# For both the server and admin utility.
 set(lwsf_sources
   address_book.cpp
   backend.cpp
@@ -53,16 +52,31 @@ set(lwsf_headers
   transaction_info.h
   wallet.h
 )
-  
-add_executable(lwsf-ledger ledger_main.cpp ${lwsf_sources} ${lwsf_headers})
-target_link_libraries(lwsf-ledger
+
+add_library(lwsf-api ${lwsf_sources} ${lwsf_headers})
+target_include_directories(lwsf-api
+  PUBLIC
+    "${lwsf_SOURCE_DIR}/include"
+  PRIVATE
+    "."
+)
+target_link_libraries(lwsf-api
+  PUBLIC
+    monero::libraries
   PRIVATE
     lwsf-wire
     lwsf-wire-json
     lwsf-wire-msgpack
     lwsf-wire-wrapper
-    monero::libraries
+    ${Boost_THREAD_LIBRARY}
+    ${sodium_LIBRARY_RELEASE}
+    Threads::Threads
+)
+
+add_executable(lwsf-ledger ledger_main.cpp)
+target_link_libraries(lwsf-ledger
+  PRIVATE
+    lwsf-api
     ${Boost_PROGRAM_OPTIONS_LIBRARY}
-    ${Boost_FILESYSTEM_LIBRARY}
 )
 

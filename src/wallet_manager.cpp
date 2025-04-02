@@ -404,7 +404,7 @@ namespace lwsf
     return new internal::wallet_manager{};
   }
 
-  void WalletManagerFactory::setLogLevel(int level)
+  void WalletManagerFactory::setLogLevel(LogLevel level)
   {
         //! \TODO Complete
   }
