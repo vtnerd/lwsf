@@ -169,6 +169,7 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_FIELD(description),
         WIRE_OPTIONAL_FIELD(timestamp),
         WIRE_FIELD(amount),
+        WIRE_FIELD(fee),
         WIRE_OPTIONAL_FIELD(height),
         WIRE_FIELD(unlock_time),
         WIRE_FIELD(direction),
@@ -740,7 +741,7 @@ namespace lwsf { namespace internal { namespace backend
     return {error::rpc_failure};
   }
 
-  std::error_code wallet::restore_height(const std::uint64_t height)
+  std::error_code wallet::restore_height(const std::uint64_t /*height not supported */)
   {
     /* TODO */
     throw std::logic_error{"restore_height not implemented"};
