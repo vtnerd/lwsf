@@ -32,6 +32,7 @@
 #include <boost/program_options/variables_map.hpp>
 #include <ctime>
 #include <iostream>
+#include <filesystem>
 #include <optional>
 #include <stdexcept>
 #include <string>

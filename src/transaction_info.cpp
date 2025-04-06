@@ -28,6 +28,8 @@
 
 #include "transaction_info.h"
 
+#include <boost/container/throw_exception.hpp>
+#include <boost/version.hpp>
 #include "hex.h"
 
 namespace
@@ -130,8 +132,10 @@ namespace lwsf { namespace internal
         return wallet_->primary.subaccounts.at(spend.sender.maj_i).minor.at(spend.sender.min_i).label;
       }
     }
+#if BOOST_VERSION >= 107600
     catch (const boost::container::out_of_range&)
     {}
+#endif
     catch (const std::out_of_range&)
     {}
 
