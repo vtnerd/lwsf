@@ -520,7 +520,8 @@ namespace lwsf { namespace internal { namespace backend
       fee_mask(0),
       sync(),
       sync_listener(),
-      sync_refresh()
+      sync_refresh(),
+      passed_login(false)
   {
     primary.subaccounts[0].minor[0];
   }
@@ -546,10 +547,15 @@ namespace lwsf { namespace internal { namespace backend
 
   std::string wallet::get_spend_address(const rpc::address_meta& index) const
   {
+    const bool is_subaddress = (index.maj_i != 0 || index.min_i != 0);
+    const auto spend_public = get_spend_public(index);
+    const crypto::public_key view_public = is_subaddress ?
+      rct::rct2pk(rct::scalarmultKey(rct::pk2rct(spend_public), rct::sk2rct(primary.view.sec))) : primary.view.pub;
+
     return cryptonote::get_account_address_as_str(
       get_net_type(),
-      (index.maj_i != 0 || index.min_i != 0),
-      cryptonote::account_public_address{get_spend_public(index), primary.view.pub}
+      is_subaddress,
+      cryptonote::account_public_address{spend_public, view_public}
     );
   }
 
@@ -592,6 +598,7 @@ namespace lwsf { namespace internal { namespace backend
         return response.error();
 
       const boost::lock_guard<boost::mutex> lock{sync};
+      passed_login = true;
       if (response->start_height)
         primary.restore_height = *response->start_height;
     }
@@ -637,8 +644,21 @@ namespace lwsf { namespace internal { namespace backend
         return {};
     }
 
+    const bool try_login = !passed_login;
     const rpc::login login{primary.address, primary.view.sec};
     lock.unlock();
+
+    if (try_login)
+    {
+      const std::error_code failed_login = this->login();
+      if (failed_login)
+      {
+        lock.lock();
+        last_sync = now.time_since_epoch().count();
+        return failed_login;
+      }
+    }
+
     const auto txs_response = rpc::invoke<rpc::get_address_txs>(client, login);
     if (txs_response)
     {
@@ -646,13 +666,15 @@ namespace lwsf { namespace internal { namespace backend
       outs_response = rpc::invoke<rpc::get_unspent_outs_response>(client, request);
     }
 
+    lock.lock();
+    last_sync = now.time_since_epoch().count();
+    passed_login = bool(txs_response) && bool(outs_response); // reset state
+
     if (!txs_response)
       return txs_response.error();
     if (!outs_response)
       return outs_response.error();
 
-    lock.lock();
-    last_sync = now.time_since_epoch().count();
     const std::uint64_t orig_scan_height = primary.scan_height;
     const auto new_txes = merge_response(*this, *txs_response, *outs_response);
 

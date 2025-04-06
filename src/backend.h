@@ -208,6 +208,7 @@ namespace lwsf { namespace internal { namespace backend
     mutable boost::mutex sync;
     boost::mutex sync_listener;
     boost::mutex sync_refresh;
+    bool passed_login;
 
     wallet();
 

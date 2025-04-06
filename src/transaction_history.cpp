@@ -90,8 +90,6 @@ namespace lwsf { namespace internal
 
   void transaction_history::refresh()
   {
-    data_->refresh(false);
-
     std::multimap<std::uint64_t, std::shared_ptr<const backend::transaction>> temp;
     {
       const boost::lock_guard<boost::mutex> lock{data_->sync};

@@ -324,21 +324,23 @@ namespace lwsf { namespace internal
       return boost::chrono::nanoseconds{source.count()};
     }
 
-    void load_wallet(backend::account& self, const crypto::secret_key& from, const Monero::NetworkType nettype, const bool generated_locally)
+    void load_wallet(backend::wallet& self, const crypto::secret_key& from, const Monero::NetworkType nettype, const bool generated_locally)
     {
       cryptonote::account_base base{};
       base.generate(from, true);
 
       const auto& keys = base.get_keys();
 
-      self.view.sec = keys.m_view_secret_key;
-      self.view.pub = keys.m_account_address.m_view_public_key;
+      self.primary.view.sec = keys.m_view_secret_key;
+      self.primary.view.pub = keys.m_account_address.m_view_public_key;
 
-      self.spend.sec = keys.m_spend_secret_key;
-      self.spend.pub = keys.m_account_address.m_spend_public_key;
+      self.primary.spend.sec = keys.m_spend_secret_key;
+      self.primary.spend.pub = keys.m_account_address.m_spend_public_key;
 
-      self.generated_locally = generated_locally;
-      self.type = nettype;
+      self.primary.generated_locally = generated_locally;
+      self.primary.type = nettype;
+
+      self.primary.address = self.get_spend_address({0, 0});
     }
   } // anonymous
 
@@ -401,8 +403,12 @@ namespace lwsf { namespace internal
         // check while holding lock and before a wait call
         if (thread_state_ == state::stop)
           return;
-
-        refresh_notify_.wait_for(lock, to_boost(config::refresh_interval));
+        
+        const auto last_state = thread_state_;
+        refresh_notify_.wait_for(
+          lock, to_boost(config::refresh_interval), [this, last_state] () {
+            return mandatory_refresh_ || thread_state_ != last_state;
+        });
       }
     }
     catch (const std::exception& e)
@@ -485,7 +491,7 @@ namespace lwsf { namespace internal
     crypto::secret_key recovery;
     randombytes_buf(std::addressof(unwrap(unwrap(recovery))), sizeof(recovery));
 
-    load_wallet(data_->primary, recovery, nettype, true); 
+    load_wallet(*data_, recovery, nettype, true);
   }
 
   wallet::wallet(open, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
@@ -518,7 +524,7 @@ namespace lwsf { namespace internal
       if (file.empty())
         file = try_load(filename_);
 
-      if (!file.empty())
+      if (!filename_.empty() && !file.empty())
       {
         encrypted_file contents{};
         if (!(status_ = wire::msgpack::from_bytes(std::move(file), contents)))
@@ -530,7 +536,7 @@ namespace lwsf { namespace internal
             {
               // lock not needed; data_ was created and unique to us
               if (nettype != data_->primary.type)
-                throw std::runtime_error{"Wallet file NetworkType does not match requested"};                
+                throw std::runtime_error{"Wallet file NetworkType does not match requested"}; 
             }
           }
           else
@@ -582,7 +588,7 @@ namespace lwsf { namespace internal
     if (!seed_offset.empty())
       recovery = cryptonote::decrypt_key(recovery, seed_offset);
 
-    load_wallet(data_->primary, recovery, nettype, false); 
+    load_wallet(*data_, recovery, nettype, false); 
   }
 
 
@@ -905,7 +911,11 @@ namespace lwsf { namespace internal
 
   Monero::Wallet::ConnectionStatus wallet::connected() const
   {
-    return data_->client.is_connected() ?
+    if (!data_->client.is_connected())
+      return ConnectionStatus_Disconnected;
+
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    return data_->passed_login ?
       ConnectionStatus_Connected : ConnectionStatus_Disconnected;
   }
 
