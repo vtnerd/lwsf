@@ -630,8 +630,6 @@ namespace lwsf { namespace internal { namespace backend
         return {};
     }
 
-    expect<rpc::get_unspent_outs_response> outs_response{common_error::kInvalidArgument};
-
     boost::unique_lock<boost::mutex> lock_refresh{sync_refresh};
     boost::unique_lock<boost::mutex> lock{sync};
     const auto now = std::chrono::steady_clock::now();
@@ -659,6 +657,7 @@ namespace lwsf { namespace internal { namespace backend
       }
     }
 
+    expect<rpc::get_unspent_outs_response> outs_response{common_error::kInvalidArgument};
     const auto txs_response = rpc::invoke<rpc::get_address_txs>(client, login);
     if (txs_response)
     {

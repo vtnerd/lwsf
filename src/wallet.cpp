@@ -813,51 +813,32 @@ namespace lwsf { namespace internal
     if (!light_wallet)
       throw std::invalid_argument{"Only light_wallets are supported with this instance"};
 
-    // on exceptions, reset state
-    struct on_throw
-    {
-      void operator()(wallet* self) const
-      {
-        if (self)
-        {
-          self->stop_refresh_loop();
-          self->data_->client.disconnect();
-        }
-      }
-    };
-
     try
     {
-      std::unique_ptr<wallet, on_throw> rollback{this};
-      stop_refresh_loop();
-      data_->client.disconnect();
-
-      if (!proxy_address.empty() && !setProxy(proxy_address))
-        return false;
-
       epee::net_utils::http::url_content url{};
       if (!epee::net_utils::parse_url(daemon_address, url))
         throw std::runtime_error{"Invalid LWS URL: " + daemon_address};
       if (!url.m_uri_content.m_path.empty())
         throw std::runtime_error{"LWS URL contains path (unsupported)"};
 
-      if (url.schema == "https")
-        use_ssl = true;
+
+      if (!proxy_address.empty() && !setProxy(proxy_address))
+        return false;
 
       boost::optional<epee::net_utils::http::login> login;
       if (!daemon_username.empty() || !daemon_password.empty())
         login.emplace(daemon_username, daemon_password);
 
+      // verify cert if `use_ssl == true`, otherwise autodetect if `https`
+      // specified.
+      const bool https = url.schema == "https";
       epee::net_utils::ssl_options_t options{
-        use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_enabled : epee::net_utils::ssl_support_t::e_ssl_support_disabled
+        !use_ssl ?
+          (https ? epee::net_utils::ssl_support_t::e_ssl_support_autodetect : epee::net_utils::ssl_support_t::e_ssl_support_disabled) :
+            epee::net_utils::ssl_support_t::e_ssl_support_enabled
       };
 
       data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
-      if (!connectToDaemon())
-        return false;
-
-      startRefresh();
-      rollback.release();
     }
     catch (const std::exception& e)
     {
