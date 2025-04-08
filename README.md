@@ -3,6 +3,9 @@
 > This project is **NOT** a part of the official monero "core" code, but _may_
 > be merged into that project.
 
+> This project is correctly incomplete, so the instructions here are for
+> the truly adventurous.
+
 ## Table of Contents
 
   - [Introduction](#introduction)
