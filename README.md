@@ -11,8 +11,11 @@
   - [Introduction](#introduction)
   - [About this project](#about-this-project)
   - [License](#license)
-  - [Compiling Monero-lws from source](#compiling-monero-lws-from-source)
+  - [Compiling lwsf from source](#compiling-lwsf-from-source)
     - [Dependencies](#dependencies)
+    - [Cloning the repository](#cloning-the-repository)
+    - [Build Instructions](#build-instructions)
+  - [Running lwsf](#running-lwsf)
 
 
 ## Introduction
@@ -70,7 +73,7 @@ uses the same code.
 See [LICENSE](LICENSE).
 
 
-## Compiling lswf from source
+## Compiling lwsf from source
 
 ### Dependencies
 
