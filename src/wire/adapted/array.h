@@ -53,18 +53,18 @@ namespace wire
   template<typename R, std::size_t N>
   inline void read_bytes(R& source, std::array<char, N>& dest)
   {
-    source.binary(epee::to_mut_span(dest));
+    source.string(epee::to_mut_span(dest), true /* exact */);
   }
   template<typename R, std::size_t N>
   inline void read_bytes(R& source, std::array<std::uint8_t, N>& dest)
   {
-    source.binary(epee::to_mut_span(dest));
+    source.binary(epee::to_mut_span(dest), true /* exact */);
   }
 
   template<typename W, std::size_t N>
   inline void write_bytes(W& dest, const std::array<char, N>& source)
   {
-    source.binary(epee::to_span(source));
+    source.string(epee::to_span(source));
   }
   template<typename W, std::size_t N>
   inline void write_bytes(W& dest, const std::array<std::uint8_t, N>& source)

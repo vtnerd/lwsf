@@ -51,9 +51,9 @@ namespace lwsf { namespace internal
   void transaction_info::update_transfers()
   {
     transfers_.clear();
-    transfers_.reserve(data_->spends.size());
-    for (const auto& spend : data_->spends)
-      transfers_.emplace_back(spend.second.amount, spend.second.address);
+    transfers_.reserve(data_->transfers.size());
+    for (const auto& out : data_->transfers)
+      transfers_.emplace_back(out.amount, out.address);
   }
 
   transaction_info::transaction_info(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<const backend::transaction> data)
@@ -114,30 +114,26 @@ namespace lwsf { namespace internal
 
   std::string transaction_info::label() const
   {
-    try // We could be out-of-sync with another wallet adding subaddresses
+    const auto get_label = [this] (const rpc::address_meta& meta) -> std::string
     {
-      if (data_->direction == Direction_In)
+      const boost::lock_guard<boost::mutex> lock{wallet_->sync};
+      if (meta.maj_i < wallet_->primary.subaccounts.size())
       {
-        if (!data_->receives.empty())
-        {
-          const auto& receive = data_->receives.begin()->second;
-          const boost::lock_guard<boost::mutex> lock{wallet_->sync};
-          return wallet_->primary.subaccounts.at(receive.recipient.maj_i).minor.at(receive.recipient.min_i).label;
-        }
+        const auto& major = wallet_->primary.subaccounts.at(meta.maj_i);
+        const auto minor = major.detail.find(meta.min_i);
+        if (minor != major.detail.end())
+          return minor->second.label;
       }
-      else if (!data_->spends.empty())
-      {
-        const auto& spend = data_->spends.begin()->second;
-        const boost::lock_guard<boost::mutex> lock{wallet_->sync};
-        return wallet_->primary.subaccounts.at(spend.sender.maj_i).minor.at(spend.sender.min_i).label;
-      }
+      return {};
+    };
+
+    if (data_->direction == Direction_In)
+    {
+      if (!data_->receives.empty())
+        return get_label(data_->receives.begin()->second.recipient);
     }
-#if BOOST_VERSION >= 107600
-    catch (const boost::container::out_of_range&)
-    {}
-#endif
-    catch (const std::out_of_range&)
-    {}
+    else if (!data_->spends.empty())
+      return get_label(data_->spends.begin()->second.sender);
 
     return {};
   }

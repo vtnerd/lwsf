@@ -90,36 +90,31 @@ namespace lwsf { namespace internal
 
   void transaction_history::refresh()
   {
-    std::multimap<std::uint64_t, std::shared_ptr<const backend::transaction>> temp;
-    {
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      if (std::numeric_limits<int>::max() < data_->primary.txes.size())
-        throw std::runtime_error{"lwsf::internal::transaction_history::refresh exceeds max history size"};
+    by_id_.clear();
 
-      for (const auto& tx : data_->primary.txes)
-        temp.emplace(tx.second->height.value_or(std::numeric_limits<std::uint64_t>::max()), tx.second);
-    }
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    if (std::numeric_limits<int>::max() < data_->primary.txes.size())
+      throw std::runtime_error{"lwsf::internal::transaction_history::refresh exceeds max history size"};
 
     // be careful about exceptions and memory leaks. this should be safe
 
-    for (std::size_t i = temp.size(); i < txes_.size(); ++i)
+    for (std::size_t i = data_->primary.txes.size(); i < txes_.size(); ++i)
     {
       const std::unique_ptr<Monero::TransactionInfo> destroy{txes_[i]};
       txes_[i] = nullptr;
     }
 
-    by_id_.clear();
-    txes_.resize(temp.size());
+    txes_.resize(data_->primary.txes.size());
 
     try
     {
       std::size_t i = 0;
-      for (auto& backend_tx : temp)
+      for (const auto& backend_tx : data_->primary.txes)
       {
         if (txes_[i])
-          static_cast<transaction_info*>(txes_[i])->update(std::move(backend_tx.second));
+          static_cast<transaction_info*>(txes_[i])->update(backend_tx.second);
         else
-          txes_[i] = new transaction_info{data_, std::move(backend_tx.second)};
+          txes_[i] = new transaction_info{data_, backend_tx.second};
         ++i;
       }
     }

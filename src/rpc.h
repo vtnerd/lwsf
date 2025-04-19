@@ -28,10 +28,13 @@
 
 #pragma once
 
+#include <boost/container/flat_set.hpp>
 #include <boost/variant.hpp>
 #include <ctime>
 #include <optional>
 #include <system_error>
+#include <type_traits>
+#include <vector>
 #include "byte_slice.h"  // monero/contrib/epee/include
 #include "byte_stream.h" // moneor/contrib/epee/include
 #include "common/expect.h"   // monero/src
@@ -40,6 +43,7 @@
 #include "wire/basic_value.h"
 #include "wire/fwd.h"
 #include "wire/json.h"
+#include "wire/traits.h"
 
 namespace epee { namespace net_utils
 {
@@ -49,16 +53,16 @@ namespace epee { namespace net_utils
 
 namespace lwsf { namespace internal { namespace rpc
 {
+  using max_subaddrs = wire::max_element_count<43690>;
   using http_client = epee::net_utils::http::http_simple_client_template<
     epee::net_utils::blocked_mode_client
   >;
 
   enum class error : int
   {
-    none = 0, invoke_failure, not_connected, wrong_response_code
+    none = 0, no_response = -1, invalid_code = -2 /* Otherwise HTTP error code */
   };
 
-  const char* get_string(error value) noexcept;
   const std::error_category& error_category() noexcept;
   inline std::error_code make_error_code(const error value) noexcept
   {
@@ -142,15 +146,27 @@ namespace lwsf { namespace internal { namespace rpc
     std::uint32_t maj_i;
     std::uint32_t min_i;
 
-    address_meta() noexcept
+    constexpr address_meta() noexcept
       : maj_i(0), min_i(0)
     {}
 
-    address_meta(const std::uint32_t maj, std::uint32_t min) noexcept
+    constexpr address_meta(const std::uint32_t maj, std::uint32_t min) noexcept
       : maj_i(maj), min_i(min)
     {}
+
+    constexpr bool is_default() const noexcept { return !maj_i && !min_i; }
   };
   WIRE_DECLARE_OBJECT(address_meta);
+
+  inline constexpr bool operator<(const address_meta& lhs, const address_meta& rhs) noexcept
+  {
+    return lhs.maj_i == rhs.maj_i ?
+      lhs.min_i < rhs.min_i : lhs.maj_i < rhs.maj_i;
+  }
+  inline constexpr bool operator==(const address_meta& lhs, const address_meta& rhs) noexcept
+  {
+    return lhs.maj_i == rhs.maj_i && lhs.min_i == rhs.min_i;
+  }
 
   struct transaction_spend
   {
@@ -214,20 +230,42 @@ namespace lwsf { namespace internal { namespace rpc
   struct subaddrs
   {
     subaddrs()
-      : key(0), value()
+      : head({0, 0}), key(0)
     {}
 
+    explicit subaddrs(const std::uint32_t key)
+      : head({0, 0}), key(key)
+    {}
+
+    std::array<std::uint32_t, 2> head; //!< Only the first element of array 
     std::uint32_t key;
-    std::vector<std::array<std::uint32_t, 2>> value; 
   };
+  WIRE_JSON_DECLARE_OBJECT(subaddrs);
   void read_bytes(wire::json_reader&, subaddrs&);
+
+  inline bool operator<(const subaddrs& lhs, const subaddrs& rhs) noexcept
+  { return lhs.key < rhs.key; }
+
+  template<typename T>
+  inline bool operator<(const subaddrs& lhs, const T rhs) noexcept
+  { 
+    static_assert(std::is_unsigned<T>());
+    return lhs.key < rhs;
+  }
+
+  template<typename T>
+  inline bool operator<(const T lhs, const subaddrs& rhs) noexcept
+  { 
+    static_assert(std::is_unsigned<T>());
+    return lhs < rhs.key;
+  }
 
   struct get_subaddrs
   {
     get_subaddrs() = delete;
     static constexpr const char* endpoint() noexcept { return "/get_subaddrs"; }
 
-    std::vector<subaddrs> all_subaddrs;
+    boost::container::flat_set<subaddrs, std::less<>> all_subaddrs;
   };
   void read_bytes(wire::json_reader&, get_subaddrs&);
 
@@ -322,8 +360,8 @@ namespace lwsf { namespace internal { namespace rpc
     provision_subaddrs_response() = delete;
     static constexpr const char* endpoint() noexcept { return "/provision_subaddrs"; }
 
-    std::vector<subaddrs> new_subaddrs;
-    std::vector<subaddrs> all_subaddrs;
+    boost::container::flat_set<subaddrs> new_subaddrs;
+    boost::container::flat_set<subaddrs> all_subaddrs;
   };
   void read_bytes(wire::json_reader&, provision_subaddrs_response&);
 
@@ -343,6 +381,26 @@ namespace lwsf { namespace internal { namespace rpc
     std::string status;
   };
   void read_bytes(wire::json_reader&, submit_raw_tx_response&);
+
+
+  struct upsert_subaddrs_request
+  {
+    upsert_subaddrs_request() = delete;
+    login creds;
+    boost::container::flat_set<subaddrs, std::less<>> subaddrs_;
+    bool get_all;
+  };
+  void write_bytes(wire::json_writer&, const upsert_subaddrs_request&);
+
+  struct upsert_subaddrs_response
+  {
+    upsert_subaddrs_response() = delete;
+    static constexpr const char* endpoint() noexcept { return "/upsert_subaddrs"; }
+
+    boost::container::flat_set<subaddrs> new_subaddrs;
+    boost::container::flat_set<subaddrs> all_subaddrs;
+  };
+  void read_bytes(wire::json_reader&, upsert_subaddrs_response&);
      
 }}} // lwsf // internal // rpc
 

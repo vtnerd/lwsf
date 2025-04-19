@@ -28,15 +28,24 @@
 
 #pragma once
 
+#include <chrono>
+#include <cstdint>
+#include <string_view>
+
 namespace lwsf { namespace config
 {
-  constexpr const std::chrono::seconds connect_timeout{2};
+  constexpr const std::chrono::seconds connect_timeout{5};
   constexpr const std::chrono::seconds daemon_status_cache{10};
+  constexpr const std::string_view default_account_name{"Untitled account"};
+  constexpr const std::string_view default_primary_name{"Primary account"};
   constexpr const std::size_t initial_buffer_size = 1024 * 64; // 64 KiB
   constexpr const std::size_t max_txes_in_rpc = 2048;
   constexpr const std::uint32_t mixin_default = 16;
   constexpr const std::chrono::seconds refresh_interval{30};
   constexpr const std::chrono::seconds refresh_interval_min{5};
   constexpr const std::chrono::seconds rpc_timeout{5};
+  constexpr const std::uint32_t subaddr_major_lookahead = 50;
+  constexpr const std::uint32_t subaddr_minor_lookahead = 200;
   constexpr const unsigned subaddr_retry{10};
+
 }} // lwsf // config

@@ -324,7 +324,7 @@ namespace lwsf { namespace internal
       return boost::chrono::nanoseconds{source.count()};
     }
 
-    void load_wallet(backend::wallet& self, const crypto::secret_key& from, const Monero::NetworkType nettype, const bool generated_locally)
+    void init_wallet(backend::wallet& self, const crypto::secret_key& from, const Monero::NetworkType nettype, const bool generated_locally)
     {
       cryptonote::account_base base{};
       base.generate(from, true);
@@ -344,11 +344,14 @@ namespace lwsf { namespace internal
     }
   } // anonymous
 
-  bool wallet::set_error(const std::error_code status) const
+  bool wallet::set_error(const std::error_code status, const bool update_iff_error) const
   {
     const boost::lock_guard<boost::mutex> lock{error_sync_};
-    status_ = status;
-    exception_error_.clear();
+    if (!update_iff_error || status)
+    {
+      status_ = status;
+      exception_error_.clear();
+    }
     return !status_;
   }
 
@@ -394,7 +397,7 @@ namespace lwsf { namespace internal
         {
           // refresh has strong exception guarantee - never in partial state.
           lock.unlock();
-          set_error(data_->refresh(mandatory_refresh));
+          set_error(data_->refresh(mandatory_refresh), true);
           lock.lock();
         }
         else if (thread_state_ == state::skip_once)
@@ -491,7 +494,7 @@ namespace lwsf { namespace internal
     crypto::secret_key recovery;
     randombytes_buf(std::addressof(unwrap(unwrap(recovery))), sizeof(recovery));
 
-    load_wallet(*data_, recovery, nettype, true);
+    init_wallet(*data_, recovery, nettype, true);
   }
 
   wallet::wallet(open, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
@@ -588,7 +591,7 @@ namespace lwsf { namespace internal
     if (!seed_offset.empty())
       recovery = cryptonote::decrypt_key(recovery, seed_offset);
 
-    load_wallet(*data_, recovery, nettype, false); 
+    init_wallet(*data_, recovery, nettype, false); 
   }
 
 
@@ -805,7 +808,7 @@ namespace lwsf { namespace internal
     }
 
     // this will clear any existing errors
-    return set_error(status); 
+    return set_error(status, false); 
   }
 
   bool wallet::init(const std::string &daemon_address, uint64_t, const std::string &daemon_username, const std::string &daemon_password, bool use_ssl, bool light_wallet, const std::string &proxy_address)
@@ -851,17 +854,20 @@ namespace lwsf { namespace internal
 
   void wallet::setRefreshFromBlockHeight(uint64_t refresh_from_block_height)
   {
-    try { set_error(data_->restore_height(refresh_from_block_height)); }
-    catch (const std::exception& e)
-    {
-      set_critical(e);
-    } 
+    try { set_error(data_->restore_height(refresh_from_block_height), true); }
+    catch (const std::exception& e) { set_critical(e); } 
   }
 
   uint64_t wallet::getRefreshFromBlockHeight() const
   {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     return data_->primary.restore_height;
+  }
+   
+  void wallet::setSubaddressLookahead(uint32_t major, uint32_t minor)
+  {
+    try { set_error(data_->set_lookahead(major, minor), false); }
+    catch (const std::exception& e) { set_critical(e); }
   }
 
   bool wallet::connectToDaemon()
@@ -881,12 +887,12 @@ namespace lwsf { namespace internal
     std::unique_ptr<wallet, on_throw> disconnect{this};
     if (data_->client.connect(config::connect_timeout))
     {
-      const std::error_code status = data_->login();
-      if (!status)
+      const std::error_code err = data_->login();
+      if (!err)
         disconnect.release();
-      return set_error(status);
+      return set_error(err, false);
     }
-    set_error(error::connect_failure);
+    set_error(rpc::error::no_response, false);
     return false;
   }
 
@@ -906,7 +912,7 @@ namespace lwsf { namespace internal
     if (!endpoint)
     {
       data_->client.set_connector(null_connector{});
-      return set_error(endpoint.error());
+      return set_error(endpoint.error(), false);
     }
     data_->client.set_connector(net::socks::connector{std::move(*endpoint)});
     return true;
@@ -919,11 +925,17 @@ namespace lwsf { namespace internal
     std::uint64_t balance = 0;
     for (const auto& tx : data_->primary.txes)
     {
+      if (tx.second->failed)
+        continue;
+
       for (const auto& receive : tx.second->receives)
       {
         if (receive.second.recipient.maj_i == accountIndex)
           balance += receive.second.amount;
       }
+
+      if (!tx.second->spends.empty() && tx.second->spends.begin()->second.sender.maj_i == accountIndex)
+        balance -= tx.second->fee;
 
       for (const auto& spend : tx.second->spends)
       {
@@ -944,12 +956,18 @@ namespace lwsf { namespace internal
     std::uint64_t balance = 0;
     for (const auto& tx : data_->primary.txes)
     {
+      if (tx.second->failed)
+        continue;
+
       const bool unlocked = tx.second->is_unlocked(chain_height, net_type);
       for (const auto& receive : tx.second->receives)
       {
         if (unlocked && receive.second.recipient.maj_i == accountIndex)
           balance += receive.second.amount;
       }
+
+      if (!tx.second->spends.empty() && tx.second->spends.begin()->second.sender.maj_i == accountIndex)
+        balance -= tx.second->fee;
 
       for (const auto& spend : tx.second->spends)
       {
@@ -1017,7 +1035,7 @@ namespace lwsf { namespace internal
 
   bool wallet::refresh()
   {
-    try { return set_error(data_->refresh(true)); }
+    try { return set_error(data_->refresh(true), true); }
     catch (const std::exception& e) { set_critical(e); }
     return false;
   }
@@ -1053,7 +1071,8 @@ namespace lwsf { namespace internal
 
   void wallet::addSubaddressAccount(const std::string& label)
   {
-    data_->add_subaccount(label);
+    try { set_error(data_->add_subaccount(label), false); }
+    catch (const std::exception& e) { set_critical(e); }
   }
 
   std::size_t wallet::numSubaddressAccounts() const
@@ -1062,41 +1081,36 @@ namespace lwsf { namespace internal
     return data_->primary.subaccounts.size();
   }
 
-
   std::size_t wallet::numSubaddresses(const std::uint32_t accountIndex) const
   {
+    static_assert(std::numeric_limits<std::uint32_t>::max() <= std::numeric_limits<std::size_t>::max());
     const boost::lock_guard<boost::mutex> lock{data_->sync};
-    const auto account = data_->primary.subaccounts.find(accountIndex);
-    if (account != data_->primary.subaccounts.end())
-      return account->second.minor.size();
+    if (accountIndex < data_->primary.subaccounts.size())
+      return data_->primary.subaccounts.at(accountIndex).used;
     set_critical(std::runtime_error{"numSubaddresses failed, " + std::to_string(accountIndex) + " does not exist"});
     return 0;
   }
 
   std::string wallet::getSubaddressLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex) const
   {
+    static_assert(std::numeric_limits<std::uint32_t>::max() <= std::numeric_limits<std::size_t>::max());
     const boost::lock_guard<boost::mutex> lock{data_->sync};
-    const auto major = data_->primary.subaccounts.find(accountIndex);
-    if (major != data_->primary.subaccounts.end())
-    {
-      const auto minor = major->second.minor.find(addressIndex);
-      if (minor != major->second.minor.end())
-        return minor->second.label;
-    }
+    if (accountIndex < data_->primary.subaccounts.size())
+      return std::string{data_->primary.subaccounts.at(accountIndex).sub_label(addressIndex)};
     set_critical(std::runtime_error{"getSubaddressLabel failed, " + std::to_string(accountIndex) + "," + std::to_string(addressIndex) + " does not exist"});
     return {};
   }
 
   void wallet::setSubaddressLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex, const std::string &label)
   {
+    static_assert(std::numeric_limits<std::uint32_t>::max() <= std::numeric_limits<std::size_t>::max());
     const boost::lock_guard<boost::mutex> lock{data_->sync};
-    auto major = data_->primary.subaccounts.find(accountIndex);
-    if (major != data_->primary.subaccounts.end())
+    if (accountIndex < data_->primary.subaccounts.size())
     {
-      auto minor = major->second.minor.find(addressIndex);
-      if (minor != major->second.minor.end())
+      auto& acct = data_->primary.subaccounts[accountIndex];
+      if (addressIndex < acct.used)
       {
-        minor->second.label = label;
+        acct.detail.try_emplace(addressIndex).first->second.label = label;
         return;
       }
     }
@@ -1200,7 +1214,6 @@ namespace lwsf { namespace internal
     const auto attribute = data_->primary.attributes.find(key);
     if (attribute != data_->primary.attributes.end())
       return attribute->second;
-    set_critical(std::runtime_error{"attribute " + key + " does not exist"});
     return {};
   }
 
@@ -1257,16 +1270,13 @@ namespace lwsf { namespace internal
     std::string out;
     out.reserve(iter->second->spends.size() * hex_size);
 
-    for (const auto& spend : iter->second->spends)
+    for (const auto& transfer : iter->second->transfers)
     {
-      if (spend.second.secret)
+      out.insert(out.end(), hex_size, 0);
+      if (!epee::to_hex::buffer({out.data() + out.size() - hex_size, hex_size}, epee::as_byte_span(unwrap(unwrap(transfer.secret)))))
       {
-        out.insert(out.end(), hex_size, 0);
-        if (!epee::to_hex::buffer({out.data() + out.size() - hex_size, hex_size}, epee::as_byte_span(unwrap(unwrap(*spend.second.secret)))))
-        {
-          set_critical(std::runtime_error{"getTxKey conversion to hex failure"});
-          return {};
-        }
+        set_critical(std::runtime_error{"getTxKey conversion to hex failure"});
+        return {};
       }
     }
 

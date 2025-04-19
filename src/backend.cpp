@@ -39,6 +39,7 @@
 #include "wire/adapted/crypto.h"
 #include "wire/adapted/pair.h"
 #include "wire/msgpack.h"
+#include "wire/wrapper/defaulted.h"
 #include "wire/wrapper/trusted_array.h"
 #include "wire/wrapper/variant.h"
 
@@ -52,6 +53,22 @@ namespace lwsf { namespace internal { namespace backend
 { 
   namespace
   {
+    constexpr const error default_subaddr_state = error::subaddr_disabled;
+    constexpr const auto rpc_unapproved = rpc::error(403);
+    constexpr const auto rpc_max_subaddresses = rpc::error(409);
+    constexpr const auto rpc_internal_error = rpc::error(500);
+    constexpr const auto rpc_not_implemented = rpc::error(501);
+
+    template<typename T, typename U>
+    std::uint32_t add_uint32_clamp(const T index, const U lookahead)
+    {
+      static_assert(std::is_unsigned<T>());
+      static_assert(std::is_same<U, std::uint32_t>());
+      if (std::numeric_limits<std::uint32_t>::max() - lookahead <= index)
+        return std::numeric_limits<std::uint32_t>::max();
+      return index + lookahead;
+    }
+
     cryptonote::network_type convert_net_type(const Monero::NetworkType in)
     {
       switch(in)
@@ -127,19 +144,19 @@ namespace lwsf { namespace internal { namespace backend
     template<typename F, typename T>
     void map_sub_account(F& format, T& self)
     {
+      // do not store server lookahead, reset on each server connection
       wire::object(format,
-        wire::field("minor", wire::trusted_array(std::ref(self.minor)))
+        wire::optional_field("detail", wire::trusted_array(std::ref(self.detail))),
+        WIRE_FIELD_DEFAULTED(used, 0)
       );
     }
 
     template<typename F, typename T>
-    void map_transfer_out(F& format, T& self)
+    void map_transfer_spend(F& format, T& self)
     {
       wire::object(format,
-        WIRE_FIELD(address),
         WIRE_FIELD(amount),
         WIRE_FIELD(sender),
-        WIRE_OPTIONAL_FIELD(secret),
         WIRE_FIELD(tx_pub),
         WIRE_FIELD(output_pub)
       );
@@ -159,13 +176,20 @@ namespace lwsf { namespace internal { namespace backend
     }
 
     template<typename F, typename T>
+    void map_transfer_out(F& format, T& self)
+    {
+      wire::object(format, WIRE_FIELD(address), WIRE_FIELD(amount), WIRE_FIELD(secret));
+    }
+
+    template<typename F, typename T>
     void map_transaction(F& format, T& self)
     {
       //! TODO complete payment_id storage
       auto payment_id = wire::variant(std::ref(self.payment_id));
       wire::object(format,
-        wire::field("spends", wire::trusted_array(std::ref(self.spends))),
-        wire::field("receives", wire::trusted_array(std::ref(self.receives))),
+        wire::optional_field("spends", wire::trusted_array(std::ref(self.spends))),
+        wire::optional_field("receives", wire::trusted_array(std::ref(self.receives))),
+        wire::optional_field("transfers", wire::trusted_array(std::ref(self.transfers))),
         WIRE_FIELD(description),
         WIRE_OPTIONAL_FIELD(timestamp),
         WIRE_FIELD(amount),
@@ -210,12 +234,14 @@ namespace lwsf { namespace internal { namespace backend
     {
       wire::object(format,
         WIRE_FIELD(language),
-        wire::field("addressbook", wire::trusted_array(std::ref(self.addressbook))),
-        wire::field("subaccounts", wire::trusted_array(std::ref(self.subaccounts))),
-        wire::field("txes", wire::trusted_array(std::ref(self.txes))),
-        wire::field("attributes", wire::trusted_array(std::ref(self.attributes))),
+        wire::optional_field("addressbook", wire::trusted_array(std::ref(self.addressbook))),
+        wire::optional_field("subaccounts", wire::trusted_array(std::ref(self.subaccounts))),
+        wire::optional_field("txes", wire::trusted_array(std::ref(self.txes))),
+        wire::optional_field("attributes", wire::trusted_array(std::ref(self.attributes))),
         WIRE_FIELD(scan_height),
         WIRE_FIELD(restore_height),
+        WIRE_FIELD_DEFAULTED(maj_lookahead, config::subaddr_major_lookahead),
+        WIRE_FIELD_DEFAULTED(min_lookahead, config::subaddr_minor_lookahead),
         WIRE_FIELD(type),
         WIRE_FIELD(view),
         WIRE_FIELD(spend),
@@ -238,7 +264,7 @@ namespace lwsf { namespace internal { namespace backend
       return commitment.mask;
     } 
 
-    void update_output(transfer_in& out, const rpc::output& source, const crypto::secret_key& view_key)
+    rpc::address_meta update_output(transfer_in& out, const rpc::output& source, const crypto::secret_key& view_key)
     {
       out.global_index = std::uint64_t(source.global_index);
       out.amount = std::uint64_t(source.amount);
@@ -261,18 +287,21 @@ namespace lwsf { namespace internal { namespace backend
         out.rct_mask = source.rct.mask;
         break;
       }
+
+      return out.recipient;
     }
 
-    void update_spend(transfer_out& out, const rpc::transaction_spend& source)
+    rpc::address_meta update_spend(transfer_spend& out, const rpc::transaction_spend& source)
     {
       out.amount = std::uint64_t(source.amount);
       out.sender = source.sender.value_or(rpc::address_meta{});
       out.tx_pub = source.tx_pub_key;
+      return out.sender;
     }
 
     crypto::secret_key get_spend_secret(const account& self, const std::optional<rpc::address_meta>& index)
     {
-      if (!index || (index->maj_i == 0 && index->min_i == 0))
+      if (!index || index->is_default())
         return self.spend.sec;
 
       // m = Hs(a || index_major || index_minor)
@@ -284,11 +313,21 @@ namespace lwsf { namespace internal { namespace backend
       return out;
     }
 
-    bool update_tx(const account& self, transaction& out, const rpc::transaction& source)
+    //! \return True if used subaddresses has been increased
+    bool need_expansion(const account& self, const rpc::address_meta& sub)
+    {
+      if (self.subaccounts.size() <= sub.maj_i)
+        return true;
+      return self.subaccounts[sub.maj_i].used <= sub.min_i;
+    }
+
+    std::optional<std::vector<rpc::address_meta>> update_tx(const account& self, transaction& out, const rpc::transaction& source)
     {
       /* Let `receives` re-populate in `merge_output`. This works because the
         server supplies all info - there is no local info to keep. */
       out.receives.clear();
+
+      std::vector<rpc::address_meta> meta;
 
       out.id = source.hash;
       out.timestamp = source.timestamp;
@@ -316,13 +355,15 @@ namespace lwsf { namespace internal { namespace backend
         {
           /* Frontend will typically know about spend before backend. So only
             merge and never erase spends. */
-          update_spend(out.spends.try_emplace(image).first->second, spend);
+          const rpc::address_meta sub = update_spend(out.spends.try_emplace(image).first->second, spend);
+          if (need_expansion(self, sub))
+            meta.push_back(sub);
           total_spent += std::uint64_t(spend.amount);
         }
       }
 
       if (!std::uint64_t(source.total_received) && !total_spent)
-        return false; // used as decoy
+        return std::nullopt; // used as decoy
 
       if (out.fee <= total_spent)
         total_spent -= out.fee;
@@ -338,22 +379,40 @@ namespace lwsf { namespace internal { namespace backend
         out.amount = total_spent - std::uint64_t(source.total_received);
       }
 
-      return true;
+      return meta;
     }
 
-    void merge_output(const std::shared_ptr<transaction>& out, const rpc::output& source, const crypto::secret_key& view_key)
+    rpc::address_meta merge_output(const std::shared_ptr<transaction>& out, const rpc::output& source, const crypto::secret_key& view_key)
     {
       if (!out)
         throw std::logic_error{"nullptr transaction in merge_output"};
 
       out->prefix = source.tx_prefix_hash;
-      update_output(out->receives.try_emplace(source.public_key).first->second, source, view_key);
+      return update_output(out->receives[source.public_key], source, view_key);
     }
 
-    std::vector<std::shared_ptr<transaction>>
-      merge_response(wallet& self, const rpc::get_address_txs& source, const rpc::get_unspent_outs_response& unspents)
+    struct merge_results
     {
-      std::vector<std::shared_ptr<transaction>> out;
+      std::vector<std::shared_ptr<transaction>> new_transactions;
+      boost::container::flat_set<rpc::subaddrs, std::less<>> new_subaddrs;
+
+      void merge_subaddr(const rpc::address_meta& meta)
+      {
+        auto elem = new_subaddrs.find(meta.maj_i);
+        if (elem == new_subaddrs.end())
+          elem = new_subaddrs.insert(rpc::subaddrs{meta.maj_i}).first;
+
+        const auto existing = elem->head;
+        std::get<0>(elem->head) = std::min(std::get<0>(existing), meta.min_i);
+        std::get<1>(elem->head) = std::max(std::get<1>(existing), meta.min_i);
+      }
+    };
+
+    merge_results merge_response(wallet& self, const rpc::get_address_txs& source, const rpc::get_unspent_outs_response& unspents)
+    {
+      // Remember that this function provides the strong exception guarantee.
+
+      merge_results out;
 
       /* Backend server could remove or modify txes (rescan or bug fix); the
         easiest way to handle this is to start a new copy of the txes. This is
@@ -381,22 +440,20 @@ namespace lwsf { namespace internal { namespace backend
       {
         if (tx.second)
         {
-          for (const auto& spend : tx.second->spends)
+          if (!tx.second->transfers.empty())
           {
-            if (spend.second.secret)
+            const auto iter = updated_txes.emplace_hint(
+              updated_txes.end(), tx.first, nullptr
+            );
+            if (!iter->second)
             {
-              const auto iter = updated_txes.emplace_hint(
-                updated_txes.end(), tx.first, nullptr
-              );
-              if (!iter->second)
-              {
-                iter->second = std::make_shared<transaction>(*tx.second);
-                iter->second->height = std::nullopt;
-                iter->second->timestamp = std::nullopt;
-                iter->second->failed = false;
-              }
-              images.emplace(spend.first, iter->second);
+              iter->second = std::make_shared<transaction>(*tx.second);
+              iter->second->height = std::nullopt;
+              iter->second->timestamp = std::nullopt;
+              iter->second->failed = false;
             }
+            for (const auto& spend : tx.second->spends)
+              images.emplace(spend.first, iter->second);
           }
         }
       }
@@ -413,10 +470,13 @@ namespace lwsf { namespace internal { namespace backend
             inserted.first->second = std::make_shared<transaction>();
 
           if (existing == self.primary.txes.end())
-            out.push_back(inserted.first->second);
+            out.new_transactions.push_back(inserted.first->second);
         }
-        if (update_tx(self.primary, *inserted.first->second, tx))
+        if (const auto subs = update_tx(self.primary, *inserted.first->second, tx))
         {
+          for (const auto& sub : *subs)
+            out.merge_subaddr(sub);
+
           for (const auto& spend : inserted.first->second->spends)
           {
             for (auto range = images.equal_range(spend.first); range.first != range.second; ++range.first)
@@ -431,10 +491,29 @@ namespace lwsf { namespace internal { namespace backend
       {
         auto iter = updated_txes.find(output.tx_hash);
         if (iter != updated_txes.end())
-          merge_output(iter->second, output, self.primary.view.sec);
+        {
+          const auto sub = merge_output(iter->second, output, self.primary.view.sec);
+          if (need_expansion(self.primary, sub))
+            out.merge_subaddr(sub);
+        }
       } 
 
       // don't touch `self` until end to provide strong exception guarantee
+
+      // update our "used" records immediately, server already knows about them.
+      // udpate "serer_lookahead" values later, we force lookahead from zero
+      for (const auto& sub : out.new_subaddrs)
+      {
+        if (std::numeric_limits<std::size_t>::max() <= sub.key)
+          throw std::runtime_error{"merge_response exceeded max size_t value"};
+        if (self.primary.subaccounts.size() <= sub.key)
+          self.primary.subaccounts.resize(std::size_t(sub.key) + 1);
+    
+        auto& acct = self.primary.subaccounts.at(sub.key);
+        acct.used = std::max(acct.used, add_uint32_clamp(unsigned(1), std::get<1>(sub.head)));
+      }
+
+      // Update txes _after_ subaccounts table
       self.primary.txes.swap(updated_txes);
 
       self.blockchain_height = source.blockchain_height;
@@ -446,46 +525,97 @@ namespace lwsf { namespace internal { namespace backend
       return out;
     }
 
-    void merge_subaddrs(account& self, const epee::span<const rpc::subaddrs> subaddrs)
+    /*! Update `server_lookahead` minor fields based on `all`. The top-level
+      major lookahead is set to error state if `false` is returned, and set to
+      the server lookahead iff true is returned.
+      \return True iff the server has enough lookahead for all fields. */
+    bool update_lookaheads(wallet& self, const boost::container::flat_set<rpc::subaddrs, std::less<>>& all)
     {
-      /* Purge subaccounts that do not have info (label) and are not mentioned
-      by the server. */
+      const auto maj_lookahead = self.primary.maj_lookahead;
+      const auto min_lookahead = self.primary.min_lookahead;
+      if (!maj_lookahead && !min_lookahead)
+        throw std::logic_error{"update_lookaheads does not work with lookahead {0, 0}"};
 
-      std::map<std::uint32_t, sub_account> subaccounts;
-      subaccounts.swap(self.subaccounts);
+      self.server_lookahead = {error::subaddr_server};
+      const std::uint32_t server_lookahead = all.empty() ?
+        std::uint32_t(0) : all.rbegin()->key;
 
-      // Never remove special {0,0} account
-      self.subaccounts[0].minor[0] = std::move(subaccounts[0].minor[0]);
+      // Ensure major lookahead starts at zero, has no gaps, and "far" enough.
+      bool min_met = add_uint32_clamp(self.primary.subaccounts.size() - 1, maj_lookahead) <= server_lookahead;
+      min_met &= all.size() == std::uint64_t(server_lookahead) + 1;
 
-      // Keep all subaccounts with a info
-      for (auto& account : subaccounts)
+      for (std::size_t i = 0; i < self.primary.subaccounts.size(); ++i)
       {
-        for (auto& subaccount : account.second.minor)
-        {
-          if (subaccount.second.preserve())
-            self.subaccounts[account.first].minor[subaccount.first] = std::move(subaccount.second);
-        }
-      } 
+        auto& acct = self.primary.subaccounts[i];
+        const auto elem = all.find(i);
+        const bool has_range = elem != all.end();
 
-      // Keep all subaccounts mentioned by server
-      for (const auto& subaddr : subaddrs)
-      {
-        auto& account = self.subaccounts[subaddr.key];
-        auto& old = subaccounts[subaddr.key];
-        for (const auto& minors : subaddr.value)
-        {
-          for (std::uint32_t minor = std::get<0>(minors); minor < std::uint64_t(std::get<1>(minors)) + 1; ++minor)
-            account.minor.try_emplace(minor);
-        }
+        const std::uint32_t lookahead = has_range ? std::get<1>(elem->head) : 0;
+        min_met &= add_uint32_clamp(acct.used, min_lookahead) <= lookahead;
+        min_met &= has_range && std::get<0>(elem->head) == 0;
+
+        // Only increase lookahead, server has no delete subaddr command
+        acct.server_lookahead = std::max(acct.server_lookahead, lookahead);
       }
+
+      // Ensure that unused minor lookahead is far enough
+      for (std::size_t i = self.primary.subaccounts.size(); i < all.size(); ++i)
+      {
+        if (!min_met)
+          break;
+
+        const auto& range = all.nth(i)->head;
+        min_met &= min_lookahead <= std::get<1>(range);
+        min_met &= std::get<0>(range) == 0;
+      }
+
+      if (min_met)
+        self.server_lookahead = server_lookahead;
+      return min_met;
+    }
+
+    void fill_upsert(const wallet& self, boost::container::flat_set<rpc::subaddrs, std::less<>>& out)
+    {
+      static constexpr const std::uint32_t max_index =
+        std::numeric_limits<std::uint32_t>::max();      
+
+      const auto& accts = self.primary.subaccounts;
+      const std::uint32_t minor = self.primary.min_lookahead;
+      for (std::size_t i = 0; i < accts.size() && i <= max_index; ++i)
+        out.insert(out.end(), rpc::subaddrs{std::uint32_t(i)})->head = {0, add_uint32_clamp(accts[i].used, minor)};
+
+      const std::uint32_t major = add_uint32_clamp(accts.size(), self.primary.maj_lookahead);
+      for (std::size_t i = accts.size(); i < major; ++i)
+        out.insert(out.end(), rpc::subaddrs{std::uint32_t(i)})->head = {0, minor};
+    }
+
+    std::error_code handle_lookahead_error(std::error_code error) noexcept
+    {
+      if (error == rpc_max_subaddresses)
+        error = {error::subaddr_server};
+      else if (error == rpc_not_implemented)
+        error = {error::subaddr_disabled};
+      else if (error == wire::error::schema::array_max_element)
+        error = {error::subaddr_local};
+ 
+      return error;
+    }
+
+    void prep_primary_account(sub_account& self)
+    {
+      // Enforce special account {0,0} exists and is labeled
+      self.detail.try_emplace(0).first->second.label = std::string{config::default_primary_name};
+      self.used = 1;
+      self.server_lookahead = 0;
     }
   } // anonymous
 
   WIRE_DEFINE_OBJECT(address_book_entry, map_address_book_entry);
   WIRE_DEFINE_OBJECT(subaddress, map_subaddress);
   WIRE_DEFINE_OBJECT(sub_account, map_sub_account);
+  WIRE_DEFINE_OBJECT(transfer_spend, map_transfer_spend);
+  WIRE_DEFINE_OBJECT(transfer_in, map_transfer_in);
   WIRE_DEFINE_OBJECT(transfer_out, map_transfer_out);
-  WIRE_DEFINE_OBJECT(transfer_in, map_transfer_in);  
   WIRE_DEFINE_OBJECT(transaction, map_transaction);
   WIRE_DEFINE_OBJECT(keypair, map_keypair);
   void read_bytes(wire::reader& source, account& dest)
@@ -494,9 +624,49 @@ namespace lwsf { namespace internal { namespace backend
     dest.address = cryptonote::get_account_address_as_str(
       convert_net_type(dest.type), false, cryptonote::account_public_address{dest.spend.pub, dest.view.pub}
     );
+    if (dest.subaccounts.empty())
+      prep_primary_account(dest.subaccounts.emplace_back());
   }
   void write_bytes(wire::writer& dest, const account& source)
   { map_account(dest, source); }
+
+  sub_account::sub_account()
+    : detail(), used(1), server_lookahead(0)
+  {}
+
+  std::string_view sub_account::sub_label(const std::uint32_t minor) const noexcept
+  {
+    const auto elem = detail.find(minor);
+    if (elem != detail.end())
+      return elem->second.label;
+    return {};
+  }
+
+  std::string_view sub_account::primary_label() const noexcept
+  {
+    const auto elem = detail.find(0);
+    if (elem == detail.end())
+      return config::default_account_name;
+    return elem->second.label;
+  }
+
+  transaction::transaction()
+    : spends(),
+      receives(),
+      transfers(),
+      description(),
+      timestamp(),
+      height(),
+      amount(0),
+      fee(0),
+      unlock_time(0),
+      direction(Monero::TransactionInfo::Direction_Out),
+      payment_id(),
+      id{},
+      prefix{},
+      coinbase(false),
+      failed(false)
+  {}
 
   bool transaction::is_unlocked(const std::uint64_t chain_height, const Monero::NetworkType type) const
   {
@@ -514,6 +684,7 @@ namespace lwsf { namespace internal { namespace backend
     : listener(nullptr),
       client(),
       primary{},
+      server_lookahead(default_subaddr_state),
       last_sync(0),
       blockchain_height(0),
       per_byte_fee(0),
@@ -523,7 +694,7 @@ namespace lwsf { namespace internal { namespace backend
       sync_refresh(),
       passed_login(false)
   {
-    primary.subaccounts[0].minor[0];
+    prep_primary_account(primary.subaccounts.emplace_back());
   }
 
   cryptonote::network_type wallet::get_net_type() const
@@ -531,7 +702,7 @@ namespace lwsf { namespace internal { namespace backend
 
   crypto::public_key wallet::get_spend_public(const rpc::address_meta& index) const
   {
-    if (index.maj_i == 0 && index.min_i == 0)
+    if (index.is_default())
       return primary.spend.pub;
 
     // m = Hs(a || index_major || index_minor)
@@ -547,7 +718,7 @@ namespace lwsf { namespace internal { namespace backend
 
   std::string wallet::get_spend_address(const rpc::address_meta& index) const
   {
-    const bool is_subaddress = (index.maj_i != 0 || index.min_i != 0);
+    const bool is_subaddress = !index.is_default();
     const auto spend_public = get_spend_public(index);
     const crypto::public_key view_public = is_subaddress ?
       rct::rct2pk(rct::scalarmultKey(rct::pk2rct(spend_public), rct::sk2rct(primary.view.sec))) : primary.view.pub;
@@ -588,27 +759,72 @@ namespace lwsf { namespace internal { namespace backend
 
   std::error_code wallet::login()
   {
+    // Remember that this function provides the strong exception guarantee.
+    boost::unique_lock<boost::mutex> lock{sync};
     {
+      server_lookahead = {default_subaddr_state};
       const rpc::login_request login{
         primary.address, primary.view.sec, true, primary.generated_locally
       };
 
+      lock.unlock();
       const auto response = rpc::invoke<rpc::login_response>(client, login);
       if (!response)
+      {
+        if (response == rpc_unapproved)
+          return {error::approval};
+        else if (response == rpc_internal_error)
+          return {error::network_type}; // almost always this
+        else if (response == rpc_not_implemented)
+          return {error::create};
         return response.error();
+      }
+      lock.lock();
 
-      const boost::lock_guard<boost::mutex> lock{sync};
       passed_login = true;
       if (response->start_height)
         primary.restore_height = *response->start_height;
+
+      if (!primary.maj_lookahead && !primary.min_lookahead)
+      {
+        server_lookahead = 0;
+        return {};
+      }
     }
 
-    const rpc::login login{primary.address, primary.view.sec};
-    const auto response = rpc::invoke<rpc::get_subaddrs>(client, login);
-    if (response)
+    // Converting `rpc::invoke` into exceptions is easier here
+    try
     {
-      const boost::lock_guard<boost::mutex> lock{sync};
-      merge_subaddrs(primary, epee::to_span(response->all_subaddrs));
+      rpc::login login{primary.address, primary.view.sec};
+      {
+        lock.unlock();
+        const auto response = rpc::invoke<rpc::get_subaddrs>(client, login).value();
+        lock.lock();
+        if (update_lookaheads(*this, response.all_subaddrs))
+          return {};
+      }
+
+      // lookaheads not far enough
+      rpc::upsert_subaddrs_request request{std::move(login), {}, false /* get_all */};
+      fill_upsert(*this, request.subaddrs_);
+
+      lock.unlock();
+      const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, request).value();
+      lock.lock();
+      update_lookaheads(*this, request.subaddrs_);
+    }
+    catch (const std::system_error& e)
+    {
+      if (e.code() == rpc_max_subaddresses)
+        server_lookahead = {error::subaddr_server};
+      else if (e.code() == rpc_not_implemented)
+        server_lookahead = {error::subaddr_disabled};
+      else if (e.code() == rpc_unapproved) // happens on new account creation
+        return {error::approval};
+      else if (e.code() == wire::error::schema::array_max_element)
+        server_lookahead = {error::subaddr_local};
+      else
+        server_lookahead = e.code();
     }
 
     return {};
@@ -616,9 +832,7 @@ namespace lwsf { namespace internal { namespace backend
 
   std::error_code wallet::refresh(const bool mandatory)
   {
-    /* Remember that this function provides the strong exception guarantee.
-      The state of the wallet should always be valid and never in a partially
-      updated state. */
+    // Remember that this function provides the strong exception guarantee.
 
     if (!mandatory)
     {
@@ -633,19 +847,40 @@ namespace lwsf { namespace internal { namespace backend
     boost::unique_lock<boost::mutex> lock_refresh{sync_refresh};
     boost::unique_lock<boost::mutex> lock{sync};
     const auto now = std::chrono::steady_clock::now();
+    const auto get_rc = [this, &lock] () -> std::error_code
+    {
+      if (!lock.owns_lock())
+        lock.lock();
+      if (!primary.generated_locally && (primary.maj_lookahead || primary.min_lookahead))
+        return server_lookahead.error();
+      return {};
+    };
+
     if (!mandatory) // double-check
     {
       const std::chrono::steady_clock::time_point start{
         std::chrono::steady_clock::time_point::duration{last_sync.load()}
       };
       if (now - start < config::refresh_interval_min)
-        return {};
+        return get_rc();  
     }
 
+    struct call_refreshed
+    {
+      void operator()(wallet* ptr) const noexcept
+      {
+        if (!ptr) return;
+        const boost::lock_guard<boost::mutex> lock{ptr->sync_listener};
+        if (!ptr->listener) return;
+        ptr->listener->refreshed();
+      }
+    };
+
+    std::unique_ptr<wallet, call_refreshed> refresh_on_exit{this};
     const bool try_login = !passed_login;
     const rpc::login login{primary.address, primary.view.sec};
-    lock.unlock();
 
+    lock.unlock();
     if (try_login)
     {
       const std::error_code failed_login = this->login();
@@ -664,22 +899,82 @@ namespace lwsf { namespace internal { namespace backend
       const rpc::get_unspent_outs_request request{login, rpc::uint64_string(0), 0, true}; 
       outs_response = rpc::invoke<rpc::get_unspent_outs_response>(client, request);
     }
-
     lock.lock();
+
     last_sync = now.time_since_epoch().count();
     passed_login = bool(txs_response) && bool(outs_response); // reset state
 
     if (!txs_response)
+    {
+      if (txs_response == rpc_unapproved)
+        return {error::approval};
       return txs_response.error();
+    }
     if (!outs_response)
       return outs_response.error();
 
     const std::uint64_t orig_scan_height = primary.scan_height;
-    const auto new_txes = merge_response(*this, *txs_response, *outs_response);
+    auto merged = merge_response(*this, *txs_response, *outs_response);
 
+    if (!merged.new_subaddrs.empty() && server_lookahead)
+    {
+      server_lookahead = std::max(*server_lookahead, merged.new_subaddrs.rbegin()->key);
+
+      // ensure lookahead is from zero, or our logic is busted
+      for (auto& sub : merged.new_subaddrs)
+      {
+        std::get<0>(sub.head) = 0;
+        std::get<1>(sub.head) = add_uint32_clamp(std::get<1>(sub.head), primary.min_lookahead);
+      }
+
+      const rpc::upsert_subaddrs_request upsert_request{
+        login, std::move(merged.new_subaddrs), false /* get_all */
+      };
+
+      lock.unlock();
+      const auto upsert_response = rpc::invoke<rpc::upsert_subaddrs_response>(client, upsert_request);
+      lock.lock();
+
+      if (upsert_response)
+      {
+        for (const auto& sub : upsert_request.subaddrs_)
+        {
+          auto& acct = primary.subaccounts.at(sub.key);
+          acct.server_lookahead = std::max(acct.server_lookahead, std::get<1>(sub.head));
+        }
+
+        if (primary.maj_lookahead)
+        {
+          const std::uint32_t maj_i = add_uint32_clamp(unsigned(1), upsert_request.subaddrs_.rbegin()->key);
+          const std::uint32_t maj_count = primary.maj_lookahead;
+          const std::uint32_t min_count = add_uint32_clamp(unsigned(1), primary.min_lookahead);
+          const rpc::provision_subaddrs_request provision_request{
+            login, maj_i, 0, maj_count, min_count, false /* get_all */
+          };
+
+          lock.unlock();
+          const auto provision_response = rpc::invoke<rpc::provision_subaddrs_response>(client, provision_request);
+          lock.lock();
+
+          if (provision_response)
+          {
+            if (server_lookahead) // in case another thread jumped in
+              server_lookahead = std::max(*server_lookahead, add_uint32_clamp(maj_i, maj_count - 1));
+          }
+          else // if !provision_response
+            server_lookahead = handle_lookahead_error(provision_response.error());
+        }
+      }
+      else // if !upsert_response
+        server_lookahead = handle_lookahead_error(upsert_response.error()); 
+    } // if new subaddress(es)
+
+    // return error if subaddresses enabled, and recovered wallet
+    const std::error_code rc = get_rc();
+    refresh_on_exit.release(); // release before acquiring `sync_listener`.
     const boost::lock_guard<boost::mutex> lock_listener{sync_listener};
     if (!listener)
-      return {};
+      return rc;
 
     // Call listener functions without holding `sync`, in case a call is made
     // back into the library.
@@ -689,13 +984,13 @@ namespace lwsf { namespace internal { namespace backend
     lock_refresh.unlock();
 
     listener->refreshed();
-    if (!new_txes.empty() || new_scan_height - orig_scan_height)
+    if (!merged.new_transactions.empty() || new_scan_height - orig_scan_height)
       listener->updated();
 
     for (std::uint64_t i = orig_scan_height; i < new_scan_height; ++i)
       listener->newBlock(i);
 
-    for (const auto& tx : new_txes)
+    for (const auto& tx : merged.new_transactions)
     {
       const auto txid = epee::string_tools::pod_to_hex(tx->id);
       if (tx->direction == Monero::TransactionInfo::Direction_In)
@@ -709,57 +1004,131 @@ namespace lwsf { namespace internal { namespace backend
         listener->moneySpent(txid, tx->amount);
     }
 
-    return {};
+    return rc;
   }
 
   std::error_code wallet::add_subaccount(std::string label)
   {
-    for (unsigned i = 0; i < config::subaddr_retry; ++i)
+    boost::unique_lock<boost::mutex> lock{sync};
+    if (std::numeric_limits<std::uint32_t>::max() < primary.subaccounts.size())
+      throw std::runtime_error{"wallet::add_subaccount exceeded subaddress indexes"};
+
+    std::uint32_t maj_lookahead = 0;
+    const std::uint32_t minor_count = add_uint32_clamp(unsigned(1), primary.min_lookahead); 
+    for (;;)
     {
-      std::size_t next = -1;
-      {
-        const boost::lock_guard<boost::mutex> lock{sync};
-        for (const auto& account : primary.subaccounts)
-        {
-          if (account.first != next + 1)
-            break;
-          ++next;
-        }
-        ++next;
-      }
+      if (!server_lookahead)
+        break;
 
-      if (std::numeric_limits<std::uint32_t>::max() < next)
-        return {error::rpc_failure};
+      maj_lookahead = *server_lookahead;
+      const std::uint32_t maj_i = primary.subaccounts.size();
+      const std::uint32_t needed_maj_lookahead = add_uint32_clamp(maj_i, primary.maj_lookahead);
+      if (needed_maj_lookahead <= maj_lookahead)
+        break;
 
+      // Increase the lookahead by one
       const rpc::provision_subaddrs_request request{
-        rpc::login{primary.address, primary.view.sec}, std::uint32_t(next), 0, 1, 1, true
+        rpc::login{primary.address, primary.view.sec},
+        needed_maj_lookahead, 0, 1, minor_count, false /* get_all */
       };
+
+      lock.unlock();
       const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, request);
+      lock.lock();
       if (!response)
-        return response.error();
+        server_lookahead = handle_lookahead_error(response.error());
 
-      bool matched = false;
-      const boost::lock_guard<boost::mutex> lock{sync};
-      for (const auto& major : response->new_subaddrs)
+      // if NOT another call to `add_subaccount` during rpc unlock phase
+      if (maj_i == primary.subaccounts.size())
       {
-        auto& account = primary.subaccounts[major.key];
-        for (const auto& minors : major.value)
-        {
-          for (std::uint32_t i = std::get<0>(minors); i < std::uint64_t(std::get<1>(minors)) + 1; ++i)
-          {
-            account.minor[i].label = std::move(label);
-            label.clear();
-            matched = true;
-          }
-        }
+        if (response)
+          server_lookahead = needed_maj_lookahead;
+        break;
       }
-
-      if (matched)
-        return {};
-      else
-        merge_subaddrs(primary, epee::to_span(response->all_subaddrs));
     }
-    return {error::rpc_failure};
+
+    // Allow account to be added if server previously had enough lookahead
+    if (primary.subaccounts.size() <= maj_lookahead)
+    {
+      auto& maj = primary.subaccounts.emplace_back();
+      maj.detail.try_emplace(0).first->second.label = std::move(label);
+      maj.server_lookahead = minor_count - 1;
+    }
+
+    if (server_lookahead)
+      return {};
+    return server_lookahead.error();
+  }
+
+  std::error_code wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
+  {
+    boost::unique_lock<boost::mutex> lock{sync};
+    auto maj = std::addressof(primary.subaccounts.at(accountIndex));
+    if (std::numeric_limits<std::uint32_t>::max() <= maj->used)
+      throw std::runtime_error{"wallet::add_subaddress exceeded subaddress indexes"};
+
+    const std::uint32_t min_i = ++maj->used; // exceptions could leak an index :/
+    const std::uint32_t needed_min_lookahead = add_uint32_clamp(min_i, primary.min_lookahead);
+
+    if (needed_min_lookahead <= maj->server_lookahead)
+    {
+      maj->detail.try_emplace(min_i).first->second.label = std::move(label);
+      return {};
+    }
+
+    const rpc::provision_subaddrs_request request{
+      rpc::login{primary.address, primary.view.sec},
+      accountIndex, 0, 1, needed_min_lookahead, false /* get_all */
+    };
+
+    lock.unlock();
+    const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, request);
+    lock.lock();
+
+    // address could've changed during unlock
+    maj = std::addressof(primary.subaccounts.at(accountIndex));
+
+    if (response)
+    {
+      maj->server_lookahead = std::max(maj->server_lookahead, needed_min_lookahead);
+      maj->detail.try_emplace(min_i - 1).first->second.label = std::move(label);
+      return {};
+    }
+    else if (server_lookahead)
+      server_lookahead = handle_lookahead_error(response.error());
+    return server_lookahead.error();
+  }
+
+  std::error_code wallet::set_lookahead(std::uint32_t major, std::uint32_t minor)
+  {
+    boost::unique_lock<boost::mutex> lock{sync};
+    const bool extending =
+      primary.maj_lookahead < major ||
+      primary.min_lookahead < minor;
+
+    primary.maj_lookahead = major;
+    primary.min_lookahead = minor;
+
+    if ((!extending && server_lookahead) || (!major && !minor))
+    {
+      if (!server_lookahead)
+        server_lookahead = 0;
+      return {};
+    }
+
+    rpc::upsert_subaddrs_request request{
+      rpc::login{primary.address, primary.view.sec}, {}, false /* get_all */
+    };
+    fill_upsert(*this, request.subaddrs_);
+
+    lock.unlock();
+    const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, request);
+    lock.lock();
+    if (!response) 
+      return (server_lookahead = handle_lookahead_error(response.error())).error();
+
+    update_lookaheads(*this, request.subaddrs_);
+    return {};
   }
 
   std::error_code wallet::restore_height(const std::uint64_t /*height not supported */)

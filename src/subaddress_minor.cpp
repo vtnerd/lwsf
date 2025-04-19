@@ -65,18 +65,19 @@ namespace lwsf { namespace internal
       free_rows(rows_);
       
       const boost::lock_guard<boost::mutex> lock{data_->sync};
-      const auto account = data_->primary.subaccounts.find(accountIndex);
-      if (account == data_->primary.subaccounts.end())
+      if (data_->primary.subaccounts.size() <= accountIndex)
         return;
 
-      rows_.reserve(account->second.minor.size());
-      for (const auto& minor : account->second.minor)
+      const auto& acct = data_->primary.subaccounts[accountIndex];
+      static_assert(std::is_same<std::uint32_t, decltype(acct.used)>());
+      rows_.reserve(acct.used);
+      for (std::uint32_t i = 0; i < acct.used; ++i)
       {
         rows_.push_back(
           new Monero::SubaddressRow{
-            minor.first,
-            data_->get_spend_address({accountIndex, minor.first}),
-            minor.second.label
+            i,
+            data_->get_spend_address({accountIndex, i}),
+            std::string{acct.sub_label(i)}
           }
         );
       }
@@ -89,15 +90,16 @@ namespace lwsf { namespace internal
   }
 
   void subaddress_minor::addRow(const std::uint32_t accountIndex, const std::string &label)
-  {
-    /* TODO */
+  { 
+    data_->add_subaddress(accountIndex, label);
+    refresh(accountIndex);
   }
 
   void subaddress_minor::setLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex, const std::string &label)
   {
     {
       const boost::lock_guard<boost::mutex> lock{data_->sync};
-      data_->primary.subaccounts.at(accountIndex).minor.at(addressIndex).label = label;
+      data_->primary.subaccounts.at(accountIndex).detail[addressIndex].label = label;
     }
     refresh(accountIndex);
   }

@@ -43,7 +43,7 @@ namespace lwsf { namespace internal
       std::uint64_t unlocked;
       std::uint64_t total;
 
-      balance()
+      constexpr balance() noexcept
         : unlocked(0), total(0)
       {}
     };
@@ -88,7 +88,7 @@ namespace lwsf { namespace internal
   {
     {
       const boost::lock_guard<boost::mutex> lock{data_->sync};
-      data_->primary.subaccounts.at(accountIndex).minor.at(0).label = label;
+      data_->primary.subaccounts.at(accountIndex).detail[0].label = label;
     }
     refresh();
   }
@@ -115,6 +115,13 @@ namespace lwsf { namespace internal
             balance.unlocked += receive.second.amount;
         }
 
+        if (!tx.second->spends.empty())
+        {
+          auto& balance = balances[tx.second->spends.begin()->second.sender.maj_i];
+          balance.unlocked -= tx.second->fee;
+          balance.total -= tx.second->fee;
+        }
+
         for (const auto& spend : tx.second->spends)
         {
           auto& balance = balances[spend.second.sender.maj_i];
@@ -123,15 +130,19 @@ namespace lwsf { namespace internal
         }
       }
 
-      rows_.reserve(data_->primary.subaccounts.size());
-      for (const auto& sub : data_->primary.subaccounts)
+      static constexpr const std::uint32_t max_index =
+        std::numeric_limits<std::uint32_t>::max();
+
+      const auto& accts = data_->primary.subaccounts;
+      rows_.reserve(accts.size());
+      for (std::size_t i = 0; i < accts.size() && i <= max_index; ++i)
       {
-        const auto& balance = balances[sub.first];
+        const auto& balance = balances[i];
         rows_.push_back(
           new Monero::SubaddressAccountRow{
-            sub.first,
-            data_->get_spend_address({sub.first, 0}),
-            sub.second.minor.empty() ? "" : sub.second.minor.begin()->second.label,
+            std::uint32_t(i),
+            data_->get_spend_address({std::uint32_t(i), 0}),
+            std::string{accts.at(i).primary_label()},
             cryptonote::print_money(balance.total),
             cryptonote::print_money(balance.unlocked)
           }

@@ -44,28 +44,30 @@
 #include "wire/json.h"
 #include "wire/traits.h"
 #include "wire/wrapper/array.h"
+#include "wire/wrapper/trusted_array.h"
 #include "wire/wrappers_impl.h"
 
 namespace lwsf { namespace internal { namespace rpc
 {
-  //! \return Error message string.
-  const char* get_string(error value) noexcept
+  namespace
   {
-    switch (value)
+    //! \return Error message string.
+    const char* get_string(error value) noexcept
     {
-    default:
-      break;
+      switch (value)
+      {
+      default:
+        break;
 
-    case error::none:
-      return "No rpc errors";
-    case error::invoke_failure:
-      return "HTTP invoke failed";
-    case error::not_connected:
-      return "No connection to HTTP server";
-    case error::wrong_response_code:
-      return "Expected HTTP 200 OK";
+      case error::none:
+        return "No rpc errors";
+      case error::no_response:
+        return "No response from HTTP server";
+      case error::invalid_code:
+        return "Invalid status code from HTTP server";
+      }
+      return nullptr;
     }
-    return "Unknown rpc error";
   }
 
   //! \return Category for `error`.
@@ -80,7 +82,10 @@ namespace lwsf { namespace internal { namespace rpc
 
       virtual std::string message(int value) const override final
       {
-        return get_string(error(value));
+        char const * const msg = get_string(error(value));
+        if (msg)
+          return msg;
+        return "HTTP error code " + std::to_string(value);
       }
     };
     static const category instance{};
@@ -95,13 +100,15 @@ namespace lwsf { namespace internal { namespace rpc
 
     const epee::net_utils::http::http_response_info* response = nullptr;
     if (!client.invoke(endpoint, "POST", {reinterpret_cast<const char*>(payload.data()), payload.size()}, config::rpc_timeout, std::addressof(response), headers))
-      return {error::invoke_failure};
+      return {error::no_response};
     if (!response)
-      return {error::invoke_failure};
-    if(response->m_response_code != 200 && response->m_response_code != 201)
-      return {error::wrong_response_code};
+      return {error::no_response};
+    if(response->m_response_code == 200 || response->m_response_code == 201)
+      return response->m_body;
 
-    return response->m_body;
+    if (response->m_response_code <= 0 || std::numeric_limits<int>::max() < response->m_response_code)
+      return {error::invalid_code};
+    return {error(int(response->m_response_code))};
   }
 
   void write_bytes(wire::writer& dest, const empty&)
@@ -227,7 +234,6 @@ namespace lwsf { namespace internal { namespace rpc
     }
   }
 
-
   void read_bytes(wire::json_reader& source, get_address_txs& self)
   {
     using max_transactions = wire::max_element_count<config::max_txes_in_rpc>; 
@@ -239,11 +245,69 @@ namespace lwsf { namespace internal { namespace rpc
     );
   }
 
+
+  namespace
+  {
+    //! A wrapper that simulates an array by only using the first element
+    template<typename T>
+    class array_head_
+    {
+      T head_;
+      wire::unwrap_reference_t<T> tail_;
+      std::size_t count_;
+
+    public:
+        using value_type = wire::unwrap_reference_t<T>;
+        using iterator = std::add_pointer_t<value_type>;
+        using const_iterator = std::add_pointer_t<std::add_const_t<value_type>>;
+        using reference = std::add_lvalue_reference_t<value_type>;
+        using const_reference = std::add_lvalue_reference_t<std::add_const_t<value_type>>;
+
+        constexpr array_head_(T head)
+          : head_(std::move(head)), tail_{}, count_(1)
+        {}
+
+        void clear() noexcept { count_ = 0; }
+        bool empty() const noexcept { return !size(); }
+        std::size_t size() const noexcept { return count_; }
+        const_iterator begin() const noexcept { return std::addressof(front()); }
+        const_iterator end() const
+        {
+          if (1 < size())
+            throw std::logic_error{"Unexpected call to subaddr_adaptr::end"};
+          return empty() ? begin() : begin() + 1;
+        }
+
+        reference front() noexcept { return head_; }
+        const_reference front() const noexcept { return head_; }
+        reference back() noexcept { return 1 < size() ? tail_ : front(); }
+        void push_back() noexcept { ++count_; }
+        reference emplace_back() noexcept { push_back(); return back(); }
+    };
+
+    template<typename T>
+    constexpr array_head_<T> array_head(T val)
+    { return {std::move(val)}; }
+
+    template<typename F, typename T>
+    void map_subaddrs(F& format, T& self)
+    {
+      auto head = array_head(std::ref(self.head));
+      wire::object(format,
+        WIRE_FIELD(key),
+        wire::field("value", wire::trusted_array(std::ref(head)))
+      );
+      if (head.empty())
+        WIRE_DLOG_THROW(wire::error::schema::array, "unexpected empty array");
+    }
+  }
+ 
+  WIRE_JSON_DEFINE_OBJECT(subaddrs, map_subaddrs); 
   void read_bytes(wire::json_reader& source, get_subaddrs& self)
   {
-    using limits = wire::max_element_count<16384>;
-    wire::object(source, WIRE_FIELD_ARRAY(all_subaddrs, limits));
+    wire::object(source, WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs));
   }
+
 
   namespace
   {
@@ -341,31 +405,24 @@ namespace lwsf { namespace internal { namespace rpc
   }
 
 
-  void read_bytes(wire::json_reader& source, subaddrs& self)
-  {
-    using limits = wire::min_element_size<2>;
-    wire::object(source, WIRE_FIELD(key), WIRE_FIELD_ARRAY(value, limits));
-  }
-
   void write_bytes(wire::json_writer& dest, const provision_subaddrs_request& self)
   {
     wire::object(dest,
       wire::field("address", std::cref(self.creds.address)),
       wire::field("view_key", std::cref(self.creds.view_key)),
-      WIRE_FIELD(maj_i),
-      WIRE_FIELD(min_i),
-      WIRE_FIELD(n_maj),
-      WIRE_FIELD(n_min),
-      WIRE_FIELD(get_all)
+      WIRE_FIELD_COPY(maj_i),
+      WIRE_FIELD_COPY(min_i),
+      WIRE_FIELD_COPY(n_maj),
+      WIRE_FIELD_COPY(n_min),
+      WIRE_FIELD_COPY(get_all)
     );
   }
 
   void read_bytes(wire::json_reader& source, provision_subaddrs_response& self)
   {
-    using limits = wire::max_element_count<16384>;
     wire::object(source,
-      WIRE_FIELD_ARRAY(new_subaddrs, limits), 
-      WIRE_FIELD_ARRAY(all_subaddrs, limits)
+      WIRE_FIELD_ARRAY(new_subaddrs, max_subaddrs), 
+      WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs)
     );
   }
 
@@ -378,6 +435,25 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::json_reader& source, submit_raw_tx_response& self)
   {
     wire::object(source, WIRE_FIELD(status));
+  }
+
+
+  void write_bytes(wire::json_writer& dest, const upsert_subaddrs_request& self)
+  {
+    wire::object(dest,
+      wire::field("address", std::cref(self.creds.address)),
+      wire::field("view_key", std::ref(self.creds.view_key)),
+      wire::field("subaddrs", wire::array(std::ref(self.subaddrs_))), // always write field (not optional)
+      WIRE_FIELD_COPY(get_all)
+    );
+  }
+
+  void read_bytes(wire::json_reader& source, upsert_subaddrs_response& self)
+  {
+    wire::object(source,
+      WIRE_FIELD_ARRAY(new_subaddrs, max_subaddrs),
+      WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs)
+    );
   }
 }}} // lwsf // internal // rpc
 

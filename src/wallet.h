@@ -72,7 +72,7 @@ namespace internal
     state thread_state_;
     bool mandatory_refresh_;
 
-    bool set_error(std::error_code status) const;
+    bool set_error(std::error_code status, bool update_iff_error) const;
     void set_critical(const std::exception& e) const;
 
     void stop_refresh_loop();
@@ -239,7 +239,7 @@ namespace internal
      * \param major - size fot the major index
      * \param minor - size fot the minor index
      */
-    virtual void setSubaddressLookahead(uint32_t major, uint32_t minor) override { /* TODO */ }
+    virtual void setSubaddressLookahead(uint32_t major, uint32_t minor) override;
 
     /**
      * @brief connectToDaemon - connects to the daemon. TODO: check if it can be removed

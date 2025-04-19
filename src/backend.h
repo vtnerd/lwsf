@@ -48,6 +48,7 @@
 #include "crypto/crypto.h"     // monero/src
 #include "crypto/hash.h"       // monero/src
 #include "cryptonote_config.h" // monero/src
+#include "lwsf_config.h"
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "ringct/rctTypes.h"   // monero/src
 #include "rpc.h"
@@ -78,30 +79,49 @@ namespace lwsf { namespace internal { namespace backend
   {
     std::string label;
 
-    bool preserve() const noexcept { return !label.empty(); }
+    subaddress()
+      : label()
+    {}
+
+    explicit subaddress(const std::string_view label)
+      : subaddress(std::string{label})
+    {}
+
+    explicit subaddress(std::string label)
+      : label(std::move(label))
+    {}
   };
   WIRE_DECLARE_OBJECT(subaddress);
 
   struct sub_account
   {
-    boost::container::flat_map<std::uint32_t, subaddress> minor;
+    boost::container::flat_map<std::uint32_t, subaddress> detail; //!< Minor address info
+    std::uint32_t used; //!< Number of minor indexes in use.
+    std::uint32_t server_lookahead; //!< Status of server (minor) lookahead. Inclusive
+
+    //! Creates 1 subaddress entry (key == `0`) with default label
+    sub_account();
+
+    //! \return Label for `minor`, if one was set. 
+    std::string_view sub_label(std::uint32_t minor) const noexcept;
+
+    //! \return Primary label for account (`minor == 0` is "special").
+    std::string_view primary_label() const noexcept;
   };
   WIRE_DECLARE_OBJECT(sub_account);
 
-  struct transfer_out
+  struct transfer_spend
   {
-    std::string address;
     std::uint64_t amount;
     rpc::address_meta sender;
-    std::optional<crypto::secret_key> secret;
     crypto::public_key tx_pub;
     crypto::public_key output_pub;
 
-    transfer_out()
-      : address(), amount(0), sender{}, secret(), tx_pub{}, output_pub{}
+    transfer_spend() noexcept
+      : amount(0), sender{}, tx_pub{}, output_pub{}
     {}
   };
-  WIRE_DECLARE_OBJECT(transfer_out);
+  WIRE_DECLARE_OBJECT(transfer_spend);
 
   struct transfer_in
  {
@@ -112,7 +132,7 @@ namespace lwsf { namespace internal { namespace backend
     std::optional<rct::key> rct_mask;
     crypto::public_key tx_pub;
 
-    transfer_in()
+    transfer_in() noexcept
       : global_index(0),
         amount(0),
         recipient{},
@@ -123,25 +143,22 @@ namespace lwsf { namespace internal { namespace backend
   };
   WIRE_DECLARE_OBJECT(transfer_in);
 
+  struct transfer_out
+  {
+    std::string address;
+    std::uint64_t amount;
+    crypto::secret_key secret;
+
+    transfer_out()
+      : address(), amount(0), secret{}
+    {}
+  };
+  WIRE_DECLARE_OBJECT(transfer_out);
+
   struct transaction
   {
-    transaction()
-      : spends(),
-        receives(),
-        description(),
-        timestamp(),
-        height(),
-        amount(0),
-        fee(0),
-        unlock_time(0),
-        direction(Monero::TransactionInfo::Direction_Out),
-        payment_id(),
-        id{},
-        prefix{},
-        coinbase(false),
-        failed(false)
-    {}
-
+    transaction();
+    
     transaction(transaction&&) = default;
     transaction(const transaction&) = default;
     transaction& operator=(transaction&&) = default;
@@ -152,8 +169,9 @@ namespace lwsf { namespace internal { namespace backend
     /*! flat_map is used here for faster copies/merging. A single allocation
       is needed in the copy (done every refresh interval), instead of an
       allocation per key. */
-    boost::container::flat_map<crypto::key_image, transfer_out, memory> spends;
+    boost::container::flat_map<crypto::key_image, transfer_spend, memory> spends;
     boost::container::flat_map<crypto::public_key, transfer_in, memory> receives; //!< Key is output pub
+    std::vector<transfer_out> transfers;
     std::string description;
     std::optional<std::time_t> timestamp;
     std::optional<std::uint64_t> height;
@@ -184,23 +202,27 @@ namespace lwsf { namespace internal { namespace backend
     std::string address; //!> not serialized, recovered on read_bytes
     std::string language;
     std::vector<address_book_entry> addressbook;
-    std::map<std::uint32_t, sub_account> subaccounts;
+    std::vector<sub_account> subaccounts; //! Enabled major subaccounts. Index indicates `sub.major` value.
     std::unordered_map<crypto::hash, std::shared_ptr<transaction>> txes;
     std::unordered_map<std::string, std::string> attributes;
     std::uint64_t scan_height;
     std::uint64_t restore_height;
+    std::uint32_t maj_lookahead = config::subaddr_major_lookahead;
+    std::uint32_t min_lookahead = config::subaddr_minor_lookahead;
     Monero::NetworkType type;
     keypair view;
     keypair spend;
-    bool generated_locally;
+    bool generated_locally; //!< True iff wallet was generated and not recovered
   };
   WIRE_DECLARE_OBJECT(account);
 
+  //! All functions should provide the strong-exception guarantee
   struct wallet
   {
     Monero::WalletListener* listener;
     rpc::http_client client;
     account primary;
+    expect<std::uint32_t> server_lookahead; //!< Status of major lookahead server-side. Inclusive
     std::atomic<std::chrono::steady_clock::time_point::duration::rep> last_sync;
     std::uint64_t blockchain_height;
     std::uint64_t per_byte_fee;
@@ -222,13 +244,17 @@ namespace lwsf { namespace internal { namespace backend
     //! De-serialize `this` from msgpack. Locks+replaces contents.
     std::error_code from_bytes(epee::byte_slice source);
 
-    //! Attempt
+    //! Attempt login and sync subaddresses. \return no errors if login succeeded
     std::error_code login();
 
-    //! Refreshes txes information. Strong exception guarantee. Locks contents.
+    //! Refreshes txes information. Strong exception guarantee. Spuriously returns success.
     std::error_code refresh(bool mandatory = false);
 
     std::error_code add_subaccount(std::string label);
+
+    std::error_code add_subaddress(const std::uint32_t accountIndex, std::string label);
+
+    std::error_code set_lookahead(std::uint32_t major, std::uint32_t minor);
 
     std::error_code restore_height(const std::uint64_t height);
 
