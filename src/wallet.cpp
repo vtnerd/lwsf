@@ -348,10 +348,7 @@ namespace lwsf { namespace internal
   {
     const boost::lock_guard<boost::mutex> lock{error_sync_};
     if (!update_iff_error || status)
-    {
       status_ = status;
-      exception_error_.clear();
-    }
     return !status_;
   }
 
@@ -360,6 +357,19 @@ namespace lwsf { namespace internal
     const boost::lock_guard<boost::mutex> lock{error_sync_};
     exception_error_ = e.what();
     status_.clear();
+  }
+
+  template<typename F>
+  void wallet::queue_work(F&& f)
+  {
+    try
+    {
+      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
+      work_queue_.push_back(std::forward<F>(f));
+    }
+    catch (const std::exception& e)
+    { set_critical(e); }
+    startRefresh();
   }
 
   void wallet::stop_refresh_loop()
@@ -386,22 +396,34 @@ namespace lwsf { namespace internal
     };
     try
     {
+      std::chrono::steady_clock::time_point last_refresh;
       boost::unique_lock<boost::mutex> lock{refresh_sync_};
       const std::unique_ptr<state, set_stop_> set_stop{std::addressof(thread_state_)};
-      while (mandatory_refresh_ || thread_state_ != state::stop)
+      while (mandatory_refresh_ || thread_state_ != state::stop || !work_queue_.empty())
       {
+        while (!work_queue_.empty())
+        {
+          const std::function<std::error_code()> work{std::move(work_queue_.front())};
+          work_queue_.pop_front();
+          lock.unlock();
+          if (work)
+            set_error(work(), true);
+          lock.lock();
+        }
+
         const bool mandatory_refresh = mandatory_refresh_;
         mandatory_refresh_ = false;
-
-        if (thread_state_ == state::run || mandatory_refresh)
+  
+        const auto now = std::chrono::steady_clock::now();
+        if (refresh_interval_ <= now - last_refresh && (thread_state_ == state::run || mandatory_refresh))
         {
           // refresh has strong exception guarantee - never in partial state.
           lock.unlock();
-          set_error(data_->refresh(mandatory_refresh), true);
+          set_error(data_->refresh(mandatory_refresh), false);
           lock.lock();
         }
         else if (thread_state_ == state::skip_once)
-          thread_state_ = state::run;
+          thread_state_ = state::run;        
 
         // check while holding lock and before a wait call
         if (thread_state_ == state::stop)
@@ -409,8 +431,8 @@ namespace lwsf { namespace internal
         
         const auto last_state = thread_state_;
         refresh_notify_.wait_for(
-          lock, to_boost(config::refresh_interval), [this, last_state] () {
-            return mandatory_refresh_ || thread_state_ != last_state;
+          lock, to_boost(refresh_interval_), [this, last_state] () {
+            return mandatory_refresh_ || thread_state_ != last_state || !work_queue_.empty();
         });
       }
     }
@@ -474,6 +496,7 @@ namespace lwsf { namespace internal
       subaddress_minor_(), 
       filename_(std::move(filename)),
       password_(std::move(password)),
+      work_queue_(),
       exception_error_(),
       status_(),
       thread_(),
@@ -505,6 +528,7 @@ namespace lwsf { namespace internal
       subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
+      work_queue_(),
       exception_error_(),
       status_(),
       thread_(),
@@ -564,6 +588,7 @@ namespace lwsf { namespace internal
       subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
+      work_queue_(),
       exception_error_(),
       status_(),
       thread_(),
@@ -603,6 +628,7 @@ namespace lwsf { namespace internal
       subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
+      work_queue_(),
       exception_error_(),
       status_(),
       thread_(),
@@ -650,6 +676,29 @@ namespace lwsf { namespace internal
   }
  
   wallet::~wallet() { stop_refresh_loop(); }
+
+  void wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
+  {
+    try
+    {
+      const boost::lock_guard<boost::mutex> lock{data_->sync};
+      auto& accts = data_->primary.subaccounts;
+
+      if (accts.size() <= accountIndex)
+        throw std::runtime_error{"add_subaddress: account does not exist"};
+
+      auto& acct = accts.at(accountIndex);
+      if (std::numeric_limits<std::uint32_t>::max() <= acct.last)
+        throw std::runtime_error{"add_subaddress: exceeded minor indexes"};
+
+      const std::uint32_t min_i = ++acct.last;
+      acct.detail.try_emplace(min_i).first->second.label = std::move(label);
+      
+      queue_work([=] () { return data_->register_subaddress(accountIndex, min_i); });
+    }
+    catch (const std::exception& e)
+    { set_critical(e); }
+  }
 
   std::string wallet::seed(const std::string& seed_offset) const
   {
@@ -852,10 +901,9 @@ namespace lwsf { namespace internal
     return true;
   }
 
-  void wallet::setRefreshFromBlockHeight(uint64_t refresh_from_block_height)
+  void wallet::setRefreshFromBlockHeight(uint64_t height)
   {
-    try { set_error(data_->restore_height(refresh_from_block_height), true); }
-    catch (const std::exception& e) { set_critical(e); } 
+    queue_work([this, height] () { return data_->restore_height(height); });
   }
 
   uint64_t wallet::getRefreshFromBlockHeight() const
@@ -866,8 +914,7 @@ namespace lwsf { namespace internal
    
   void wallet::setSubaddressLookahead(uint32_t major, uint32_t minor)
   {
-    try { set_error(data_->set_lookahead(major, minor), false); }
-    catch (const std::exception& e) { set_critical(e); }
+    queue_work([this, major, minor] () { return data_->set_lookahead(major, minor); });
   }
 
   bool wallet::connectToDaemon()
@@ -1010,7 +1057,7 @@ namespace lwsf { namespace internal
       if (no_refresh)
       {
         thread_state_ = state::stop;
-        if (!mandatory_refresh_)
+        if (!mandatory_refresh_ && work_queue_.empty())
           return;
       }
 
@@ -1071,8 +1118,20 @@ namespace lwsf { namespace internal
 
   void wallet::addSubaddressAccount(const std::string& label)
   {
-    try { set_error(data_->add_subaccount(label), false); }
-    catch (const std::exception& e) { set_critical(e); }
+    try
+    {
+      const boost::lock_guard<boost::mutex> lock{data_->sync};
+      auto& accts = data_->primary.subaccounts;
+
+      const std::size_t index = accts.size();
+      if (std::numeric_limits<std::uint32_t>::max() < index)
+        throw std::runtime_error{"addSubddressAccount exceeded subaddress indexes"};
+
+      accts.emplace_back().detail.try_emplace(0).first->second.label = label;
+      queue_work([this, index] () { return data_->register_subaccount(index); });
+    }
+    catch (const std::exception& e)
+    { set_critical(e); }
   }
 
   std::size_t wallet::numSubaddressAccounts() const
@@ -1086,7 +1145,7 @@ namespace lwsf { namespace internal
     static_assert(std::numeric_limits<std::uint32_t>::max() <= std::numeric_limits<std::size_t>::max());
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     if (accountIndex < data_->primary.subaccounts.size())
-      return data_->primary.subaccounts.at(accountIndex).used;
+      return std::size_t(data_->primary.subaccounts.at(accountIndex).last) + 1;
     set_critical(std::runtime_error{"numSubaddresses failed, " + std::to_string(accountIndex) + " does not exist"});
     return 0;
   }
@@ -1108,7 +1167,7 @@ namespace lwsf { namespace internal
     if (accountIndex < data_->primary.subaccounts.size())
     {
       auto& acct = data_->primary.subaccounts[accountIndex];
-      if (addressIndex < acct.used)
+      if (addressIndex <= acct.last)
       {
         acct.detail.try_emplace(addressIndex).first->second.label = label;
         return;
@@ -1163,7 +1222,7 @@ namespace lwsf { namespace internal
   Monero::Subaddress* wallet::subaddress()
   {
     if (!subaddress_minor_)
-      subaddress_minor_ = std::make_unique<subaddress_minor>(data_);
+      subaddress_minor_ = std::make_unique<subaddress_minor>(this, data_);
     return subaddress_minor_.get();
   }
 
@@ -1177,7 +1236,7 @@ namespace lwsf { namespace internal
   Monero::SubaddressAccount* wallet::subaddressAccount()
   {
     if (!subaddresses_)
-      subaddresses_ = std::make_unique<subaddress_account>(data_);
+      subaddresses_ = std::make_unique<subaddress_account>(this, data_);
     return subaddresses_.get();
   }
 

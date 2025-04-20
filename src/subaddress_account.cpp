@@ -66,10 +66,10 @@ namespace lwsf { namespace internal
     }
   }
 
-  subaddress_account::subaddress_account(std::shared_ptr<backend::wallet> data)
-    : data_(std::move(data)), rows_()
+  subaddress_account::subaddress_account(internal::wallet* wal, std::shared_ptr<backend::wallet> data)
+    : wal_(wal), data_(std::move(data)), rows_()
   {
-    if (!data_)
+    if (!wal_ || !data_)
       throw std::invalid_argument{"lwsf::internal::subaddress_account cannot be given nullptr"};
   }
 
@@ -80,7 +80,8 @@ namespace lwsf { namespace internal
 
   void subaddress_account::addRow(const std::string &label)
   {
-    data_->add_subaccount(label);
+    // do not call `data_` function directly, put API requests onto work thread
+    wal_->addSubaddressAccount(label);
     refresh();
   }
 
@@ -88,7 +89,7 @@ namespace lwsf { namespace internal
   {
     {
       const boost::lock_guard<boost::mutex> lock{data_->sync};
-      data_->primary.subaccounts.at(accountIndex).detail[0].label = label;
+      data_->primary.subaccounts.at(accountIndex).detail.try_emplace(0).first->second.label = label;
     }
     refresh();
   }

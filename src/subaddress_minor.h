@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <memory>
 #include <vector>
+#include "wallet.h"
 #include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf { namespace internal
@@ -39,12 +40,13 @@ namespace lwsf { namespace internal
 
   class subaddress_minor final : public ::Monero::Subaddress
   {
+    internal::wallet* const wal_;
     const std::shared_ptr<backend::wallet> data_;
     std::vector<Monero::SubaddressRow*> rows_;
 
   public:
 
-    explicit subaddress_minor(std::shared_ptr<backend::wallet> data);
+    explicit subaddress_minor(internal::wallet* wal, std::shared_ptr<backend::wallet> data);
 
     subaddress_minor(const subaddress_minor&) = delete;
     subaddress_minor(subaddress_minor&&) = delete;    

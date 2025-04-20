@@ -147,7 +147,7 @@ namespace lwsf { namespace internal { namespace backend
       // do not store server lookahead, reset on each server connection
       wire::object(format,
         wire::optional_field("detail", wire::trusted_array(std::ref(self.detail))),
-        WIRE_FIELD_DEFAULTED(used, 0)
+        WIRE_FIELD_DEFAULTED(last, 0)
       );
     }
 
@@ -318,7 +318,7 @@ namespace lwsf { namespace internal { namespace backend
     {
       if (self.subaccounts.size() <= sub.maj_i)
         return true;
-      return self.subaccounts[sub.maj_i].used <= sub.min_i;
+      return self.subaccounts[sub.maj_i].last < sub.min_i; // last is inclusive
     }
 
     std::optional<std::vector<rpc::address_meta>> update_tx(const account& self, transaction& out, const rpc::transaction& source)
@@ -508,9 +508,9 @@ namespace lwsf { namespace internal { namespace backend
           throw std::runtime_error{"merge_response exceeded max size_t value"};
         if (self.primary.subaccounts.size() <= sub.key)
           self.primary.subaccounts.resize(std::size_t(sub.key) + 1);
-    
+
         auto& acct = self.primary.subaccounts.at(sub.key);
-        acct.used = std::max(acct.used, add_uint32_clamp(unsigned(1), std::get<1>(sub.head)));
+        acct.last = std::max(acct.last, std::get<1>(sub.head));
       }
 
       // Update txes _after_ subaccounts table
@@ -537,11 +537,13 @@ namespace lwsf { namespace internal { namespace backend
         throw std::logic_error{"update_lookaheads does not work with lookahead {0, 0}"};
 
       self.server_lookahead = {error::subaddr_server};
+      static_assert(std::is_same<std::uint32_t, decltype(all.rbegin()->key)>());
       const std::uint32_t server_lookahead = all.empty() ?
         std::uint32_t(0) : all.rbegin()->key;
 
       // Ensure major lookahead starts at zero, has no gaps, and "far" enough.
-      bool min_met = add_uint32_clamp(self.primary.subaccounts.size() - 1, maj_lookahead) <= server_lookahead;
+      const std::size_t last_account = std::max(self.primary.subaccounts.size(), std::size_t(1)) - 1;
+      bool min_met = add_uint32_clamp(last_account, maj_lookahead) <= server_lookahead;
       min_met &= all.size() == std::uint64_t(server_lookahead) + 1;
 
       for (std::size_t i = 0; i < self.primary.subaccounts.size(); ++i)
@@ -551,7 +553,7 @@ namespace lwsf { namespace internal { namespace backend
         const bool has_range = elem != all.end();
 
         const std::uint32_t lookahead = has_range ? std::get<1>(elem->head) : 0;
-        min_met &= add_uint32_clamp(acct.used, min_lookahead) <= lookahead;
+        min_met &= add_uint32_clamp(acct.last, min_lookahead) <= lookahead;
         min_met &= has_range && std::get<0>(elem->head) == 0;
 
         // Only increase lookahead, server has no delete subaddr command
@@ -559,13 +561,14 @@ namespace lwsf { namespace internal { namespace backend
       }
 
       // Ensure that unused minor lookahead is far enough
+      const std::uint32_t last_minor = std::max(min_lookahead, std::uint32_t(1)) - 1;
       for (std::size_t i = self.primary.subaccounts.size(); i < all.size(); ++i)
       {
         if (!min_met)
           break;
 
         const auto& range = all.nth(i)->head;
-        min_met &= min_lookahead <= std::get<1>(range);
+        min_met &= last_minor <= std::get<1>(range);
         min_met &= std::get<0>(range) == 0;
       }
 
@@ -577,15 +580,20 @@ namespace lwsf { namespace internal { namespace backend
     void fill_upsert(const wallet& self, boost::container::flat_set<rpc::subaddrs, std::less<>>& out)
     {
       static constexpr const std::uint32_t max_index =
-        std::numeric_limits<std::uint32_t>::max();      
+        std::numeric_limits<std::uint32_t>::max();
+
+      // remember upsert_subaddrs is inclusive in the minor ranges
 
       const auto& accts = self.primary.subaccounts;
-      const std::uint32_t minor = self.primary.min_lookahead;
       for (std::size_t i = 0; i < accts.size() && i <= max_index; ++i)
-        out.insert(out.end(), rpc::subaddrs{std::uint32_t(i)})->head = {0, add_uint32_clamp(accts[i].used, minor)};
+        out.insert(out.end(), rpc::subaddrs{std::uint32_t(i)})->head = {0, add_uint32_clamp(accts[i].last, self.primary.min_lookahead)};
 
-      const std::uint32_t major = add_uint32_clamp(accts.size(), self.primary.maj_lookahead);
-      for (std::size_t i = accts.size(); i < major; ++i)
+      /* `0 < maj_lookahead & min_lookahead == 0` is a strange edge case.
+        Assume `min_lookahead == 1` in that scenario. */
+
+      const std::uint32_t minor = std::max(std::uint32_t(1), self.primary.min_lookahead) - 1;
+      const std::size_t end = accts.size() + self.primary.maj_lookahead;
+      for (std::size_t i = accts.size(); i < end && i <= max_index; ++i)
         out.insert(out.end(), rpc::subaddrs{std::uint32_t(i)})->head = {0, minor};
     }
 
@@ -605,7 +613,7 @@ namespace lwsf { namespace internal { namespace backend
     {
       // Enforce special account {0,0} exists and is labeled
       self.detail.try_emplace(0).first->second.label = std::string{config::default_primary_name};
-      self.used = 1;
+      self.last = 0;
       self.server_lookahead = 0;
     }
   } // anonymous
@@ -631,7 +639,7 @@ namespace lwsf { namespace internal { namespace backend
   { map_account(dest, source); }
 
   sub_account::sub_account()
-    : detail(), used(1), server_lookahead(0)
+    : detail(), last(0), server_lookahead(0)
   {}
 
   std::string_view sub_account::sub_label(const std::uint32_t minor) const noexcept
@@ -684,8 +692,9 @@ namespace lwsf { namespace internal { namespace backend
     : listener(nullptr),
       client(),
       primary{},
+      refresh_status(),
       server_lookahead(default_subaddr_state),
-      last_sync(0),
+      last_sync(),
       blockchain_height(0),
       per_byte_fee(0),
       fee_mask(0),
@@ -834,40 +843,18 @@ namespace lwsf { namespace internal { namespace backend
   {
     // Remember that this function provides the strong exception guarantee.
 
+    boost::unique_lock<boost::mutex> lock_refresh{sync_refresh};
+    const auto now = std::chrono::steady_clock::now();
+
     if (!mandatory)
     {
-      const auto now = std::chrono::steady_clock::now();
-      const std::chrono::steady_clock::time_point start{
-        std::chrono::steady_clock::time_point::duration{last_sync.load()}
-      };
-      if (now - start < config::refresh_interval_min)
-        return {};
-    }
-
-    boost::unique_lock<boost::mutex> lock_refresh{sync_refresh};
-    boost::unique_lock<boost::mutex> lock{sync};
-    const auto now = std::chrono::steady_clock::now();
-    const auto get_rc = [this, &lock] () -> std::error_code
-    {
-      if (!lock.owns_lock())
-        lock.lock();
-      if (!primary.generated_locally && (primary.maj_lookahead || primary.min_lookahead))
-        return server_lookahead.error();
-      return {};
-    };
-
-    if (!mandatory) // double-check
-    {
-      const std::chrono::steady_clock::time_point start{
-        std::chrono::steady_clock::time_point::duration{last_sync.load()}
-      };
-      if (now - start < config::refresh_interval_min)
-        return get_rc();  
+      if (now - last_sync < config::refresh_interval_min)
+        return refresh_status; 
     }
 
     struct call_refreshed
     {
-      void operator()(wallet* ptr) const noexcept
+      void operator()(wallet* ptr) const
       {
         if (!ptr) return;
         const boost::lock_guard<boost::mutex> lock{ptr->sync_listener};
@@ -877,6 +864,8 @@ namespace lwsf { namespace internal { namespace backend
     };
 
     std::unique_ptr<wallet, call_refreshed> refresh_on_exit{this};
+
+    boost::unique_lock<boost::mutex> lock{sync};
     const bool try_login = !passed_login;
     const rpc::login login{primary.address, primary.view.sec};
 
@@ -887,8 +876,8 @@ namespace lwsf { namespace internal { namespace backend
       if (failed_login)
       {
         lock.lock();
-        last_sync = now.time_since_epoch().count();
-        return failed_login;
+        last_sync = now;
+        return refresh_status = failed_login;
       }
     }
 
@@ -901,17 +890,17 @@ namespace lwsf { namespace internal { namespace backend
     }
     lock.lock();
 
-    last_sync = now.time_since_epoch().count();
+    last_sync = now;
     passed_login = bool(txs_response) && bool(outs_response); // reset state
 
     if (!txs_response)
     {
       if (txs_response == rpc_unapproved)
-        return {error::approval};
-      return txs_response.error();
+        return refresh_status = {error::approval};
+      return refresh_status = txs_response.error();
     }
     if (!outs_response)
-      return outs_response.error();
+      return refresh_status = outs_response.error();
 
     const std::uint64_t orig_scan_height = primary.scan_height;
     auto merged = merge_response(*this, *txs_response, *outs_response);
@@ -945,9 +934,10 @@ namespace lwsf { namespace internal { namespace backend
 
         if (primary.maj_lookahead)
         {
-          const std::uint32_t maj_i = add_uint32_clamp(unsigned(1), upsert_request.subaddrs_.rbegin()->key);
+          const std::uint32_t last_used = upsert_request.subaddrs_.rbegin()->key;
+          const std::uint32_t maj_i = add_uint32_clamp(unsigned(1), last_used);
           const std::uint32_t maj_count = primary.maj_lookahead;
-          const std::uint32_t min_count = add_uint32_clamp(unsigned(1), primary.min_lookahead);
+          const std::uint32_t min_count = std::max(std::uint32_t(1), primary.min_lookahead);
           const rpc::provision_subaddrs_request provision_request{
             login, maj_i, 0, maj_count, min_count, false /* get_all */
           };
@@ -959,22 +949,21 @@ namespace lwsf { namespace internal { namespace backend
           if (provision_response)
           {
             if (server_lookahead) // in case another thread jumped in
-              server_lookahead = std::max(*server_lookahead, add_uint32_clamp(maj_i, maj_count - 1));
+              server_lookahead = std::max(*server_lookahead, add_uint32_clamp(last_used, maj_count));
           }
           else // if !provision_response
             server_lookahead = handle_lookahead_error(provision_response.error());
         }
       }
       else // if !upsert_response
-        server_lookahead = handle_lookahead_error(upsert_response.error()); 
+        server_lookahead = handle_lookahead_error(upsert_response.error());
     } // if new subaddress(es)
 
     // return error if subaddresses enabled, and recovered wallet
-    const std::error_code rc = get_rc();
     refresh_on_exit.release(); // release before acquiring `sync_listener`.
     const boost::lock_guard<boost::mutex> lock_listener{sync_listener};
     if (!listener)
-      return rc;
+      return refresh_status = server_lookahead.error();
 
     // Call listener functions without holding `sync`, in case a call is made
     // back into the library.
@@ -1004,94 +993,88 @@ namespace lwsf { namespace internal { namespace backend
         listener->moneySpent(txid, tx->amount);
     }
 
-    return rc;
+    return refresh_status = server_lookahead.error();
   }
 
-  std::error_code wallet::add_subaccount(std::string label)
+  std::error_code wallet::register_subaccount(const std::uint32_t maj_i)
   {
     boost::unique_lock<boost::mutex> lock{sync};
-    if (std::numeric_limits<std::uint32_t>::max() < primary.subaccounts.size())
-      throw std::runtime_error{"wallet::add_subaccount exceeded subaddress indexes"};
-
-    std::uint32_t maj_lookahead = 0;
-    const std::uint32_t minor_count = add_uint32_clamp(unsigned(1), primary.min_lookahead); 
-    for (;;)
+    if (primary.subaccounts.size() <= maj_i)
+      throw std::runtime_error{"wallet::register_subaccount exceeded subaddress indexes"};
+ 
+    if (!passed_login)
     {
-      if (!server_lookahead)
-        break;
-
-      maj_lookahead = *server_lookahead;
-      const std::uint32_t maj_i = primary.subaccounts.size();
-      const std::uint32_t needed_maj_lookahead = add_uint32_clamp(maj_i, primary.maj_lookahead);
-      if (needed_maj_lookahead <= maj_lookahead)
-        break;
-
-      // Increase the lookahead by one
-      const rpc::provision_subaddrs_request request{
-        rpc::login{primary.address, primary.view.sec},
-        needed_maj_lookahead, 0, 1, minor_count, false /* get_all */
-      };
-
       lock.unlock();
-      const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, request);
+      const std::error_code error = login();
+      if (error)
+        return error;
       lock.lock();
-      if (!response)
-        server_lookahead = handle_lookahead_error(response.error());
-
-      // if NOT another call to `add_subaccount` during rpc unlock phase
-      if (maj_i == primary.subaccounts.size())
-      {
-        if (response)
-          server_lookahead = needed_maj_lookahead;
-        break;
-      }
     }
 
-    // Allow account to be added if server previously had enough lookahead
-    if (primary.subaccounts.size() <= maj_lookahead)
-    {
-      auto& maj = primary.subaccounts.emplace_back();
-      maj.detail.try_emplace(0).first->second.label = std::move(label);
-      maj.server_lookahead = minor_count - 1;
-    }
+    if (!server_lookahead)
+      return server_lookahead.error();
 
-    if (server_lookahead)
+    const std::uint32_t needed_maj_i = add_uint32_clamp(maj_i, primary.maj_lookahead);
+    if (needed_maj_i <= *server_lookahead)
       return {};
+
+    // Increase the lookahead by one
+    const std::uint32_t major_count = needed_maj_i - *server_lookahead;
+    const std::uint32_t minor_count = std::max(std::uint32_t(1), primary.min_lookahead);
+    const rpc::provision_subaddrs_request request{
+      rpc::login{primary.address, primary.view.sec},
+      *server_lookahead + 1, 0, major_count, minor_count, false /* get_all */
+    };
+
+    lock.unlock();
+    const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, request);
+    lock.lock();
+    if (response && server_lookahead)
+      server_lookahead = std::max(*server_lookahead, needed_maj_i);
+    else if (!response)
+      server_lookahead = handle_lookahead_error(response.error());
+
     return server_lookahead.error();
   }
 
-  std::error_code wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
+  std::error_code wallet::register_subaddress(const std::uint32_t maj_i, const std::uint32_t min_i)
   {
     boost::unique_lock<boost::mutex> lock{sync};
-    auto maj = std::addressof(primary.subaccounts.at(accountIndex));
-    if (std::numeric_limits<std::uint32_t>::max() <= maj->used)
-      throw std::runtime_error{"wallet::add_subaddress exceeded subaddress indexes"};
+    if (primary.subaccounts.size() <= maj_i)
+      throw std::invalid_argument{"wallet::register_subaddress exceeded major index"};
 
-    const std::uint32_t min_i = ++maj->used; // exceptions could leak an index :/
-    const std::uint32_t needed_min_lookahead = add_uint32_clamp(min_i, primary.min_lookahead);
+    auto maj = std::addressof(primary.subaccounts.at(maj_i));
+    if (maj->last < min_i)
+      throw std::invalid_argument{"wallet::register_subaddress exceeded minor index"};
 
-    if (needed_min_lookahead <= maj->server_lookahead)
+    if (!passed_login)
     {
-      maj->detail.try_emplace(min_i).first->second.label = std::move(label);
-      return {};
+      lock.unlock();
+      const std::error_code error = login();
+      if (error)
+        return error;
+      lock.lock();
     }
 
+    const std::uint32_t needed_min_i = add_uint32_clamp(min_i, primary.min_lookahead);
+    if (needed_min_i <= maj->server_lookahead)
+      return {};
+
+    const std::uint32_t needed_count = add_uint32_clamp(unsigned(1), needed_min_i);
     const rpc::provision_subaddrs_request request{
       rpc::login{primary.address, primary.view.sec},
-      accountIndex, 0, 1, needed_min_lookahead, false /* get_all */
+      maj_i, 0, 1, needed_count, false /* get_all */
     };
 
     lock.unlock();
     const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, request);
     lock.lock();
 
-    // address could've changed during unlock
-    maj = std::addressof(primary.subaccounts.at(accountIndex));
-
     if (response)
     {
-      maj->server_lookahead = std::max(maj->server_lookahead, needed_min_lookahead);
-      maj->detail.try_emplace(min_i - 1).first->second.label = std::move(label);
+      // address could've changed during unlock
+      maj = std::addressof(primary.subaccounts.at(maj_i));
+      maj->server_lookahead = std::max(maj->server_lookahead, needed_min_i);
       return {};
     }
     else if (server_lookahead)
@@ -1114,6 +1097,15 @@ namespace lwsf { namespace internal { namespace backend
       if (!server_lookahead)
         server_lookahead = 0;
       return {};
+    }
+
+    if (!passed_login)
+    {
+      lock.unlock();
+      const std::error_code error = login();
+      if (error)
+        return error;
+      lock.lock();
     }
 
     rpc::upsert_subaddrs_request request{

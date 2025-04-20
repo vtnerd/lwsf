@@ -35,6 +35,8 @@
 #include <boost/thread/mutex.hpp>
 #include <boost/thread/thread.hpp>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
 #include <string>
 #include <system_error>
@@ -59,6 +61,7 @@ namespace internal
     const std::string filename_;
     std::string password_;
     std::string language_;
+    std::deque<std::function<std::error_code()>> work_queue_;
     mutable std::string exception_error_;
     mutable std::error_code status_;
     boost::thread thread_;
@@ -74,6 +77,9 @@ namespace internal
 
     bool set_error(std::error_code status, bool update_iff_error) const;
     void set_critical(const std::exception& e) const;
+
+    template<typename F>
+    void queue_work(F&& f);
 
     void stop_refresh_loop();
     void refresh_loop();
@@ -98,6 +104,8 @@ namespace internal
     virtual ~wallet() override;
     wallet& operator=(const wallet&) = delete;
     wallet& operator=(wallet&&) = delete;
+
+    void add_subaddress(std::uint32_t accountIndex, std::string label);
 
     virtual std::string seed(const std::string& seed_offset = "") const override;
 

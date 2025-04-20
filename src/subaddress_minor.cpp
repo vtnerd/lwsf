@@ -46,10 +46,10 @@ namespace lwsf { namespace internal
     }
   }
 
-  subaddress_minor::subaddress_minor(std::shared_ptr<backend::wallet> data)
-    : data_(std::move(data)), rows_()
+  subaddress_minor::subaddress_minor(internal::wallet* wal, std::shared_ptr<backend::wallet> data)
+    : wal_(wal), data_(std::move(data)), rows_()
   {
-    if (!data_)
+    if (!wal_ || !data_)
       throw std::invalid_argument{"lwsf::internal::subaddress_minor cannot be given nullptr"};
   }
 
@@ -69,14 +69,14 @@ namespace lwsf { namespace internal
         return;
 
       const auto& acct = data_->primary.subaccounts[accountIndex];
-      static_assert(std::is_same<std::uint32_t, decltype(acct.used)>());
-      rows_.reserve(acct.used);
-      for (std::uint32_t i = 0; i < acct.used; ++i)
+      static_assert(std::is_same<std::uint32_t, decltype(acct.last)>());
+      rows_.reserve(std::size_t(acct.last) + 1);
+      for (std::uint64_t i = 0; i <= acct.last; ++i)
       {
         rows_.push_back(
           new Monero::SubaddressRow{
-            i,
-            data_->get_spend_address({accountIndex, i}),
+            std::uint32_t(i),
+            data_->get_spend_address({accountIndex, std::uint32_t(i)}),
             std::string{acct.sub_label(i)}
           }
         );
@@ -90,8 +90,9 @@ namespace lwsf { namespace internal
   }
 
   void subaddress_minor::addRow(const std::uint32_t accountIndex, const std::string &label)
-  { 
-    data_->add_subaddress(accountIndex, label);
+  {
+    // do not call `data_` function directly, put API requests onto work thread
+    wal_->add_subaddress(accountIndex, label);
     refresh(accountIndex);
   }
 

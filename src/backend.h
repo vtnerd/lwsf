@@ -96,7 +96,7 @@ namespace lwsf { namespace internal { namespace backend
   struct sub_account
   {
     boost::container::flat_map<std::uint32_t, subaddress> detail; //!< Minor address info
-    std::uint32_t used; //!< Number of minor indexes in use.
+    std::uint32_t last; //!< Last minor index in use (inclusive)
     std::uint32_t server_lookahead; //!< Status of server (minor) lookahead. Inclusive
 
     //! Creates 1 subaddress entry (key == `0`) with default label
@@ -222,8 +222,9 @@ namespace lwsf { namespace internal { namespace backend
     Monero::WalletListener* listener;
     rpc::http_client client;
     account primary;
+    std::error_code refresh_status; //!< Cached because `refresh(...)` is rate limited
     expect<std::uint32_t> server_lookahead; //!< Status of major lookahead server-side. Inclusive
-    std::atomic<std::chrono::steady_clock::time_point::duration::rep> last_sync;
+    std::chrono::steady_clock::time_point last_sync;
     std::uint64_t blockchain_height;
     std::uint64_t per_byte_fee;
     std::uint64_t fee_mask;
@@ -250,9 +251,11 @@ namespace lwsf { namespace internal { namespace backend
     //! Refreshes txes information. Strong exception guarantee. Spuriously returns success.
     std::error_code refresh(bool mandatory = false);
 
-    std::error_code add_subaccount(std::string label);
+    //! Notify server that new major accounts need to be watched.
+    std::error_code register_subaccount(std::uint32_t maj_i);
 
-    std::error_code add_subaddress(const std::uint32_t accountIndex, std::string label);
+    //! Notify server that new minor accounts need to be watched.
+    std::error_code register_subaddress(std::uint32_t maj_i, std::uint32_t min_i);
 
     std::error_code set_lookahead(std::uint32_t major, std::uint32_t minor);
 
