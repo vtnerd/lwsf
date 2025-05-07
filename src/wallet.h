@@ -63,7 +63,7 @@ namespace internal
     std::string language_;
     std::deque<std::function<std::error_code()>> work_queue_;
     mutable std::string exception_error_;
-    mutable std::error_code status_;
+    mutable std::error_code error_;
     boost::thread thread_;
     const std::uint64_t iterations_;
     std::chrono::milliseconds refresh_interval_;  
@@ -75,7 +75,7 @@ namespace internal
     state thread_state_;
     bool mandatory_refresh_;
 
-    bool set_error(std::error_code status, bool update_iff_error) const;
+    bool set_error(std::error_code status, bool clear = false) const;
     void set_critical(const std::exception& e) const;
 
     template<typename F>

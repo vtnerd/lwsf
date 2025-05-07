@@ -37,17 +37,15 @@ namespace lwsf
     approval,           //!< Account needs approval
     configuration,      //!< Bad Configuration
     create,             //!< Account creation not possible
-    crypto_failure,     //!< Failure in crypto
-    invalid_encoding,   //!< Invalid percent encoding
+    import_fee,         //!< `import_wallet_request` has fee
+    import_invalid,     //!< `import_wallet_request` has invalid fee
+    import_pending,     //!< `import_wallet_request` not fulfilled/approved
     invalid_scheme,     //!< Invalid network scheme
     network_type,       //!< Mismatch on network type
-    read_failure,       //!< Failed to read file
+    subaddr_ahead,      //!< Server limits on subaddresses affects lookahead
     subaddr_disabled,   //!< Server has subaddresses disabled
     subaddr_local,      //!< Local limits on subaddresses too small
-    subaddr_server,     //!< Server limits on subaddresses too small
     unexpected_userinfo,//!< Unexpected user+pass provided
-    unsupported_format, //!< File format could not be unpacked
-    write_failure       //!< Failed to write file
   };
 
   //! \return Error message string.

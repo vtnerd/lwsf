@@ -70,7 +70,9 @@ namespace lwsf { namespace internal
       boost::unique_future<boost::asio::ip::tcp::socket>
         operator()(const std::string&, const std::string&, boost::asio::steady_timer&) const
       {
-        throw std::runtime_error{"Unable to connect"};
+        return boost::make_exceptional_future<boost::asio::ip::tcp::socket>(
+          std::runtime_error{"invalid proxy value"}
+        );
       }
     };
 
@@ -344,31 +346,29 @@ namespace lwsf { namespace internal
     }
   } // anonymous
 
-  bool wallet::set_error(const std::error_code status, const bool update_iff_error) const
+  bool wallet::set_error(const std::error_code error, const bool clear) const
   {
-    const boost::lock_guard<boost::mutex> lock{error_sync_};
-    if (!update_iff_error || status)
-      status_ = status;
-    return !status_;
+    if (clear || error)
+    {
+      const boost::lock_guard<boost::mutex> lock{error_sync_};
+      error_ = error;
+    }
+    return !error;
   }
 
   void wallet::set_critical(const std::exception& e) const
   {
     const boost::lock_guard<boost::mutex> lock{error_sync_};
     exception_error_ = e.what();
-    status_.clear();
   }
 
   template<typename F>
   void wallet::queue_work(F&& f)
   {
-    try
     {
       const boost::lock_guard<boost::mutex> lock{refresh_sync_};
       work_queue_.push_back(std::forward<F>(f));
     }
-    catch (const std::exception& e)
-    { set_critical(e); }
     startRefresh();
   }
 
@@ -407,7 +407,7 @@ namespace lwsf { namespace internal
           work_queue_.pop_front();
           lock.unlock();
           if (work)
-            set_error(work(), true);
+            set_error(work());
           lock.lock();
         }
 
@@ -415,11 +415,12 @@ namespace lwsf { namespace internal
         mandatory_refresh_ = false;
   
         const auto now = std::chrono::steady_clock::now();
-        if (refresh_interval_ <= now - last_refresh && (thread_state_ == state::run || mandatory_refresh))
+        if (mandatory_refresh_ || (refresh_interval_ <= now - last_refresh && thread_state_ == state::run))
         {
           // refresh has strong exception guarantee - never in partial state.
           lock.unlock();
-          set_error(data_->refresh(mandatory_refresh), false);
+          last_refresh = now;
+          set_error(data_->refresh(mandatory_refresh), true /*clear*/);
           lock.lock();
         }
         else if (thread_state_ == state::skip_once)
@@ -498,7 +499,7 @@ namespace lwsf { namespace internal
       password_(std::move(password)),
       work_queue_(),
       exception_error_(),
-      status_(),
+      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
@@ -530,7 +531,7 @@ namespace lwsf { namespace internal
       password_(std::move(password)),
       work_queue_(),
       exception_error_(),
-      status_(),
+      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
@@ -542,40 +543,29 @@ namespace lwsf { namespace internal
       thread_state_(state::stop),
       mandatory_refresh_(false)
   {
-    if (!data_)
-      throw std::invalid_argument{"lwsf::backend::wallet cannot be null"};
-
     try
     {
       epee::byte_slice file = try_load(filename_ + ".new");
       if (file.empty())
         file = try_load(filename_);
 
-      if (!filename_.empty() && !file.empty())
-      {
-        encrypted_file contents{};
-        if (!(status_ = wire::msgpack::from_bytes(std::move(file), contents)))
-        {
-          epee::byte_slice payload = contents.get_payload(password_);
-          if (!payload.empty())
-          {
-            if (!(status_ = data_->from_bytes(std::move(payload))))
-            {
-              // lock not needed; data_ was created and unique to us
-              if (nettype != data_->primary.type)
-                throw std::runtime_error{"Wallet file NetworkType does not match requested"}; 
-            }
-          }
-          else
-            status_ = error::unsupported_format;
-        }
-      }
-      else
-        status_ = error::read_failure;
+      if (file.empty())
+        throw std::runtime_error{"Unable to open wallet file " + filename_};
+
+      encrypted_file contents{};
+      if (std::error_code error = wire::msgpack::from_bytes(std::move(file), contents))
+        throw std::system_error{error};
+
+      epee::byte_slice payload = contents.get_payload(password_);
+      if (std::error_code error = data_->from_bytes(std::move(payload)))
+        throw std::system_error{error};
+
+      // lock not needed; data_ was created and unique to us
+      if (nettype != data_->primary.type)
+        throw std::runtime_error{"Wallet file NetworkType does not match requested"};
     }
     catch (const std::exception& e)
     {
-      status_.clear();
       exception_error_ = e.what();
     }
   }
@@ -590,7 +580,7 @@ namespace lwsf { namespace internal
       password_(std::move(password)),
       work_queue_(),
       exception_error_(),
-      status_(),
+      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
@@ -630,7 +620,7 @@ namespace lwsf { namespace internal
       password_(std::move(password)),
       work_queue_(),
       exception_error_(),
-      status_(),
+      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
@@ -679,25 +669,21 @@ namespace lwsf { namespace internal
 
   void wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
   {
-    try
-    {
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      auto& accts = data_->primary.subaccounts;
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    auto& accts = data_->primary.subaccounts;
 
-      if (accts.size() <= accountIndex)
-        throw std::runtime_error{"add_subaddress: account does not exist"};
+    if (accts.size() <= accountIndex)
+      throw std::runtime_error{"add_subaddress: account does not exist"};
 
-      auto& acct = accts.at(accountIndex);
-      if (std::numeric_limits<std::uint32_t>::max() <= acct.last)
-        throw std::runtime_error{"add_subaddress: exceeded minor indexes"};
+    auto& acct = accts.at(accountIndex);
+    if (std::numeric_limits<std::uint32_t>::max() <= acct.last)
+      throw std::runtime_error{"add_subaddress: exceeded minor indexes"};
 
-      const std::uint32_t min_i = ++acct.last;
+    const std::uint32_t min_i = ++acct.last;
+    if (!label.empty())
       acct.detail.try_emplace(min_i).first->second.label = std::move(label);
-      
-      queue_work([=] () { return data_->register_subaddress(accountIndex, min_i); });
-    }
-    catch (const std::exception& e)
-    { set_critical(e); }
+
+    queue_work([=] () { return data_->register_subaddress(accountIndex, min_i); });
   }
 
   std::string wallet::seed(const std::string& seed_offset) const
@@ -761,10 +747,10 @@ namespace lwsf { namespace internal
       status = Status_Critical;
       errorString = exception_error_;
     }
-    else if (status_)
+    else if (error_)
     {
       status = Status_Error;
-      errorString = status_.message();
+      errorString = error_.message();
     }
     else
     {
@@ -816,39 +802,33 @@ namespace lwsf { namespace internal
   {
     const std::string& real_path = path.empty() ? filename_ : path;
 
-    std::error_code status{};
     try
     {
-      expect<epee::byte_slice> payload = data_->to_bytes();
-      if (payload)
-      {
-        const auto contents = encrypted_file::make(*payload, iterations_, password_);
-        const auto payload_size = payload->size();
-        *payload = nullptr; // free up some memory that is no longer needed
+      epee::byte_slice payload = data_->to_bytes().value();
+      const auto contents = encrypted_file::make(payload, iterations_, password_);
+      const auto payload_size = payload.size();
+      payload = nullptr; // free up some memory that is no longer needed
 
-        epee::byte_stream buffer;
-        buffer.reserve(payload_size + 2048);
-        buffer.write(file_magic.data(), file_magic.size());
+      epee::byte_stream buffer;
+      buffer.reserve(payload_size + 2048);
+      buffer.write(file_magic.data(), file_magic.size());
 
-        if (!(status = wire::msgpack::to_bytes(buffer, contents)))
-        {
-          const std::filesystem::path file = real_path;
-          const std::filesystem::path new_file = real_path + ".new";
-          const std::filesystem::path directory =
-            std::filesystem::path{real_path}.remove_filename();
+      if (std::error_code error = wire::msgpack::to_bytes(buffer, contents))
+        throw std::system_error{error};
 
-          if (std::filesystem::exists(new_file))
-            std::filesystem::rename(new_file, file, status);
- 
-          // blocks until file and directory contents are synced
-          if (atomic_file_write(new_file, directory, epee::byte_slice{std::move(buffer)}))
-            std::filesystem::rename(new_file, file, status);
-          else
-            status = error::write_failure;
-        }
-      }
-      else
-        status = payload.error(); 
+      const std::filesystem::path file = real_path;
+      const std::filesystem::path new_file = real_path + ".new";
+      const std::filesystem::path directory =
+        std::filesystem::path{real_path}.remove_filename();
+
+      if (std::filesystem::exists(new_file))
+        std::filesystem::rename(new_file, file);
+
+      // blocks until file and directory contents are synced
+      if (!atomic_file_write(new_file, directory, epee::byte_slice{std::move(buffer)}))
+        throw std::runtime_error{"Failed to write file " + real_path};
+
+      std::filesystem::rename(new_file, file);
     }
     catch (const std::exception& e)
     {
@@ -856,8 +836,7 @@ namespace lwsf { namespace internal
       return false;
     }
 
-    // this will clear any existing errors
-    return set_error(status, false); 
+    return true;
   }
 
   bool wallet::init(const std::string &daemon_address, uint64_t, const std::string &daemon_username, const std::string &daemon_password, bool use_ssl, bool light_wallet, const std::string &proxy_address)
@@ -872,7 +851,6 @@ namespace lwsf { namespace internal
         throw std::runtime_error{"Invalid LWS URL: " + daemon_address};
       if (!url.m_uri_content.m_path.empty())
         throw std::runtime_error{"LWS URL contains path (unsupported)"};
-
 
       if (!proxy_address.empty() && !setProxy(proxy_address))
         return false;
@@ -901,8 +879,10 @@ namespace lwsf { namespace internal
     return true;
   }
 
-  void wallet::setRefreshFromBlockHeight(uint64_t height)
+  void wallet::setRefreshFromBlockHeight(const std::uint64_t height)
   {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    data_->primary.requested_start = std::min(data_->primary.requested_start, height);
     queue_work([this, height] () { return data_->restore_height(height); });
   }
 
@@ -919,28 +899,17 @@ namespace lwsf { namespace internal
 
   bool wallet::connectToDaemon()
   {
-    struct on_throw
-    {
-      void operator()(wallet* self) const
-      {
-        if (self)
-          self->data_->client.disconnect();
-      }
-    };
-
-    if (data_->client.is_connected())
+    const bool connected = data_->client.is_connected();
+    boost::unique_lock<boost::mutex> lock{data_->sync};
+    if (connected && data_->passed_login)
       return true;
 
-    std::unique_ptr<wallet, on_throw> disconnect{this};
-    if (data_->client.connect(config::connect_timeout))
+    if (connected || data_->client.connect(config::connect_timeout))
     {
-      const std::error_code err = data_->login();
-      if (!err)
-        disconnect.release();
-      return set_error(err, false);
+      lock.unlock();
+      return set_error(data_->login());
     }
-    set_error(rpc::error::no_response, false);
-    return false;
+    return set_error(rpc::error::no_response);
   }
 
   Monero::Wallet::ConnectionStatus wallet::connected() const
@@ -955,13 +924,19 @@ namespace lwsf { namespace internal
 
   bool wallet::setProxy(const std::string &address)
   {
-    auto endpoint = net::get_tcp_endpoint(address);
-    if (!endpoint)
+    data_->client.disconnect();
+    if (address.empty())
+      data_->client.set_connector(epee::net_utils::direct_connect{});
+    else
     {
-      data_->client.set_connector(null_connector{});
-      return set_error(endpoint.error(), false);
+      auto endpoint = net::get_tcp_endpoint(address);
+      if (!endpoint)
+      {
+        data_->client.set_connector(null_connector{});
+        return set_error(endpoint.error());
+      }
+      data_->client.set_connector(net::socks::connector{std::move(*endpoint)});
     }
-    data_->client.set_connector(net::socks::connector{std::move(*endpoint)});
     return true;
   }
 
@@ -1082,7 +1057,7 @@ namespace lwsf { namespace internal
 
   bool wallet::refresh()
   {
-    try { return set_error(data_->refresh(true), true); }
+    try { return set_error(data_->refresh(true), true /* clear */); }
     catch (const std::exception& e) { set_critical(e); }
     return false;
   }
@@ -1118,20 +1093,15 @@ namespace lwsf { namespace internal
 
   void wallet::addSubaddressAccount(const std::string& label)
   {
-    try
-    {
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      auto& accts = data_->primary.subaccounts;
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    auto& accts = data_->primary.subaccounts;
 
-      const std::size_t index = accts.size();
-      if (std::numeric_limits<std::uint32_t>::max() < index)
-        throw std::runtime_error{"addSubddressAccount exceeded subaddress indexes"};
+    const std::size_t index = accts.size();
+    if (std::numeric_limits<std::uint32_t>::max() < index)
+      throw std::runtime_error{"addSubddressAccount exceeded subaddress indexes"};
 
-      accts.emplace_back().detail.try_emplace(0).first->second.label = label;
-      queue_work([this, index] () { return data_->register_subaccount(index); });
-    }
-    catch (const std::exception& e)
-    { set_critical(e); }
+    accts.emplace_back().detail.try_emplace(0).first->second.label = label;
+    queue_work([this, index] () { return data_->register_subaccount(index); });
   }
 
   std::size_t wallet::numSubaddressAccounts() const
@@ -1169,7 +1139,10 @@ namespace lwsf { namespace internal
       auto& acct = data_->primary.subaccounts[accountIndex];
       if (addressIndex <= acct.last)
       {
-        acct.detail.try_emplace(addressIndex).first->second.label = label;
+        if (!addressIndex || !label.empty())
+          acct.detail.try_emplace(addressIndex).first->second.label = label;
+        else
+          acct.detail.erase(addressIndex);
         return;
       }
     }

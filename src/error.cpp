@@ -41,28 +41,22 @@ namespace lwsf
       return "Configuration issue";
     case error::create:
       return "Account creation not possible";
-    case error::crypto_failure:
-      return "Cryptography issue";
-    case error::invalid_encoding:
-      return "File had invalid encoding";
-    case error::invalid_scheme:
-      return "Invalid URL scheme";
+    case error::import_fee:
+      return "Import/restore from height needs payment, see address book";
+    case error::import_invalid:
+      return "Import/restore from height failed due to invalid fee";
+    case error::import_pending:
+      return "Import/restore from height is awaiting approval";
     case error::network_type:
       return "Mismatch on network type";
-    case error::read_failure:
-      return "Failed to read file";
+    case error::subaddr_ahead:
+      return "server has limits too low for requested subaddress lookahead";
     case error::subaddr_disabled:
-      return "light-wallet-server has subaddresses disabled";
+      return "server has subaddresses disabled";
     case error::subaddr_local:
-      return "lwsf limits on subaddresses too small";
-    case error::subaddr_server:
-      return "light-wallet-server has limits on subaddresses that are too small";
+      return "lwsf (local) limits on subaddresses too small";
     case error::unexpected_userinfo:
       return "Unexpected user+pass field in URL";
-    case error::unsupported_format:
-      return "Could not unpack file";
-    case error::write_failure:
-      return "Failed to write file";
 
     default:
       break;

@@ -229,11 +229,11 @@ namespace lwsf { namespace internal { namespace rpc
 
   struct subaddrs
   {
-    subaddrs()
+    constexpr subaddrs() noexcept
       : head({0, 0}), key(0)
     {}
 
-    explicit subaddrs(const std::uint32_t key)
+    constexpr explicit subaddrs(const std::uint32_t key) noexcept
       : head({0, 0}), key(key)
     {}
 
@@ -243,11 +243,11 @@ namespace lwsf { namespace internal { namespace rpc
   WIRE_JSON_DECLARE_OBJECT(subaddrs);
   void read_bytes(wire::json_reader&, subaddrs&);
 
-  inline bool operator<(const subaddrs& lhs, const subaddrs& rhs) noexcept
+  constexpr inline bool operator<(const subaddrs& lhs, const subaddrs& rhs) noexcept
   { return lhs.key < rhs.key; }
 
   template<typename T>
-  inline bool operator<(const subaddrs& lhs, const T rhs) noexcept
+  constexpr inline bool operator<(const subaddrs& lhs, const T rhs) noexcept
   { 
     static_assert(std::is_unsigned<T>());
     return lhs.key < rhs;
@@ -337,6 +337,10 @@ namespace lwsf { namespace internal { namespace rpc
   struct import_response
   {
     import_response() = delete;
+    static constexpr const char* endpoint() noexcept { return "/import_wallet_request"; }
+
+    std::optional<std::string> payment_address;
+    std::optional<epee::byte_slice> payment_id;
     std::optional<uint64_string> import_fee;
     bool request_fulfilled;
   };
@@ -398,7 +402,7 @@ namespace lwsf { namespace internal { namespace rpc
     static constexpr const char* endpoint() noexcept { return "/upsert_subaddrs"; }
 
     boost::container::flat_set<subaddrs> new_subaddrs;
-    boost::container::flat_set<subaddrs> all_subaddrs;
+    boost::container::flat_set<subaddrs, std::less<>> all_subaddrs;
   };
   void read_bytes(wire::json_reader&, upsert_subaddrs_response&);
      

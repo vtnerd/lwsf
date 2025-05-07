@@ -199,16 +199,16 @@ namespace lwsf { namespace internal { namespace backend
   {
     account() = delete;
 
-    std::string address; //!> not serialized, recovered on read_bytes
+    std::string address; //!< not serialized, recovered on read_bytes
     std::string language;
     std::vector<address_book_entry> addressbook;
     std::vector<sub_account> subaccounts; //! Enabled major subaccounts. Index indicates `sub.major` value.
     std::unordered_map<crypto::hash, std::shared_ptr<transaction>> txes;
     std::unordered_map<std::string, std::string> attributes;
-    std::uint64_t scan_height;
-    std::uint64_t restore_height;
-    std::uint32_t maj_lookahead = config::subaddr_major_lookahead;
-    std::uint32_t min_lookahead = config::subaddr_minor_lookahead;
+    std::uint64_t scan_height;    //!< last block scanned
+    std::uint64_t restore_height; //!< aka scan start height
+    std::uint64_t requested_start = std::numeric_limits<std::uint64_t>::max(); 
+    config::lookahead lookahead = config::default_lookahead; //<! Lookahead as requested by user
     Monero::NetworkType type;
     keypair view;
     keypair spend;
@@ -222,12 +222,14 @@ namespace lwsf { namespace internal { namespace backend
     Monero::WalletListener* listener;
     rpc::http_client client;
     account primary;
-    std::error_code refresh_status; //!< Cached because `refresh(...)` is rate limited
-    expect<std::uint32_t> server_lookahead; //!< Status of major lookahead server-side. Inclusive
+    std::error_code refresh_error; //!< Cached because `refresh(...)` is rate limited
+    std::error_code lookahead_error; //!< warnings/errors of `server_lookahead` value
+    std::error_code import_error; //!< Error from `import_wallet_request`
     std::chrono::steady_clock::time_point last_sync;
     std::uint64_t blockchain_height;
     std::uint64_t per_byte_fee;
     std::uint64_t fee_mask;
+    std::uint32_t server_lookahead; //!< Status of major lookahead server-side. Inclusive
     mutable boost::mutex sync;
     boost::mutex sync_listener;
     boost::mutex sync_refresh;
@@ -239,16 +241,18 @@ namespace lwsf { namespace internal { namespace backend
     crypto::public_key get_spend_public(const rpc::address_meta& index) const;
     std::string get_spend_address(const rpc::address_meta& index) const;
 
-    //! Serializate `this` wallet to msgpack. Locks contents.
+    //! Serialize `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
 
     //! De-serialize `this` from msgpack. Locks+replaces contents.
     std::error_code from_bytes(epee::byte_slice source);
 
-    //! Attempt login and sync subaddresses. \return no errors if login succeeded
+    /*! Attempt login and sync subaddresses. The result of subaddress syncing,
+    including errors, is stored in `server_lookahead`.
+    \return No errors if login succeeded. */
     std::error_code login();
 
-    //! Refreshes txes information. Strong exception guarantee. Spuriously returns success.
+    //! Refreshes txes information. Strong exception guarantee.
     std::error_code refresh(bool mandatory = false);
 
     //! Notify server that new major accounts need to be watched.
@@ -257,6 +261,7 @@ namespace lwsf { namespace internal { namespace backend
     //! Notify server that new minor accounts need to be watched.
     std::error_code register_subaddress(std::uint32_t maj_i, std::uint32_t min_i);
 
+    //! Modify local and possibly server lookahead
     std::error_code set_lookahead(std::uint32_t major, std::uint32_t minor);
 
     std::error_code restore_height(const std::uint64_t height);

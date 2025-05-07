@@ -399,6 +399,8 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::json_reader& source, import_response& self)
   {
     wire::object(source,
+      WIRE_OPTIONAL_FIELD(payment_address),
+      WIRE_OPTIONAL_FIELD(payment_id),
       WIRE_OPTIONAL_FIELD(import_fee),
       WIRE_FIELD(request_fulfilled)
     );

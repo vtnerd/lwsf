@@ -100,7 +100,11 @@ namespace lwsf { namespace internal
   {
     {
       const boost::lock_guard<boost::mutex> lock{data_->sync};
-      data_->primary.subaccounts.at(accountIndex).detail[addressIndex].label = label;
+      auto& acct = data_->primary.subaccounts.at(accountIndex);
+      if (!addressIndex || !label.empty())
+        acct.detail.try_emplace(addressIndex).first->second.label = label;
+      else
+        acct.detail.erase(addressIndex);
     }
     refresh(accountIndex);
   }

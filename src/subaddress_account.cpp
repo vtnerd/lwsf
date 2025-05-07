@@ -107,6 +107,9 @@ namespace lwsf { namespace internal
 
       for (const auto& tx : data_->primary.txes)
       {
+        if (tx.second->failed)
+          continue;
+
         const bool unlocked = tx.second->is_unlocked(chain_height, net_type);
         for (const auto& receive : tx.second->receives)
         {
