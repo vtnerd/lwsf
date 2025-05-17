@@ -250,13 +250,10 @@ namespace lwsf { namespace internal { namespace backend
     cryptonote::account_public_address get_spend_account(const rpc::address_meta& index) const;
     std::string get_spend_address(const rpc::address_meta& index) const;
 
-<<<<<<< Updated upstream
-=======
     // End GROUP
 
     // `sync` mutex IS acquired for this group (until end). Do not hold this mutex
 
->>>>>>> Stashed changes
     //! Serialize `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
 

@@ -283,10 +283,7 @@ namespace lwsf { namespace internal { namespace backend
         wire::optional_field("attributes", wire::trusted_array(std::ref(self.attributes))),
         WIRE_FIELD(scan_height),
         WIRE_FIELD(restore_height),
-<<<<<<< Updated upstream
-=======
         WIRE_FIELD(requested_start),
->>>>>>> Stashed changes
         WIRE_FIELD_DEFAULTED(lookahead, config::default_lookahead),
         WIRE_FIELD_DEFAULTED(type, Monero::MAINNET),
         WIRE_FIELD(view),
@@ -507,10 +504,6 @@ namespace lwsf { namespace internal { namespace backend
               if (!rescanning)
               {
                 iter->second->height = std::nullopt;
-<<<<<<< Updated upstream
-                iter->second->timestamp = std::nullopt;
-=======
->>>>>>> Stashed changes
                 iter->second->failed = false;
               }
             }
@@ -796,10 +789,7 @@ namespace lwsf { namespace internal { namespace backend
       primary{},
       refresh_error(),
       lookahead_error(default_subaddr_state),
-<<<<<<< Updated upstream
-=======
       import_error(),
->>>>>>> Stashed changes
       last_sync(),
       blockchain_height(0),
       per_byte_fee(0),
@@ -888,17 +878,12 @@ namespace lwsf { namespace internal { namespace backend
     boost::unique_lock<boost::mutex> lock{sync};
     {
       passed_login = false;
-<<<<<<< Updated upstream
-      server_lookahead = 0;
-      lookahead_error = {error::subaddr_disabled};
-=======
       blockchain_height = 0;
       per_byte_fee = 0;
       fee_mask = 0;  
       server_lookahead = 0;
       import_error = {};
       lookahead_error = error::subaddr_disabled;
->>>>>>> Stashed changes
       const rpc::login_request login{
         primary.address, primary.view.sec, true, primary.generated_locally
       };
@@ -998,10 +983,6 @@ namespace lwsf { namespace internal { namespace backend
       if (failed_login)
       {
         lock.lock();
-<<<<<<< Updated upstream
-        last_sync = now;
-=======
->>>>>>> Stashed changes
         return refresh_error = failed_login;
       }
     }
@@ -1261,13 +1242,9 @@ namespace lwsf { namespace internal { namespace backend
   {
     boost::unique_lock<boost::mutex> lock{sync};
 
-<<<<<<< Updated upstream
-    if (primary.requested_start < height)
-=======
     if (primary.restore_height <= height)
       return import_error = {};
     if (import_error && import_error == error::import_pending)
->>>>>>> Stashed changes
       return import_error;
 
     if (!passed_login)
@@ -1300,11 +1277,8 @@ namespace lwsf { namespace internal { namespace backend
       case 0:
         return import_error = error::import_pending;
       case 1:
-<<<<<<< Updated upstream
-=======
         if (import->import_fee.value_or(rpc::uint64_string(0)) == rpc::uint64_string(0))
           return import_error = error::import_pending;
->>>>>>> Stashed changes
         return import_error = error::import_invalid;
       case 2:
         break;
@@ -1339,8 +1313,6 @@ namespace lwsf { namespace internal { namespace backend
       primary.addressbook[i] = address_book_entry{std::move(*import->payment_address), std::move(payment_id), std::move(description)};
 
     return import_error = {};
-<<<<<<< Updated upstream
-=======
   }
 
   expect<std::vector<rpc::random_outputs>> wallet::get_decoys(const rpc::get_random_outs_request& req)
@@ -1349,7 +1321,6 @@ namespace lwsf { namespace internal { namespace backend
     if (!resp)
       return resp.error();
     return {std::move(resp->amount_outs)};
->>>>>>> Stashed changes
   }
 
   std::error_code wallet::send_tx(epee::byte_slice tx_bytes)

@@ -55,8 +55,6 @@ namespace lwsf
       return "server has subaddresses disabled";
     case error::subaddr_local:
       return "lwsf (local) limits on subaddresses too small";
-<<<<<<< Updated upstream
-=======
     case error::tx_critical:
       return "Tx construction had critical error";
     case error::tx_decoys:
@@ -77,7 +75,6 @@ namespace lwsf
       return "Tx construction sweep with multiple destinations";
     case error::tx_two_pid:
       return "Tx construction given two payment ids";
->>>>>>> Stashed changes
     case error::unexpected_userinfo:
       return "Unexpected user+pass field in URL";
 

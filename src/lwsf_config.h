@@ -40,10 +40,7 @@ namespace lwsf { namespace config
     std::uint32_t minor = 0;
   };
 
-<<<<<<< Updated upstream
-=======
   constexpr const std::size_t bulletproof_version = 4;
->>>>>>> Stashed changes
   constexpr const std::chrono::seconds connect_timeout{5};
   constexpr const std::chrono::seconds daemon_status_cache{10};
   constexpr const std::string_view default_account_name{"Untitled account"};
