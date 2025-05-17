@@ -32,22 +32,28 @@
 #include <memory>
 #include <string>
 #include <system_error>
+#include <utility>
+#include <vector>
+#include "common/expect.h"                     // monero/src
 #include "cryptonote_basic/cryptonote_basic.h" // monero/src
 #include "wallet/api/wallet2_api.h"            // moneor/src
 
 namespace lwsf { namespace internal
 {
-  namespace backend { struct wallet; }
+  namespace backend
+  {
+    struct transaction;
+    struct wallet;
+  }
 
   class pending_transaction final : public Monero::PendingTransaction
   {
     const std::shared_ptr<backend::wallet> wallet_; 
-    const cryptonote::transaction source_;
     std::error_code error_;
-    const Priority priority_;
+    const std::shared_ptr<backend::transaction> local_;
 
   public:
-    pending_transaction(std::shared_ptr<backend::wallet> wallet, cryptonote::transaction&& source, Priority priority); 
+    pending_transaction(std::shared_ptr<backend::wallet> wallet, expect<cryptonote::transaction> source, std::shared_ptr<backend::transaction> local = {}); 
 
     pending_transaction(pending_transaction&&) = delete;
     pending_transaction(const pending_transaction&) = delete;
@@ -57,16 +63,16 @@ namespace lwsf { namespace internal
     pending_transaction& operator=(pending_transaction&&) = delete;
     pending_transaction& operator=(const pending_transaction&) = delete;
 
-    virtual int status() const override final { return priority_; }
+    virtual int status() const override final;
     virtual std::string errorString() const override final;
     virtual bool commit(const std::string &filename = "", bool overwrite = false) override final;
-    virtual std::uint64_t amount() const = 0;
+    virtual std::uint64_t amount() const override final;
     virtual std::uint64_t dust() const override final { return 0; }
     virtual std::uint64_t fee() const override final;
     virtual std::vector<std::string> txid() const override final;
     virtual std::uint64_t txCount() const override final { return 1; }
-    virtual std::vector<uint32_t> subaddrAccount() const = 0;
-    virtual std::vector<std::set<uint32_t>> subaddrIndices() const = 0;
+    virtual std::vector<uint32_t> subaddrAccount() const override final { return {}; }
+    virtual std::vector<std::set<uint32_t>> subaddrIndices() const override final { return {}; }
 
     /**
      * @brief multisigSignData
@@ -84,12 +90,12 @@ namespace lwsf { namespace internal
      *              pendingTransaction->signMultisigTx();
      *              pendingTransaction->commit();
      */
-    virtual std::string multisigSignData() = 0;
-    virtual void signMultisigTx() = 0;
+    virtual std::string multisigSignData() override final { return {}; }
+    virtual void signMultisigTx() override final {}
     /**
      * @brief signersKeys
      * @return vector of base58-encoded signers' public keys
      */
-    virtual std::vector<std::string> signersKeys() const = 0;
+    virtual std::vector<std::string> signersKeys() const override final { return {}; }
   };
 }} // lwsf // internal

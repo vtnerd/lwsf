@@ -119,13 +119,6 @@ namespace lwsf { namespace internal
             balance.unlocked += receive.second.amount;
         }
 
-        if (!tx.second->spends.empty())
-        {
-          auto& balance = balances[tx.second->spends.begin()->second.sender.maj_i];
-          balance.unlocked -= tx.second->fee;
-          balance.total -= tx.second->fee;
-        }
-
         for (const auto& spend : tx.second->spends)
         {
           auto& balance = balances[spend.second.sender.maj_i];

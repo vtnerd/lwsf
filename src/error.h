@@ -45,6 +45,19 @@ namespace lwsf
     subaddr_ahead,      //!< Server limits on subaddresses affects lookahead
     subaddr_disabled,   //!< Server has subaddresses disabled
     subaddr_local,      //!< Local limits on subaddresses too small
+<<<<<<< Updated upstream
+=======
+    tx_critical,        //!< Tx creation had critical error
+    tx_decoys,          //!< Tx creation failed due to invalid decoy response
+    tx_extra,           //!< Tx creation failed to generate tx extra
+    tx_failed,          //!< Tx creation failed (contruct_tx failure)
+    tx_invalid_address, //!< Tx creation was given invalid address
+    tx_long_pid,        //!< Tx creation with long payment_id (deprecated)
+    tx_low_funds,       //!< Tx creation failed due to insufficient funds
+    tx_size_mismatch,   //!< Tx creation mismatch on amounts and destinations
+    tx_two_pid,         //!< Tx creation given two payment ids
+    tx_sweep,           //!< Tx creation requested sweep to multiple dests
+>>>>>>> Stashed changes
     unexpected_userinfo,//!< Unexpected user+pass provided
   };
 

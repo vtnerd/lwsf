@@ -48,6 +48,7 @@
 #include "crypto/crypto.h"     // monero/src
 #include "crypto/hash.h"       // monero/src
 #include "cryptonote_config.h" // monero/src
+#include "cryptonote_basic/account.h" // monero/src
 #include "lwsf_config.h"
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "ringct/rctTypes.h"   // monero/src
@@ -152,6 +153,10 @@ namespace lwsf { namespace internal { namespace backend
     transfer_out()
       : address(), amount(0), secret{}
     {}
+
+    transfer_out(std::string address, const std::uint64_t amount)
+      : address(std::move(address)), amount(amount), secret{}
+    {}
   };
   WIRE_DECLARE_OBJECT(transfer_out);
 
@@ -160,20 +165,20 @@ namespace lwsf { namespace internal { namespace backend
     transaction();
     
     transaction(transaction&&) = default;
-    transaction(const transaction&) = default;
+    transaction(const transaction& rhs);
     transaction& operator=(transaction&&) = default;
-    transaction& operator=(const transaction&) = default;
 
     bool is_unlocked(std::uint64_t chain_height, Monero::NetworkType type) const;
 
     /*! flat_map is used here for faster copies/merging. A single allocation
       is needed in the copy (done every refresh interval), instead of an
       allocation per key. */
+    epee::byte_slice raw_bytes; // for sends held for 100 confirmations
     boost::container::flat_map<crypto::key_image, transfer_spend, memory> spends;
     boost::container::flat_map<crypto::public_key, transfer_in, memory> receives; //!< Key is output pub
     std::vector<transfer_out> transfers;
     std::string description;
-    std::optional<std::time_t> timestamp;
+    std::optional<std::chrono::system_clock::time_point> timestamp; //!< guaranteed to be unix epoch in C++20
     std::optional<std::uint64_t> height;
     std::uint64_t amount;
     std::uint64_t fee;
@@ -237,10 +242,21 @@ namespace lwsf { namespace internal { namespace backend
 
     wallet();
 
+    // `sync` mutex is NOT acquired for this group
+
     cryptonote::network_type get_net_type() const;
     crypto::public_key get_spend_public(const rpc::address_meta& index) const;
+    cryptonote::account_keys get_primary_keys() const;
+    cryptonote::account_public_address get_spend_account(const rpc::address_meta& index) const;
     std::string get_spend_address(const rpc::address_meta& index) const;
 
+<<<<<<< Updated upstream
+=======
+    // End GROUP
+
+    // `sync` mutex IS acquired for this group (until end). Do not hold this mutex
+
+>>>>>>> Stashed changes
     //! Serialize `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
 
@@ -266,6 +282,7 @@ namespace lwsf { namespace internal { namespace backend
 
     std::error_code restore_height(const std::uint64_t height);
 
+    expect<std::vector<rpc::random_outputs>> get_decoys(const rpc::get_random_outs_request& req);
     std::error_code send_tx(epee::byte_slice tx_bytes);
   };
 }}} // lwsf // internal // backend

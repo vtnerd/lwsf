@@ -1,21 +1,21 @@
 // Copyright (c) 2014-2024, The Monero Project
-// 
+//
 // All rights reserved.
-// 
+//
 // Redistribution and use in source and binary forms, with or without modification, are
 // permitted provided that the following conditions are met:
-// 
+//
 // 1. Redistributions of source code must retain the above copyright notice, this list of
 //    conditions and the following disclaimer.
-// 
+//
 // 2. Redistributions in binary form must reproduce the above copyright notice, this list
 //    of conditions and the following disclaimer in the documentation and/or other
 //    materials provided with the distribution.
-// 
+//
 // 3. Neither the name of the copyright holder nor the names of its contributors may be
 //    used to endorse or promote products derived from this software without specific
 //    prior written permission.
-// 
+//
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
 // MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -43,6 +43,7 @@
 #include "address_book.h"
 #include "backend.h"
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
+#include "cryptonote_core/cryptonote_tx_utils.h"      // monero/src
 #include "error.h"
 #include "hex.h" // monero/contrib/epee/include
 #include "lwsf_config.h"
@@ -51,6 +52,7 @@
 #include "net/parse.h"         // monero/src
 #include "net/socks.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
+#include "pending_transaction.h"
 #include "subaddress_account.h"
 #include "subaddress_minor.h"
 #include "transaction_history.h"
@@ -58,8 +60,7 @@
 #include "wire/msgpack.h"
 
 namespace lwsf { namespace internal
-{
-  
+{ 
   namespace
   {
     //! The stored wallet file always has this at beginning
@@ -75,6 +76,94 @@ namespace lwsf { namespace internal
         );
       }
     };
+
+    std::uint64_t calculate_fee_from_weight(const std::uint64_t base_fee, const std::uint64_t weight, const std::uint64_t fee_quantization_mask)
+    {
+      uint64_t fee = weight * base_fee;
+      fee = (fee + fee_quantization_mask - 1) / fee_quantization_mask * fee_quantization_mask;
+      return fee;
+    }
+
+    std::size_t estimate_rct_tx_size(const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size)
+    {
+      std::size_t size = 0;
+
+      // tx prefix
+
+      // first few bytes
+      size += 1 + 6;
+
+      // vin
+      size += n_inputs * (1+6+(mixin+1)*2+32);
+
+      // vout
+      size += n_outputs * (6+32);
+
+      // extra
+      size += extra_size;
+
+      // rct signatures
+
+      // type
+      size += 1;
+
+      // rangeSigs
+      //if (bulletproof || bulletproof_plus)
+      {
+        std::size_t log_padded_outputs = 0;
+        while ((1<<log_padded_outputs) < n_outputs)
+          ++log_padded_outputs;
+        size += (2 * (6 + log_padded_outputs) + /*(bulletproof_plus ? */ 6 /* : (4 + 5))*/) * 32 + 3;
+      }
+      //else
+      //  size += (2*64*32+32+64*32) * n_outputs;
+
+      // MGs/CLSAGs
+      //if (clsag)
+        size += n_inputs * (32 * (mixin+1) + 64);
+      //else
+      //  size += n_inputs * (64 * (mixin+1) + 32);
+
+      //if (use_view_tags)
+        size += n_outputs * sizeof(crypto::view_tag);
+
+      // mixRing - not serialized, can be reconstructed
+      /* size += 2 * 32 * (mixin+1) * n_inputs; */
+
+      // pseudoOuts
+      size += 32 * n_inputs;
+      // ecdhInfo
+      size += 8 * n_outputs;
+      // outPk - only commitment is saved
+      size += 32 * n_outputs;
+      // txnFee
+      size += 4;
+
+      return size;
+    }
+
+    std::uint64_t estimate_tx_weight(const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size)
+    {
+      size_t size = estimate_rct_tx_size(n_inputs, n_outputs, mixin, extra_size);
+      if (/*use_rct && (bulletproof || bulletproof_plus) && */n_outputs > 2)
+      {
+        const uint64_t bp_base = (32 * (/*(bulletproof_plus ?*/ 6 /* : 9)*/ + 7 * 2)) / 2; // notional size of a 2 output proof, normalized to 1 proof (ie, divided by 2)
+        size_t log_padded_outputs = 2;
+        while ((1<<log_padded_outputs) < n_outputs)
+          ++log_padded_outputs;
+        uint64_t nlr = 2 * (6 + log_padded_outputs);
+        const uint64_t bp_size = 32 * (/*(bulletproof_plus ? */ 6 /* : 9)*/ + nlr);
+        const uint64_t bp_clawback = (bp_base * (1<<log_padded_outputs) - bp_size) * 4 / 5;
+        MDEBUG("clawback on size " << size << ": " << bp_clawback);
+        size += bp_clawback;
+      }
+      return size;
+    }
+
+    std::uint64_t estimate_fee(const std::uint64_t base_fee, const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size, const std::uint64_t fee_mask)
+    {
+      return calculate_fee_from_weight(base_fee, estimate_tx_weight(n_inputs, n_outputs, mixin, extra_size), fee_mask);
+    }
 
     struct encrypted_file
     {
@@ -132,7 +221,7 @@ namespace lwsf { namespace internal
       static constexpr std::size_t nonce_size() noexcept
       {
         return crypto_aead_chacha20poly1305_ietf_NPUBBYTES;
-      } 
+      }
       static epee::byte_slice get_nonce() { return get_random(nonce_size()); }
 
       //! \pre `sodium_init()` has been called
@@ -168,7 +257,7 @@ namespace lwsf { namespace internal
           get_nonce(),
           nullptr,
           std::max(iterations, ops_min()),
-          memory_limit() 
+          memory_limit()
         };
 
         const auto key = out.get_key(password);
@@ -210,7 +299,7 @@ namespace lwsf { namespace internal
 
         const auto key = get_key(password);
         static_assert(key_size() == key.size());
-                
+
         epee::byte_stream buffer;
         buffer.put_n(0, epayload.size());
 
@@ -279,7 +368,7 @@ namespace lwsf { namespace internal
       return nullptr;
     }
 
-#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))           
+#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
     bool atomic_file_write(const std::filesystem::path& filename, const std::filesystem::path& directory, epee::byte_slice contents) noexcept
     {
       const int fd =
@@ -388,7 +477,7 @@ namespace lwsf { namespace internal
   {
     struct set_stop_
     {
-      void operator()(state* val) const noexcept 
+      void operator()(state* val) const noexcept
       {
          if (val)
           *val = state::stop;
@@ -413,7 +502,7 @@ namespace lwsf { namespace internal
 
         const bool mandatory_refresh = mandatory_refresh_;
         mandatory_refresh_ = false;
-  
+
         const auto now = std::chrono::steady_clock::now();
         if (mandatory_refresh_ || (refresh_interval_ <= now - last_refresh && thread_state_ == state::run))
         {
@@ -424,12 +513,12 @@ namespace lwsf { namespace internal
           lock.lock();
         }
         else if (thread_state_ == state::skip_once)
-          thread_state_ = state::run;        
+          thread_state_ = state::run;
 
         // check while holding lock and before a wait call
         if (thread_state_ == state::stop)
           return;
-        
+
         const auto last_state = thread_state_;
         refresh_notify_.wait_for(
           lock, to_boost(refresh_interval_), [this, last_state] () {
@@ -441,7 +530,7 @@ namespace lwsf { namespace internal
     {
       set_critical(e);
     }
-    catch (...) 
+    catch (...)
     {
       set_critical(unknown_exception{});
     }
@@ -475,7 +564,7 @@ namespace lwsf { namespace internal
     std::filesystem::path work_dir(path);
     if(!std::filesystem::is_directory(path))
         return out;
- 
+
     std::filesystem::recursive_directory_iterator end_itr;
     for (std::filesystem::recursive_directory_iterator itr(path); itr != end_itr; ++itr)
     {
@@ -494,7 +583,7 @@ namespace lwsf { namespace internal
       addressbook_(),
       history_(),
       subaddresses_(),
-      subaddress_minor_(), 
+      subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
       work_queue_(),
@@ -602,11 +691,11 @@ namespace lwsf { namespace internal
       exception_error_ = "Electrum-style word list failed verification";
       return;
     }
-      
+
     if (!seed_offset.empty())
       recovery = cryptonote::decrypt_key(recovery, seed_offset);
 
-    init_wallet(*data_, recovery, nettype, false); 
+    init_wallet(*data_, recovery, nettype, false);
   }
 
 
@@ -660,11 +749,11 @@ namespace lwsf { namespace internal
       exception_error_ = "spend_pub could not be computed";
       return;
     }
-    
+
     if (data_->get_spend_address({0, 0}) != address_string)
       exception_error_ = "view_key, spend_key, and address_string do not match";
   }
- 
+
   wallet::~wallet() { stop_refresh_loop(); }
 
   void wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
@@ -716,7 +805,7 @@ namespace lwsf { namespace internal
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     return data_->primary.language;
   }
- 
+
   void wallet::setSeedLanguage(const std::string &arg)
   {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
@@ -758,7 +847,7 @@ namespace lwsf { namespace internal
       errorString.clear();
     }
   }
-  
+
   bool wallet::setPassword(const std::string &password)
   {
     password_ = password;
@@ -891,7 +980,7 @@ namespace lwsf { namespace internal
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     return data_->primary.restore_height;
   }
-   
+
   void wallet::setSubaddressLookahead(uint32_t major, uint32_t minor)
   {
     queue_work([this, major, minor] () { return data_->set_lookahead(major, minor); });
@@ -956,9 +1045,6 @@ namespace lwsf { namespace internal
           balance += receive.second.amount;
       }
 
-      if (!tx.second->spends.empty() && tx.second->spends.begin()->second.sender.maj_i == accountIndex)
-        balance -= tx.second->fee;
-
       for (const auto& spend : tx.second->spends)
       {
         if (spend.second.sender.maj_i == accountIndex)
@@ -970,7 +1056,7 @@ namespace lwsf { namespace internal
   }
 
   uint64_t wallet::unlockedBalance(const uint32_t accountIndex) const
-  { 
+  {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     const Monero::NetworkType net_type = data_->primary.type;
     const std::uint32_t chain_height = data_->blockchain_height;
@@ -987,9 +1073,6 @@ namespace lwsf { namespace internal
         if (unlocked && receive.second.recipient.maj_i == accountIndex)
           balance += receive.second.amount;
       }
-
-      if (!tx.second->spends.empty() && tx.second->spends.begin()->second.sender.maj_i == accountIndex)
-        balance -= tx.second->fee;
 
       for (const auto& spend : tx.second->spends)
       {
@@ -1010,14 +1093,14 @@ namespace lwsf { namespace internal
   uint64_t wallet::daemonBlockChainHeight() const
   {
     const boost::unique_lock<boost::mutex> lock{data_->sync};
-    return data_->blockchain_height; 
+    return data_->blockchain_height;
   }
 
   uint64_t wallet::daemonBlockChainTargetHeight() const
   { return daemonBlockChainHeight(); }
 
   bool wallet::synchronized() const
-  { 
+  {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     return data_->blockchain_height == data_->primary.scan_height;
   }
@@ -1025,8 +1108,10 @@ namespace lwsf { namespace internal
   void wallet::startRefresh()
   {
     const boost::lock_guard<boost::mutex> lock{thread_sync_};
+    state old_state = state::stop;
     {
       const boost::lock_guard<boost::mutex> lock2{refresh_sync_};
+      old_state = thread_state_;
       const bool no_refresh =
         refresh_interval_ <= std::chrono::milliseconds{0};
       if (no_refresh)
@@ -1035,17 +1120,17 @@ namespace lwsf { namespace internal
         if (!mandatory_refresh_ && work_queue_.empty())
           return;
       }
-
-      const state old_state = thread_state_;
-      thread_state_ = no_refresh ? state::stop : state::run;
-      if (old_state == state::stop)
-      {
-        if (thread_.joinable())
-          thread_.join();
-        thread_ = boost::thread{[this] () { this->refresh_loop(); }};
-      }
+      else
+        thread_state_ = state::run;
     }
     refresh_notify_.notify_all();
+
+    if (old_state == state::stop)
+    {
+      if (thread_.joinable())
+        thread_.join();
+      thread_ = boost::thread{[this] () { this->refresh_loop(); }};
+    }
   }
 
   void wallet::pauseRefresh()
@@ -1149,6 +1234,472 @@ namespace lwsf { namespace internal
     set_critical(std::runtime_error{"setSubaddressLabel failed, " + std::to_string(accountIndex) + "," + std::to_string(addressIndex) + " does not exist"});
   }
 
+  Monero::PendingTransaction* wallet::createTransactionMultDest(const std::vector<std::string> &dst_addr, const std::string &payment_id,
+                                                   Monero::optional<std::vector<uint64_t>> amount, uint32_t mixin_count,
+                                                   Monero::PendingTransaction::Priority priority,
+                                                   uint32_t subaddr_account,
+                                                   std::set<uint32_t> subaddr_indices)
+  {
+    if (!mixin_count)
+      mixin_count = mixin_;
+
+    std::unique_ptr<internal::pending_transaction> out;
+    const auto tx_error = [this] (std::error_code error)
+    {
+      return std::make_unique<internal::pending_transaction>(data_, std::move(error));
+    };
+
+    try
+    {
+      /* This design is funky, but guards against exceptions in destructors
+      of stack elements. Everything on the stack (except for arguments) is
+      cleaned up before the uniue_ptr is released. */
+      out = [&, this] ()
+        {
+          if (!amount && dst_addr.size() > 1)
+            return tx_error(error::tx_sweep);
+          if (amount && amount->size() != dst_addr.size())
+            return tx_error(error::tx_size_mismatch);
+          if (!payment_id.empty())
+            return tx_error(error::tx_long_pid);
+
+          cryptonote::network_type ctype{};
+          Monero::NetworkType mtype{};
+          std::uint64_t per_byte_fee = 0;
+          std::uint64_t fee_mask = 0;
+          std::string change_address;
+          cryptonote::account_keys keys{};
+          cryptonote::account_public_address change_account{};
+          std::unordered_map<crypto::public_key, std::pair<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<const backend::transaction>>> unspent;
+          {
+            data_->refresh(); // get latest outputs, block height, and fee info
+
+            const boost::lock_guard<boost::mutex> lock{data_->sync};
+            per_byte_fee = data_->per_byte_fee;
+            fee_mask = data_->fee_mask;
+
+            if (!per_byte_fee || !fee_mask || !data_->passed_login)
+              return tx_error(data_->refresh_error);
+
+            mtype = data_->primary.type;
+            ctype = data_->get_net_type();
+            change_address = data_->get_spend_address({subaddr_account, 0});
+            keys = data_->get_primary_keys();
+            change_account = data_->get_spend_account({subaddr_account, 0});
+            const std::uint64_t height = data_->blockchain_height;
+
+            if (!amount && subaddr_indices.empty())
+            {
+              const std::uint32_t max = data_->primary.subaccounts.at(subaddr_account).last;
+              for (std::uint64_t index = 0; index <= max; ++index)
+                subaddr_indices.insert(std::uint32_t(index));
+            }
+
+            for (const auto& tx : data_->primary.txes)
+            {
+              if (!tx.second->is_unlocked(height, mtype))
+                continue; // ignore locked amounts
+
+              for (const auto& receive : tx.second->receives)
+              {
+                /* Subtract by max for map below - that map will sort by amount
+                then reverse global index. This will have a bias towards newer
+                outputs, which is standard behavior. */
+                static constexpr std::uint64_t max =
+                  std::numeric_limits<std::uint64_t>::max();
+                const std::uint64_t amount = receive.second.amount;
+                const rpc::address_meta source = receive.second.recipient;
+                if (amount && source.maj_i == subaddr_account && (subaddr_indices.empty() || subaddr_indices.count(source.min_i)))
+                  unspent.try_emplace(receive.first).first->second = {{amount, max - receive.second.global_index}, tx.second};
+              }
+            }
+
+            for (const auto& tx : data_->primary.txes)
+            {
+              for (const auto& spend : tx.second->spends)
+                unspent.erase(spend.second.output_pub);
+            }
+          }
+
+          // actually sorted by amount then reverse index (see comment above)
+          std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> unspent_by_amount_then_index;
+          for (const auto& tx : unspent)
+            unspent_by_amount_then_index.try_emplace(tx.second.first).first->second = {tx.first, tx.second.second};
+          unspent.clear(); // free up some memory
+
+          const bool subtract_from_dest = !amount;
+          if (subtract_from_dest)
+          {
+            std::uint64_t total_unspent = 0;
+            for (const auto& tx : unspent)
+            {
+              const auto output = tx.second.second->receives.find(tx.first);
+              if (output == tx.second.second->receives.end())
+                throw std::logic_error{"Expected output pub"};
+              total_unspent += output->second.amount;
+            }
+            amount = std::vector<std::uint64_t>{total_unspent};
+          }
+
+          if (amount->size() < dst_addr.size())
+            throw std::logic_error{"Sanity check failed: address vec <= amount vec"};
+
+          std::string extra_nonce;
+          std::vector<cryptonote::tx_destination_entry> dests;
+          std::multiset<std::pair<std::uint64_t, std::string>> transfers;
+          for (std::size_t i = 0; i < dst_addr.size(); ++i)
+          {
+            cryptonote::address_parse_info info{};
+            if (!cryptonote::get_account_address_from_str(info, ctype, dst_addr.at(i)))
+              return tx_error(error::tx_invalid_address);
+
+            if (info.has_payment_id)
+            {
+              if (!extra_nonce.empty())
+                return tx_error(error::tx_two_pid);
+              cryptonote::set_encrypted_payment_id_to_tx_extra_nonce(extra_nonce, info.payment_id);
+            }
+
+            transfers.insert({amount->at(i), dst_addr.at(i)});
+
+            auto& dest = dests.emplace_back();
+            dest.original = dst_addr.at(i);
+            dest.addr = info.address;
+            dest.amount = amount->at(i);
+            dest.is_subaddress = info.is_subaddress;
+            dest.is_integrated = info.has_payment_id;
+          }
+
+          for (std::size_t i = dst_addr.size(); i < amount->size(); ++i)
+          {
+            auto& dest = dests.emplace_back();
+            dest.original = change_address;
+            dest.addr = change_account;
+            dest.amount = amount->at(i);
+            dest.is_subaddress = subaddr_account;
+            dest.is_integrated = false;
+          }
+
+          std::vector<std::uint8_t> extra;
+          if (!extra_nonce.empty() && !cryptonote::add_extra_nonce_to_tx_extra(extra, extra_nonce))
+            return tx_error(error::tx_extra);
+
+          std::vector<std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> spending;
+          {
+            std::uint64_t fee = 0;
+            std::uint64_t remaining =
+              std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
+
+            while (bool(remaining + fee))
+            {
+              if (unspent_by_amount_then_index.empty())
+              {
+                if (subtract_from_dest && !remaining)
+                  break;
+                return tx_error(error::tx_low_funds);
+              }
+
+              /* Check if we can omit change address for more efficiency. We
+                must have at least 2 outputs for uniformity/privacy. */
+              if (1 < dests.size())
+              {
+                fee = estimate_fee(per_byte_fee, spending.size() + 1, dests.size(), mixin_count, extra.size(), fee_mask);
+                const std::uint64_t needed = remaining + fee;
+                const auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
+                if (output != unspent_by_amount_then_index.end() && needed == output->first.first)
+                {
+                  remaining = 0;
+                  break;
+                }
+              }
+
+              // check
+              fee = estimate_fee(per_byte_fee, spending.size() + 1, dests.size() + 1, mixin_count, extra.size(), fee_mask);
+
+              const std::uint64_t needed = remaining + fee;
+              auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
+              if (output == unspent_by_amount_then_index.end())
+                --output;
+
+              const std::uint64_t this_amount = output->first.first;
+              const bool complete = needed <= this_amount;
+              spending.emplace_back(output->second.first, output->second.second);
+              unspent_by_amount_then_index.erase(output);
+
+              remaining -= this_amount;
+              if (complete)
+                break;
+            }
+
+            if (subtract_from_dest)
+            {
+              if (dests.size() != 1)
+                throw std::logic_error{"Sanity check: subtract_from_dest && dest.size() == 1"};
+              if (dests.back().amount < fee)
+                return tx_error(error::tx_low_funds);
+              dests.back().amount -= fee;
+              fee = 0;
+            }
+
+            const std::uint64_t change = (std::uint64_t(0) - remaining) - fee;
+            if (change || dests.size() == 1)
+            {
+              auto& change_dest = dests.emplace_back();
+              change_dest.original = change_address;
+              change_dest.addr = change_account;
+              change_dest.amount = change;
+              change_dest.is_subaddress = bool(subaddr_account);
+              change_dest.is_integrated = false;
+            }
+
+            if (dests.size() < config::minimum_outputs)
+              throw std::logic_error{"Sanity check: config::minium_outputs <= dests.size()"};
+
+            remaining = 0;
+            for (const auto& source : spending)
+            {
+              const auto output = source.second->receives.find(source.first);
+              if (output == source.second->receives.end())
+                throw std::logic_error{"Failed sanity check: source output does not exist"};
+              remaining += output->second.amount;
+            }
+
+            for (const auto& dest : dests)
+              remaining -= dest.amount;
+
+            if (fee != remaining)
+              throw std::logic_error{"Sanity check: inputs.amounts == outputs.amounts + fee"};
+          }
+          unspent_by_amount_then_index.clear(); // free some memory
+
+          const auto rct_amount = [] (const backend::transfer_in& source)
+          {
+            return source.rct_mask ? 0 : source.amount;
+          };
+
+          std::vector<rpc::random_outputs> decoys;
+          {
+            rpc::get_random_outs_request req{};
+            req.count = mixin_count;
+            for (const auto& spend : spending)
+              req.amounts.push_back(rpc::uint64_string(rct_amount(spend.second->receives.at(spend.first))));
+
+            auto resp = data_->get_decoys(req);
+            if (!resp)
+              return tx_error(resp.error());
+            decoys = std::move(*resp);
+          }
+
+          struct by_amount
+          {
+            bool operator()(const rpc::random_outputs& lhs, const rpc::random_outputs& rhs) const noexcept
+            {
+              return lhs.amount < rhs.amount;
+            }
+            bool operator()(const rpc::random_outputs& lhs, const std::uint64_t rhs) const noexcept
+            {
+              return lhs.amount < rpc::uint64_string(rhs);
+            }
+          };
+          std::sort(decoys.begin(), decoys.end(), by_amount{});
+
+          std::unordered_map<crypto::public_key, cryptonote::subaddress_index> subs;
+          std::vector<cryptonote::tx_source_entry> sources;
+          for (const auto& spend : spending)
+          {
+            const auto& source = spend.second->receives.at(spend.first);
+            {
+              const boost::lock_guard<boost::mutex> lock{data_->sync};
+              subs.insert({data_->get_spend_public(source.recipient), {source.recipient.maj_i, source.recipient.min_i}});
+            }
+
+            auto& entry = sources.emplace_back();
+            if (source.rct_mask)
+              entry.outputs.emplace_back(source.global_index, rct::ctkey{rct::pk2rct(spend.first), rct::commit(source.amount, *source.rct_mask)});
+            else
+              entry.push_output(source.global_index, spend.first, source.amount);
+
+            {
+              const std::uint64_t amount = rct_amount(source);
+              const auto ring = std::lower_bound(decoys.begin(), decoys.end(), amount, by_amount{});
+              if (ring == decoys.end() || ring->amount != rpc::uint64_string(amount))
+                return tx_error(error::tx_decoys);
+
+              for (const auto& decoy : ring->outputs)
+                entry.outputs.emplace_back(std::uint64_t(decoy.global_index), rct::ctkey{decoy.public_key, decoy.rct});
+
+              decoys.erase(ring);
+            }
+
+            entry.real_output_in_tx_index = source.index;
+            entry.real_out_tx_key = source.tx_pub;
+            entry.amount = source.amount;
+            entry.rct = bool(source.rct_mask);
+            if (entry.rct)
+              entry.mask = *source.rct_mask;
+          }
+
+          const auto ring_sort = [] (const auto& lhs, const auto& rhs)
+          {
+            return lhs.first < rhs.first;
+          };
+          const auto ring_compare = [] (const auto& lhs, const auto& rhs)
+          {
+            return lhs.first == rhs.first;
+          };
+
+          std::shuffle(sources.begin(), sources.end(), crypto::random_device{});
+          std::shuffle(dests.begin(), dests.end(), crypto::random_device{}); 
+          for (auto& source : sources)
+          {
+            if (source.outputs.empty())
+              throw std::runtime_error{"Sanity check: ring is !empty"};
+
+            const std::uint64_t real_source = source.outputs.front().first;
+            std::sort(source.outputs.begin(), source.outputs.end(), ring_sort);
+            if (std::unique(source.outputs.begin(), source.outputs.end(), ring_compare) != source.outputs.end())
+              throw std::logic_error{"Sanity check: each ring destination is unique"};
+
+            for (std::size_t i = 0; i < source.outputs.size(); ++i)
+            {
+              if (source.outputs.at(i).first == real_source)
+              {
+                source.real_output = i;
+                break;
+              }
+            }
+          }
+
+          static constexpr const rct::RCTConfig config{
+            rct::RangeProofPaddedBulletproof, config::bulletproof_version
+          };
+
+          crypto::secret_key tx_key;
+          std::vector<crypto::secret_key> tx_keys;
+          cryptonote::transaction tx;
+          if (!cryptonote::construct_tx_and_get_tx_key(keys, subs, sources, dests, change_account, extra, tx, tx_key, tx_keys, true /* rct */, config, true /* view_tags */))
+            return tx_error(error::tx_failed); 
+
+          auto details = std::make_shared<backend::transaction>();
+          details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
+          details->timestamp = std::chrono::system_clock::now();
+          details->amount = std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
+          details->fee = get_tx_fee(tx);
+          details->direction = Monero::TransactionInfo::Direction_Out;
+          if (extra_nonce.size() == sizeof(crypto::hash8))
+          {
+            crypto::hash8 pid{};
+            std::memcpy(std::addressof(pid), extra_nonce.data(), sizeof(pid));
+            details->payment_id = pid;
+          }
+          get_transaction_hash(tx, details->id);
+          get_transaction_prefix_hash(tx, details->prefix);
+
+          if (sources.size() != tx.vin.size())
+            throw std::logic_error{"Sanity check: sources.size() == tx.vin.size()"};
+
+          for (std::size_t i = 0; i < sources.size(); ++i)
+          {
+            const auto& source = sources.at(i);
+            auto spend = details->spends.try_emplace(boost::get<cryptonote::txin_to_key>(tx.vin.at(i)).k_image).first;
+            spend->second.amount = source.amount;
+            spend->second.output_pub = rct2pk(source.outputs.at(source.real_output).second.dest);
+
+            const auto elem = std::find_if(spending.begin(), spending.end(), [&] (const auto& e) {
+              return e.first == spend->second.output_pub;
+            });
+            if (elem == spending.end())
+              throw std::logic_error{"Sanity check spend not found"};
+
+            const auto& base = elem->second->receives.at(spend->second.output_pub);
+            spend->second.sender = base.recipient;
+            spend->second.tx_pub = base.tx_pub;
+          }
+
+          if (dests.size() != tx.vout.size())
+            throw std::logic_error{"Sanity check: dests.size() == tx.vout.size()"};
+          if (dests.size() != tx.rct_signatures.ecdhInfo.size())
+            throw std::logic_error{"Sanity check: dests.size() == ecdhInfo.size()"};
+          if (!tx_keys.empty() && tx_keys.size() != dests.size())
+            throw std::logic_error{"Sanity check tx_keys.empty() || tx_keys.size() == dest.size()"};
+
+          struct get_output_pub
+          {
+            crypto::public_key operator()(const cryptonote::txout_to_script&) const noexcept { return {}; }
+            crypto::public_key operator()(const cryptonote::txout_to_scripthash&) const noexcept { return {}; }
+            crypto::public_key operator()(const cryptonote::txout_to_key& src) const noexcept { return src.key; }
+            crypto::public_key operator()(const cryptonote::txout_to_tagged_key& src) const noexcept { return src.key; }
+          };
+
+          for (std::size_t i = 0; i < dests.size(); ++i)
+          {
+            const auto& dest = dests.at(i);
+            if (dest.original != change_address)
+              continue;
+
+            auto receive = details->receives.try_emplace(
+              boost::apply_visitor(get_output_pub{}, tx.vout.at(i).target)
+            ).first;
+
+            receive->second.global_index = std::numeric_limits<std::uint64_t>::max();
+            receive->second.amount = dest.amount;
+            receive->second.recipient = {subaddr_account, 0};
+            receive->second.index = i;
+            receive->second.rct_mask = tx.rct_signatures.ecdhInfo.at(i).mask; 
+
+            if (tx_keys.empty())
+              crypto::secret_key_to_public_key(tx_key, receive->second.tx_pub);
+            else
+              crypto::secret_key_to_public_key(tx_keys.at(i), receive->second.tx_pub);
+          }
+
+          if (!tx_keys.empty())
+          {             
+            if (tx_keys.size() != dests.size())
+              throw std::logic_error{"Failed sanity check: tx_keys.size() == dests.size()"};
+
+            for (std::size_t i = 0; i < tx_keys.size(); ++i)
+            {
+              const auto& dest = dests.at(i);
+              const auto is_transfer = transfers.find({dest.amount, dest.original});
+              if (is_transfer == transfers.end())
+                continue;
+
+              details->transfers.emplace_back(dest.original, dest.amount).secret = tx_keys.at(i);
+              transfers.erase(is_transfer);
+            }
+
+            if (!transfers.empty())
+              throw std::logic_error{"Sanity check: missing secret key for outgoing transfer"};
+          }
+          else
+          {
+            for (auto& transfer : transfers)
+              details->transfers.emplace_back(transfer.second, transfer.first).secret = tx_key;
+            transfers.clear();
+          }
+
+          return std::make_unique<internal::pending_transaction>(data_, std::move(tx), std::move(details));
+        }();
+    }
+    catch (const std::exception & e)
+    {
+      set_critical(e);
+      out = tx_error(error::tx_critical);
+    }
+
+    return out.release();
+  }
+
+  Monero::PendingTransaction* wallet::createTransaction(const std::string &dst_addr, const std::string &payment_id,
+                                                   std::optional<uint64_t> amount, uint32_t mixin_count,
+                                                   Monero::PendingTransaction::Priority priority,
+                                                   uint32_t subaddr_account,
+                                                   std::set<uint32_t> subaddr_indices)
+  {
+    return createTransactionMultDest({dst_addr}, payment_id, amount ? std::optional<std::vector<uint64_t>>{{*amount}} : std::nullopt, mixin_count, priority, subaddr_account, subaddr_indices);
+  }
+
   void wallet::disposeTransaction(Monero::PendingTransaction * t)
   {
     delete t;
@@ -1159,12 +1710,12 @@ namespace lwsf { namespace internal
   {
     throw std::runtime_error{"Not Implemented yet"};
   }
-  
+
   bool wallet::exportKeyImages(const std::string &filename, bool all)
   {
     throw std::runtime_error{"exportKeyImages not implemented"};
   }
-   
+
   bool wallet::importKeyImages(const std::string &filename)
   {
     throw std::runtime_error{"importKeyImages not implemented"};
@@ -1204,7 +1755,7 @@ namespace lwsf { namespace internal
     if (!history_)
       history_ = std::make_unique<transaction_history>(data_);
     return history_.get();
-  } 
+  }
 
   Monero::SubaddressAccount* wallet::subaddressAccount()
   {

@@ -75,6 +75,15 @@ namespace lwsf { namespace internal
     update_transfers();
   }
 
+  std::uint64_t transaction_info::blockHeight() const
+  {
+    if (data_->height)
+      return *data_->height;
+    if (isFailed())
+      return 0;
+    return std::numeric_limits<std::uint64_t>::max();
+  }
+
   std::string transaction_info::description() const
   {
     const boost::lock_guard<boost::mutex> lock{wallet_->sync};
@@ -149,6 +158,15 @@ namespace lwsf { namespace internal
   std::string transaction_info::hash() const
   {
     return epee::to_hex::string(epee::as_byte_span(data_->id));
+  }
+
+  std::time_t transaction_info::timestamp() const 
+  {
+    if (data_->timestamp)
+      return std::chrono::system_clock::to_time_t(*data_->timestamp);
+    if (isFailed())
+      return std::numeric_limits<std::time_t>::min();
+    return std::numeric_limits<std::time_t>::max();
   }
 
   std::string transaction_info::paymentId() const

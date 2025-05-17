@@ -64,7 +64,7 @@ namespace lwsf { namespace internal
     virtual bool isCoinbase() const override { return data_->coinbase; }
     virtual std::uint64_t amount() const override { return data_->amount; }
     virtual std::uint64_t fee() const override { return data_->fee; }
-    virtual std::uint64_t blockHeight() const override { return data_->height.value_or(std::numeric_limits<std::uint64_t>::max()); }
+    virtual std::uint64_t blockHeight() const override;
     virtual std::string description() const override;
     virtual std::set<uint32_t> subaddrIndex() const override;
     virtual std::uint32_t subaddrAccount() const override;
@@ -72,7 +72,7 @@ namespace lwsf { namespace internal
     virtual std::uint64_t confirmations() const override;
     virtual std::uint64_t unlockTime() const override { return data_->unlock_time; }
     virtual std::string hash() const override;
-    virtual std::time_t timestamp() const override { return data_->timestamp.value_or(std::numeric_limits<std::time_t>::max()); }
+    virtual std::time_t timestamp() const override;
     virtual std::string paymentId() const override;
     virtual const std::vector<Transfer>& transfers() const override { return transfers_; }
   };

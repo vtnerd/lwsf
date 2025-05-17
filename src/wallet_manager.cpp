@@ -36,11 +36,13 @@
 #include <system_error>
 #include "backend.h"
 #include "common/dns_utils.h"  // monero/src
+#include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "lwsf_config.h"
 #include "lws_frontend.h"
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
+#include "QrCode.hpp"          // monero/src/external
 #include "rpc.h"
 #include "wallet.h"
 #include "wallet/api/wallet2_api.h" // monero/src
@@ -359,23 +361,10 @@ namespace lwsf
 
       std::string resolveOpenAlias(const std::string &address, bool &dnssec_valid) const override
       {
-        static constexpr const std::string_view prefix{"oa1:xmr "};
-        std::string real_address =
-          tools::DNSResolver::instance().get_dns_format_from_oa_address(address);
-
-        bool dnssec_available = false;
-        std::vector<std::string> records =
-          tools::DNSResolver::instance().get_txt_record(real_address, dnssec_available, dnssec_valid);
-        for (std::string_view record : records)
-        {
-          if (record.substr(0, prefix.size()) == prefix)
-          {
-            record = record.substr(prefix.size());
-            return std::string{record.data(), record.size()};
-          }
-        }
-
-        return {};
+        std::vector<std::string> addresses = tools::dns_utils::addresses_from_url(address, dnssec_valid);
+        if (addresses.empty())
+          return {};
+        return {std::move(addresses.front())};
       }
 
       //! checks for an update and returns version, hash and url
@@ -398,6 +387,49 @@ namespace lwsf
       }
     };
   } // internal
+
+  std::string displayAmount(std::uint64_t amount)
+  {
+    return cryptonote::print_money(amount);
+  }
+
+  std::uint64_t amountFromString(const std::string &amount)
+  {
+    std::uint64_t result = 0;
+    cryptonote::parse_amount(result, amount);
+    return result;
+  }
+
+  bool addressValid(const std::string &str, Monero::NetworkType nettype)
+  {
+    cryptonote::address_parse_info info;
+    return get_account_address_from_str(info, static_cast<cryptonote::network_type>(nettype), str);
+  }
+
+  std::vector<std::vector<std::uint8_t>> qrcode(Monero::Wallet const* const wal, const std::uint32_t major, const std::uint32_t minor)
+  {
+    if (!wal)
+      return {};
+
+    const std::string uri = "monero:" + wal->address(major, minor);
+    const qrcodegen::QrCode qr = qrcodegen::QrCode::encodeText(uri.c_str(), qrcodegen::QrCode::Ecc::LOW);
+    const int size = qr.getSize();
+    if (size < 0 || std::numeric_limits<std::size_t>::max() < size)
+      return {};
+
+    std::vector<std::vector<std::uint8_t>> out;
+    out.resize(size);
+    for (std::size_t y = 0; y < size; ++y)
+    {
+      auto& row = out.at(y);
+      row.resize(size);
+
+      for (std::size_t x = 0; x < size; ++x)
+        row.at(x) = qr.getModule(x, y);
+    }
+
+    return out;
+  }
 
   Monero::WalletManager* WalletManagerFactory::getWalletManager()
   {

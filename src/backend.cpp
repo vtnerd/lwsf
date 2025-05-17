@@ -28,6 +28,7 @@
 
 #include "backend.h"
 
+#include <boost/numeric/conversion/cast.hpp>
 #include <boost/thread/lock_guard.hpp>
 #include "crypto/crypto.h"     // monero/src
 #include "crypto/crypto-ops.h" // monero/src
@@ -212,14 +213,20 @@ namespace lwsf { namespace internal { namespace backend
     template<typename F, typename T>
     void map_transaction(F& format, T& self)
     {
-      //! TODO complete payment_id storage
+      // make timestamp storage as portable as possible
+      using time_point = std::chrono::system_clock::time_point;
+      std::optional<std::int64_t> timestamp;
+      if (self.timestamp)
+        timestamp = boost::numeric_cast<std::int64_t>(self.timestamp->time_since_epoch().count());
+
       auto payment_id = wire::variant(std::ref(self.payment_id));
       wire::object(format,
+        WIRE_FIELD(raw_bytes),
         wire::optional_field("spends", wire::trusted_array(std::ref(self.spends))),
         wire::optional_field("receives", wire::trusted_array(std::ref(self.receives))),
         wire::optional_field("transfers", wire::trusted_array(std::ref(self.transfers))),
         WIRE_FIELD(description),
-        WIRE_OPTIONAL_FIELD(timestamp),
+        wire::optional_field("timestamp", std::ref(timestamp)),
         WIRE_FIELD(amount),
         WIRE_FIELD(fee),
         WIRE_OPTIONAL_FIELD(height),
@@ -230,8 +237,16 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_OPTION("payment_id32", crypto::hash, payment_id),
         WIRE_FIELD(id),
         WIRE_FIELD(prefix),
-        WIRE_FIELD(coinbase)
+        WIRE_FIELD(coinbase),
+        WIRE_FIELD_DEFAULTED(failed, false)
       );
+
+      if constexpr (!std::is_const<T>())
+      {
+        self.timestamp = std::nullopt;
+        if (timestamp)
+          self.timestamp = time_point{time_point::duration{boost::numeric_cast<time_point::rep>(*timestamp)}};
+      }
     }
   } // anonymous
 
@@ -268,6 +283,10 @@ namespace lwsf { namespace internal { namespace backend
         wire::optional_field("attributes", wire::trusted_array(std::ref(self.attributes))),
         WIRE_FIELD(scan_height),
         WIRE_FIELD(restore_height),
+<<<<<<< Updated upstream
+=======
+        WIRE_FIELD(requested_start),
+>>>>>>> Stashed changes
         WIRE_FIELD_DEFAULTED(lookahead, config::default_lookahead),
         WIRE_FIELD_DEFAULTED(type, Monero::MAINNET),
         WIRE_FIELD(view),
@@ -318,11 +337,12 @@ namespace lwsf { namespace internal { namespace backend
       return out.recipient;
     }
 
-    rpc::address_meta update_spend(transfer_spend& out, const rpc::transaction_spend& source)
+    rpc::address_meta update_spend(transfer_spend& out, const rpc::transaction_spend& source, const crypto::public_key& output_pub)
     {
       out.amount = std::uint64_t(source.amount);
       out.sender = source.sender.value_or(rpc::address_meta{});
       out.tx_pub = source.tx_pub_key;
+      out.output_pub = output_pub;
       return out.sender;
     }
 
@@ -357,7 +377,10 @@ namespace lwsf { namespace internal { namespace backend
       std::vector<rpc::address_meta> meta;
 
       out.id = source.hash;
-      out.timestamp = source.timestamp;
+      if (source.timestamp)
+        out.timestamp = std::chrono::system_clock::from_time_t(*source.timestamp);
+      else
+        out.timestamp = std::nullopt;
       out.fee = std::uint64_t(source.fee.value_or(rpc::uint64_string(0)));
       out.height = source.height;
       out.unlock_time = source.unlock_time;
@@ -382,7 +405,7 @@ namespace lwsf { namespace internal { namespace backend
         {
           /* Frontend will typically know about spend before backend. So only
             merge and never erase spends. */
-          const rpc::address_meta sub = update_spend(out.spends.try_emplace(image).first->second, spend);
+          const rpc::address_meta sub = update_spend(out.spends.try_emplace(image).first->second, spend, output_pub);
           if (need_expansion(self, sub))
             meta.push_back(sub);
           total_spent += std::uint64_t(spend.amount);
@@ -484,7 +507,10 @@ namespace lwsf { namespace internal { namespace backend
               if (!rescanning)
               {
                 iter->second->height = std::nullopt;
+<<<<<<< Updated upstream
                 iter->second->timestamp = std::nullopt;
+=======
+>>>>>>> Stashed changes
                 iter->second->failed = false;
               }
             }
@@ -716,7 +742,8 @@ namespace lwsf { namespace internal { namespace backend
   }
 
   transaction::transaction()
-    : spends(),
+    : raw_bytes(),
+      spends(),
       receives(),
       transfers(),
       description(),
@@ -733,15 +760,33 @@ namespace lwsf { namespace internal { namespace backend
       failed(false)
   {}
 
+  transaction::transaction(const transaction& rhs)
+    : raw_bytes(rhs.raw_bytes.clone()), // required because of this
+      spends(rhs.spends),
+      receives(rhs.receives),
+      transfers(rhs.transfers),
+      description(rhs.description),
+      timestamp(rhs.timestamp),
+      height(rhs.height),
+      amount(rhs.amount),
+      fee(rhs.fee),
+      unlock_time(rhs.unlock_time),
+      direction(rhs.direction),
+      payment_id(rhs.payment_id),
+      id(rhs.id),
+      prefix(rhs.prefix),
+      coinbase(rhs.coinbase),
+      failed(rhs.failed)
+  {}
+
   bool transaction::is_unlocked(const std::uint64_t chain_height, const Monero::NetworkType type) const
   {
-    const std::uint64_t the_height = height.value_or(std::numeric_limits<std::uint64_t>::max());
-    if(!is_tx_spendtime_unlocked(chain_height, unlock_time, the_height, type))
+    if (!height)
       return false;
-
-    if(the_height + CRYPTONOTE_DEFAULT_TX_SPENDABLE_AGE > chain_height)
+    if(!is_tx_spendtime_unlocked(chain_height, unlock_time, *height, type))
       return false;
-
+    if(*height + CRYPTONOTE_DEFAULT_TX_SPENDABLE_AGE > chain_height)
+      return false;
     return true;
   }
 
@@ -751,6 +796,10 @@ namespace lwsf { namespace internal { namespace backend
       primary{},
       refresh_error(),
       lookahead_error(default_subaddr_state),
+<<<<<<< Updated upstream
+=======
+      import_error(),
+>>>>>>> Stashed changes
       last_sync(),
       blockchain_height(0),
       per_byte_fee(0),
@@ -783,17 +832,26 @@ namespace lwsf { namespace internal { namespace backend
     return rct::rct2pk(rct::addKeys(rct::pk2rct(primary.spend.pub), rct::pk2rct(M))); 
   }
 
-  std::string wallet::get_spend_address(const rpc::address_meta& index) const
+  cryptonote::account_public_address wallet::get_spend_account(const rpc::address_meta& index) const
   {
     const bool is_subaddress = !index.is_default();
     const auto spend_public = get_spend_public(index);
     const crypto::public_key view_public = is_subaddress ?
       rct::rct2pk(rct::scalarmultKey(rct::pk2rct(spend_public), rct::sk2rct(primary.view.sec))) : primary.view.pub;
+    return {spend_public, view_public};
+  }
 
+  cryptonote::account_keys wallet::get_primary_keys() const
+  {
+    return {
+      {primary.view.pub, primary.spend.pub}, primary.spend.sec, primary.view.sec
+    }; 
+  }
+
+  std::string wallet::get_spend_address(const rpc::address_meta& index) const
+  { 
     return cryptonote::get_account_address_as_str(
-      get_net_type(),
-      is_subaddress,
-      cryptonote::account_public_address{spend_public, view_public}
+      get_net_type(), !index.is_default(), get_spend_account(index)
     );
   }
 
@@ -830,8 +888,17 @@ namespace lwsf { namespace internal { namespace backend
     boost::unique_lock<boost::mutex> lock{sync};
     {
       passed_login = false;
+<<<<<<< Updated upstream
       server_lookahead = 0;
       lookahead_error = {error::subaddr_disabled};
+=======
+      blockchain_height = 0;
+      per_byte_fee = 0;
+      fee_mask = 0;  
+      server_lookahead = 0;
+      import_error = {};
+      lookahead_error = error::subaddr_disabled;
+>>>>>>> Stashed changes
       const rpc::login_request login{
         primary.address, primary.view.sec, true, primary.generated_locally
       };
@@ -905,6 +972,7 @@ namespace lwsf { namespace internal { namespace backend
       if (now - last_sync < config::refresh_interval_min)
         return refresh_error;
     }
+    last_sync = now;
 
     struct call_refreshed
     {
@@ -930,7 +998,10 @@ namespace lwsf { namespace internal { namespace backend
       if (failed_login)
       {
         lock.lock();
+<<<<<<< Updated upstream
         last_sync = now;
+=======
+>>>>>>> Stashed changes
         return refresh_error = failed_login;
       }
     }
@@ -944,7 +1015,6 @@ namespace lwsf { namespace internal { namespace backend
     }
     lock.lock();
 
-    last_sync = now;
     passed_login = bool(txs_response) && bool(outs_response); // reset state
 
     if (!txs_response)
@@ -1191,7 +1261,13 @@ namespace lwsf { namespace internal { namespace backend
   {
     boost::unique_lock<boost::mutex> lock{sync};
 
+<<<<<<< Updated upstream
     if (primary.requested_start < height)
+=======
+    if (primary.restore_height <= height)
+      return import_error = {};
+    if (import_error && import_error == error::import_pending)
+>>>>>>> Stashed changes
       return import_error;
 
     if (!passed_login)
@@ -1224,6 +1300,11 @@ namespace lwsf { namespace internal { namespace backend
       case 0:
         return import_error = error::import_pending;
       case 1:
+<<<<<<< Updated upstream
+=======
+        if (import->import_fee.value_or(rpc::uint64_string(0)) == rpc::uint64_string(0))
+          return import_error = error::import_pending;
+>>>>>>> Stashed changes
         return import_error = error::import_invalid;
       case 2:
         break;
@@ -1258,14 +1339,22 @@ namespace lwsf { namespace internal { namespace backend
       primary.addressbook[i] = address_book_entry{std::move(*import->payment_address), std::move(payment_id), std::move(description)};
 
     return import_error = {};
+<<<<<<< Updated upstream
+=======
+  }
+
+  expect<std::vector<rpc::random_outputs>> wallet::get_decoys(const rpc::get_random_outs_request& req)
+  {
+    auto resp = rpc::invoke<rpc::get_random_outs_response>(client, req);
+    if (!resp)
+      return resp.error();
+    return {std::move(resp->amount_outs)};
+>>>>>>> Stashed changes
   }
 
   std::error_code wallet::send_tx(epee::byte_slice tx_bytes)
   {
     const rpc::submit_raw_tx_request request{std::move(tx_bytes)};
-    auto response = rpc::invoke<rpc::submit_raw_tx_response>(client, request);
-    if (!response)
-      return response.error();
-    return {};
+    return rpc::invoke<rpc::submit_raw_tx_response>(client, request).error();
   }
 }}} // lwsf // internal // backend

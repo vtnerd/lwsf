@@ -227,6 +227,48 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::json_reader&, get_address_txs&);
 
 
+  struct random_output
+  {
+    random_output()
+      : global_index(uint64_string(0)), public_key{}, rct{}
+    {}
+
+    uint64_string global_index;
+    rct::key public_key;
+    rct::key rct;
+  };
+  void read_bytes(wire::json_reader&, random_output&);
+
+  struct random_outputs
+  {
+    random_outputs()
+      : outputs(), amount(uint64_string(0))
+    {}
+
+    std::vector<random_output> outputs;
+    uint64_string amount;
+  };
+  void read_bytes(wire::json_reader&, random_outputs&);
+
+  struct get_random_outs_request
+  {
+    get_random_outs_request() = delete;
+
+    std::vector<uint64_string> amounts;
+    std::uint32_t count; // mixin
+  };
+  void write_bytes(wire::json_writer&, const get_random_outs_request&);
+
+  struct get_random_outs_response
+  {
+    get_random_outs_response() = delete;
+    static constexpr const char* endpoint() noexcept { return "/get_random_outs"; }
+
+    std::vector<random_outputs> amount_outs;
+  };
+  void read_bytes(wire::json_reader&, get_random_outs_response&);
+
+
   struct subaddrs
   {
     constexpr subaddrs() noexcept

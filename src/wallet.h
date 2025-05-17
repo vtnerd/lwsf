@@ -340,12 +340,12 @@ namespace internal
      * @brief rescanBlockchain - rescans the wallet, updating transactions from daemon
      * @return - true if refreshed successfully;
      */
-    virtual bool rescanBlockchain() override { /* TODO */ return false; }
+    virtual bool rescanBlockchain() override { return refresh(); }
 
     /**
      * @brief rescanBlockchainAsync - rescans wallet asynchronously, starting from genesys
      */
-    virtual void rescanBlockchainAsync() override { /* TODO */ }
+    virtual void rescanBlockchainAsync() override { refreshAsync(); }
 
     /**
      * @brief setAutoRefreshInterval - setup interval for automatic refresh.
@@ -468,7 +468,7 @@ namespace internal
                                                    Monero::optional<std::vector<uint64_t>> amount, uint32_t mixin_count,
                                                    Monero::PendingTransaction::Priority = Monero::PendingTransaction::Priority_Low,
                                                    uint32_t subaddr_account = 0,
-                                                   std::set<uint32_t> subaddr_indices = {}) override { /* TODO */ return nullptr; }
+                                                   std::set<uint32_t> subaddr_indices = {}) override;
 
     /*!
      * \brief createTransaction creates transaction. if dst_addr is an integrated address, payment_id is ignored
@@ -487,7 +487,7 @@ namespace internal
                                                    std::optional<uint64_t> amount, uint32_t mixin_count,
                                                    Monero::PendingTransaction::Priority = Monero::PendingTransaction::Priority_Low,
                                                    uint32_t subaddr_account = 0,
-                                                   std::set<uint32_t> subaddr_indices = {}) override { /* TODO */ return nullptr; }
+                                                   std::set<uint32_t> subaddr_indices = {}) override;
 
     /*!
      * \brief createSweepUnmixableTransaction creates transaction with unmixable outputs.

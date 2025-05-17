@@ -246,6 +246,39 @@ namespace lwsf { namespace internal { namespace rpc
   }
 
 
+  void read_bytes(wire::json_reader& source, random_output& self)
+  {
+    epee::byte_slice rct;
+    wire::object(source,
+      WIRE_FIELD(global_index),
+      WIRE_FIELD(public_key),
+      wire::field("rct", std::ref(rct))
+    );
+
+    if (rct.size() < sizeof(self.rct))
+      WIRE_DLOG_THROW_(wire::error::schema::fixed_binary);
+    std::memcpy(std::addressof(self.rct), rct.data(), sizeof(self.rct));
+  }
+
+  void read_bytes(wire::json_reader& source, random_outputs& self)
+  {
+    using max_ring = wire::max_element_count<config::max_ring_size>;
+    wire::object(source, WIRE_FIELD_ARRAY(outputs, max_ring), WIRE_FIELD(amount));
+  }
+
+  void write_bytes(wire::json_writer& dest, const get_random_outs_request& self)
+  {
+    using unused = wire::max_element_count<0>;
+    wire::object(dest, WIRE_FIELD_ARRAY(amounts, unused), WIRE_FIELD(count));
+  }
+
+  void read_bytes(wire::json_reader& source, get_random_outs_response& self)
+  {
+    using max_inputs = wire::max_element_count<config::max_inputs>;
+    wire::object(source, WIRE_FIELD_ARRAY(amount_outs, max_inputs));
+  }
+
+
   namespace
   {
     //! A wrapper that simulates an array by only using the first element

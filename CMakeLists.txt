@@ -81,6 +81,7 @@ set_property(TARGET monero::libraries PROPERTY
     common
     epee
     mnemonics
+    qrcodegen
     wallet_api
 )
 

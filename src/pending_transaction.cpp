@@ -32,13 +32,23 @@
 #include "backend.h"
 #include "byte_slice.h"   // monero/contrib/epee/include
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
+#include "error.h"
 #include "string_tools.h" // monero/contrib/epee/include
 
 
 namespace lwsf { namespace internal
 {
-  pending_transaction::pending_transaction(std::shared_ptr<backend::wallet> wallet, cryptonote::transaction&& source, Priority priority)
-    : wallet_(std::move(wallet)), source_(std::move(source)), error_(), priority_(priority)
+  namespace
+  {
+    cryptonote::transaction get_tx(expect<cryptonote::transaction>&& source)
+    {
+      if (source)
+        return {std::move(*source)};
+      return {};
+    }
+  }
+  pending_transaction::pending_transaction(std::shared_ptr<backend::wallet> wallet, expect<cryptonote::transaction> source, std::shared_ptr<backend::transaction> local)
+    : wallet_(std::move(wallet)), error_(source.error()), local_(std::move(local))
   {
     if (!wallet_)
       throw std::invalid_argument{"lwsf::internal::pending_transction cannot be given nullptr backend"};
@@ -47,30 +57,58 @@ namespace lwsf { namespace internal
   pending_transaction::~pending_transaction()
   {}
 
+  int pending_transaction::status() const
+  {
+    return error_ ? Status_Error : Status_Ok;
+  }
+
   std::string pending_transaction::errorString() const
   {
-    if (!error_)
-      return {};
-    return error_.message();
+    if (error_)
+      return error_.message();
+    return {};
   }
 
   bool pending_transaction::commit(const std::string &filename, bool)
   {
     // saving to file not yet implemented
-    if (!filename.empty())
+    if (error_ || !filename.empty())
       return false;
 
-    error_ = wallet_->send_tx(
-      epee::byte_slice{cryptonote::t_serializable_object_to_blob(source_)}
-    );
+    if (local_)
+      error_ = wallet_->send_tx(local_->raw_bytes.clone());
+    else if (!error_)
+      error_ = error::tx_failed;
+
+    if (!error_ && local_)
+    {
+      const boost::lock_guard<boost::mutex> lock{wallet_->sync};
+      auto entry = wallet_->primary.txes.try_emplace(local_->id).first;
+      if (!entry->second)
+        entry->second = local_;
+    }
+
     return !error_;
   }
 
+  std::uint64_t pending_transaction::amount() const
+  {
+    if (!local_)
+      return 0;
+    return local_->amount;
+  }
+
   std::uint64_t pending_transaction::fee() const
-  { return get_tx_fee(source_); }
+  { 
+    if (!local_)
+      return 0;
+    return local_->fee;
+  }
 
   std::vector<std::string> pending_transaction::txid() const
   {
-    return {epee::string_tools::pod_to_hex(get_transaction_hash(source_))};
+    if (!local_)
+      return {};
+    return {epee::to_hex::string(epee::as_byte_span(local_->id))};
   }
 }} // lwsf // internal
