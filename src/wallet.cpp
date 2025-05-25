@@ -33,16 +33,19 @@
 #endif
 
 #include <algorithm>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <sodium/core.h>
 #include <sodium/crypto_pwhash_argon2id.h>
 #include <sodium/randombytes.h>
 #include <sodium/crypto_aead_chacha20poly1305.h>
+#include <stdexcept>
 #include <string_view>
 #include "address_book.h"
 #include "backend.h"
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
+#include "cryptonote_config.h"                        // monero/src
 #include "cryptonote_core/cryptonote_tx_utils.h"      // monero/src
 #include "error.h"
 #include "hex.h" // monero/contrib/epee/include
@@ -58,6 +61,14 @@
 #include "transaction_history.h"
 #include "wire.h"
 #include "wire/msgpack.h"
+
+//! Runtime-check (assertion) for tx construction
+#define LWSF_TX_ASSERT(x) \
+  do                      \
+  {                       \
+    if (!(x))             \
+      throw std::logic_error{"Tx construction verify (line " + std::to_string(__LINE__) + "): " + #x}; \
+  } while (0)
 
 namespace lwsf { namespace internal
 { 
@@ -101,6 +112,8 @@ namespace lwsf { namespace internal
 
       // extra
       size += extra_size;
+      if (!extra_size && n_outputs <= 2)
+        size += 3 + sizeof(crypto::hash8);
 
       // rct signatures
 
@@ -164,6 +177,18 @@ namespace lwsf { namespace internal
     {
       return calculate_fee_from_weight(base_fee, estimate_tx_weight(n_inputs, n_outputs, mixin, extra_size), fee_mask);
     }
+
+    class need_more_sources final : public std::exception
+    {
+      std::uint64_t fee_;
+    public:
+      explicit need_more_sources(const std::uint64_t fee) noexcept
+        : std::exception(), fee_(fee)
+      {}
+
+      std::uint64_t fee() const noexcept { return fee_; }
+      const char* what() const noexcept override { return "need_more_sources"; }
+    };
 
     struct encrypted_file
     {
@@ -1320,13 +1345,7 @@ namespace lwsf { namespace internal
                 unspent.erase(spend.second.output_pub);
             }
           }
-
-          // actually sorted by amount then reverse index (see comment above)
-          std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> unspent_by_amount_then_index;
-          for (const auto& tx : unspent)
-            unspent_by_amount_then_index.try_emplace(tx.second.first).first->second = {tx.first, tx.second.second};
-          unspent.clear(); // free up some memory
-
+ 
           const bool subtract_from_dest = !amount;
           if (subtract_from_dest)
           {
@@ -1334,353 +1353,417 @@ namespace lwsf { namespace internal
             for (const auto& tx : unspent)
             {
               const auto output = tx.second.second->receives.find(tx.first);
-              if (output == tx.second.second->receives.end())
-                throw std::logic_error{"Expected output pub"};
+              LWSF_TX_ASSERT(output != tx.second.second->receives.end());
               total_unspent += output->second.amount;
             }
             amount = std::vector<std::uint64_t>{total_unspent};
           }
 
-          if (amount->size() < dst_addr.size())
-            throw std::logic_error{"Sanity check failed: address vec <= amount vec"};
+          LWSF_TX_ASSERT(dst_addr.size() <= amount->size());
 
-          std::string extra_nonce;
-          std::vector<cryptonote::tx_destination_entry> dests;
-          std::multiset<std::pair<std::uint64_t, std::string>> transfers;
-          for (std::size_t i = 0; i < dst_addr.size(); ++i)
+          // By copy to catch mutations (want each invoke to be consistent)
+          const auto gather_sources_and_construct_tx = [=] (const std::uint64_t min_fee)
+            -> std::unique_ptr<internal::pending_transaction>
           {
-            cryptonote::address_parse_info info{};
-            if (!cryptonote::get_account_address_from_str(info, ctype, dst_addr.at(i)))
-              return tx_error(error::tx_invalid_address);
-
-            if (info.has_payment_id)
+            std::string extra_nonce;
+            std::vector<cryptonote::tx_destination_entry> dests;
+            std::multiset<std::pair<std::uint64_t, std::string>> transfers;
+            for (std::size_t i = 0; i < dst_addr.size(); ++i)
             {
-              if (!extra_nonce.empty())
-                return tx_error(error::tx_two_pid);
-              cryptonote::set_encrypted_payment_id_to_tx_extra_nonce(extra_nonce, info.payment_id);
-            }
+              cryptonote::address_parse_info info{};
+              if (!cryptonote::get_account_address_from_str(info, ctype, dst_addr.at(i)))
+                return tx_error(error::tx_invalid_address);
 
-            transfers.insert({amount->at(i), dst_addr.at(i)});
-
-            auto& dest = dests.emplace_back();
-            dest.original = dst_addr.at(i);
-            dest.addr = info.address;
-            dest.amount = amount->at(i);
-            dest.is_subaddress = info.is_subaddress;
-            dest.is_integrated = info.has_payment_id;
-          }
-
-          for (std::size_t i = dst_addr.size(); i < amount->size(); ++i)
-          {
-            auto& dest = dests.emplace_back();
-            dest.original = change_address;
-            dest.addr = change_account;
-            dest.amount = amount->at(i);
-            dest.is_subaddress = subaddr_account;
-            dest.is_integrated = false;
-          }
-
-          std::vector<std::uint8_t> extra;
-          if (!extra_nonce.empty() && !cryptonote::add_extra_nonce_to_tx_extra(extra, extra_nonce))
-            return tx_error(error::tx_extra);
-
-          std::vector<std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> spending;
-          {
-            std::uint64_t fee = 0;
-            std::uint64_t remaining =
-              std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
-
-            while (bool(remaining + fee))
-            {
-              if (unspent_by_amount_then_index.empty())
+              if (info.has_payment_id)
               {
-                if (subtract_from_dest && !remaining)
-                  break;
-                return tx_error(error::tx_low_funds);
+                if (!extra_nonce.empty())
+                  return tx_error(error::tx_two_pid);
+                cryptonote::set_encrypted_payment_id_to_tx_extra_nonce(extra_nonce, info.payment_id);
               }
 
-              /* Check if we can omit change address for more efficiency. We
-                must have at least 2 outputs for uniformity/privacy. */
-              if (1 < dests.size())
+              transfers.insert({amount->at(i), dst_addr.at(i)});
+
+              auto& dest = dests.emplace_back();
+              dest.original = dst_addr.at(i);
+              dest.addr = info.address;
+              dest.amount = amount->at(i);
+              dest.is_subaddress = info.is_subaddress;
+              dest.is_integrated = info.has_payment_id;
+            }
+
+            for (std::size_t i = dst_addr.size(); i < amount->size(); ++i)
+            {
+              // this is a "self-sweep" (consolidation)
+              auto& dest = dests.emplace_back();
+              dest.original = change_address;
+              dest.addr = change_account;
+              dest.amount = amount->at(i);
+              dest.is_subaddress = subaddr_account;
+              dest.is_integrated = false;
+            }
+
+            std::vector<std::uint8_t> extra;
+            if (!extra_nonce.empty() && !cryptonote::add_extra_nonce_to_tx_extra(extra, extra_nonce))
+              return tx_error(error::tx_extra);
+
+
+            // actually sorted by amount then reverse index (see comment above)
+            std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> unspent_by_amount_then_index;
+            for (const auto& tx : unspent)
+              unspent_by_amount_then_index.try_emplace(tx.second.first).first->second = {tx.first, tx.second.second};
+
+            bool has_change = false;
+            std::vector<std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> spending;
+            {
+              std::uint64_t fee = 0;
+              std::uint64_t remaining =
+                std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
+
+              while (bool(remaining + fee))
               {
-                fee = estimate_fee(per_byte_fee, spending.size() + 1, dests.size(), mixin_count, extra.size(), fee_mask);
-                const std::uint64_t needed = remaining + fee;
-                const auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
-                if (output != unspent_by_amount_then_index.end() && needed == output->first.first)
+                if (unspent_by_amount_then_index.empty())
                 {
-                  remaining = 0;
+                  if (subtract_from_dest && !remaining)
+                    break;
+                  return tx_error(error::tx_low_funds);
+                }
+
+                /* Check if we can omit change address for more efficiency. We
+                  must have at least 2 outputs for uniformity/privacy. */
+                if (1 < dests.size())
+                {
+                  fee = estimate_fee(per_byte_fee, spending.size() + 1, dests.size(), mixin_count, extra.size(), fee_mask);
+                  fee = std::max(min_fee, fee);
+                  const std::uint64_t needed = remaining + fee;
+                  const auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
+                  if (output != unspent_by_amount_then_index.end() && needed == output->first.first)
+                  {
+                    remaining = 0;
+                    spending.emplace_back(output->second.first, output->second.second);
+                    unspent_by_amount_then_index.erase(output);
+                    break;
+                  }
+                }
+
+                // check
+                fee = estimate_fee(per_byte_fee, spending.size() + 1, dests.size() + 1, mixin_count, extra.size(), fee_mask);
+                fee = std::max(min_fee, fee);
+
+                const std::uint64_t needed = remaining + fee;
+                auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
+                if (output == unspent_by_amount_then_index.end())
+                  --output;
+
+                const std::uint64_t this_amount = output->first.first;
+                const bool complete = needed <= this_amount;
+                spending.emplace_back(output->second.first, output->second.second);
+                unspent_by_amount_then_index.erase(output);
+
+                remaining -= this_amount;
+                if (complete)
+                  break;
+              }
+
+              if (subtract_from_dest)
+              {
+                LWSF_TX_ASSERT(dests.size() == 1);
+                if (dests.back().amount < fee)
+                  return tx_error(error::tx_low_funds);
+                dests.back().amount -= fee;
+                fee = 0;
+              }
+
+              const std::uint64_t change = (std::uint64_t(0) - remaining) - fee;
+              if (change || dests.size() == 1)
+              {
+                has_change = true;
+                auto& change_dest = dests.emplace_back();
+                change_dest.original = change_address;
+                change_dest.addr = change_account;
+                change_dest.amount = change;
+                change_dest.is_subaddress = bool(subaddr_account);
+                change_dest.is_integrated = false;
+              }
+
+              LWSF_TX_ASSERT(config::minimum_outputs <= dests.size());
+
+              // verify SUM(input) = SUM(output) - fee
+
+              remaining = 0;
+              for (const auto& source : spending)
+              {
+                const auto output = source.second->receives.find(source.first);
+                LWSF_TX_ASSERT(output != source.second->receives.end());
+                remaining += output->second.amount;
+              }
+
+              for (const auto& dest : dests)
+                remaining -= dest.amount;
+
+              LWSF_TX_ASSERT(fee == remaining);
+            }
+
+            const auto rct_amount = [] (const backend::transfer_in& source)
+            {
+              return source.rct_mask ? 0 : source.amount;
+            };
+
+            std::vector<rpc::random_outputs> decoys;
+            {
+              rpc::get_random_outs_request req{};
+              req.count = mixin_count;
+              for (const auto& spend : spending)
+                req.amounts.push_back(rpc::uint64_string(rct_amount(spend.second->receives.at(spend.first))));
+
+              auto resp = data_->get_decoys(req);
+              if (!resp)
+                return tx_error(resp.error());
+
+              decoys = std::move(*resp);
+            }
+
+            struct by_amount
+            {
+              bool operator()(const rpc::random_outputs& lhs, const rpc::random_outputs& rhs) const noexcept
+              {
+                return lhs.amount < rhs.amount;
+              }
+              bool operator()(const rpc::random_outputs& lhs, const std::uint64_t rhs) const noexcept
+              {
+                return lhs.amount < rpc::uint64_string(rhs);
+              }
+            };
+            std::sort(decoys.begin(), decoys.end(), by_amount{});
+
+            std::unordered_map<crypto::public_key, cryptonote::subaddress_index> subs;
+            std::vector<cryptonote::tx_source_entry> sources;
+            for (const auto& spend : spending)
+            {
+              const auto& source = spend.second->receives.at(spend.first);
+              {
+                const boost::lock_guard<boost::mutex> lock{data_->sync};
+                subs.insert({data_->get_spend_public(source.recipient), {source.recipient.maj_i, source.recipient.min_i}});
+              }
+
+              auto& entry = sources.emplace_back();
+              if (source.rct_mask)
+                entry.outputs.emplace_back(source.global_index, rct::ctkey{rct::pk2rct(spend.first), rct::commit(source.amount, *source.rct_mask)});
+              else
+                entry.push_output(source.global_index, spend.first, source.amount);
+
+              {
+                const std::uint64_t amount = rct_amount(source);
+                const auto ring = std::lower_bound(decoys.begin(), decoys.end(), amount, by_amount{});
+                if (ring == decoys.end() || ring->amount != rpc::uint64_string(amount))
+                  return tx_error(error::tx_decoys);
+
+                for (const auto& decoy : ring->outputs)
+                  entry.outputs.emplace_back(std::uint64_t(decoy.global_index), rct::ctkey{decoy.public_key, decoy.rct});
+
+                decoys.erase(ring);
+              }
+
+              entry.real_output_in_tx_index = source.index;
+              entry.real_out_tx_key = source.tx_pub;
+              entry.amount = source.amount;
+              entry.rct = bool(source.rct_mask);
+              if (entry.rct)
+                entry.mask = *source.rct_mask;
+            }
+
+            const auto ring_sort = [] (const auto& lhs, const auto& rhs)
+            {
+              return lhs.first < rhs.first;
+            };
+            const auto ring_compare = [] (const auto& lhs, const auto& rhs)
+            {
+              return lhs.first == rhs.first;
+            };
+
+            std::shuffle(sources.begin(), sources.end(), crypto::random_device{});
+            for (auto& source : sources)
+            {
+              LWSF_TX_ASSERT(!source.outputs.empty());
+
+              const std::uint64_t real_source = source.outputs.front().first;
+              std::sort(source.outputs.begin(), source.outputs.end(), ring_sort);
+              LWSF_TX_ASSERT(std::unique(source.outputs.begin(), source.outputs.end(), ring_compare) == source.outputs.end());
+
+              for (std::size_t i = 0; i < source.outputs.size(); ++i)
+              {
+                if (source.outputs.at(i).first == real_source)
+                {
+                  source.real_output = i;
                   break;
                 }
               }
-
-              // check
-              fee = estimate_fee(per_byte_fee, spending.size() + 1, dests.size() + 1, mixin_count, extra.size(), fee_mask);
-
-              const std::uint64_t needed = remaining + fee;
-              auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
-              if (output == unspent_by_amount_then_index.end())
-                --output;
-
-              const std::uint64_t this_amount = output->first.first;
-              const bool complete = needed <= this_amount;
-              spending.emplace_back(output->second.first, output->second.second);
-              unspent_by_amount_then_index.erase(output);
-
-              remaining -= this_amount;
-              if (complete)
-                break;
             }
 
-            if (subtract_from_dest)
+            // By copy to catch mutations (want each invoke to be consistent)
+            const auto construct_tx = [=, &dests, &sources = std::as_const(sources)] ()
+              -> std::unique_ptr<internal::pending_transaction>
             {
-              if (dests.size() != 1)
-                throw std::logic_error{"Sanity check: subtract_from_dest && dest.size() == 1"};
-              if (dests.back().amount < fee)
-                return tx_error(error::tx_low_funds);
-              dests.back().amount -= fee;
-              fee = 0;
-            }
+              auto rsources = sources; // already shuffled above
+              auto rdests = dests; // in case we need to retry fee
+              std::shuffle(rdests.begin(), rdests.end(), crypto::random_device{});
 
-            const std::uint64_t change = (std::uint64_t(0) - remaining) - fee;
-            if (change || dests.size() == 1)
-            {
-              auto& change_dest = dests.emplace_back();
-              change_dest.original = change_address;
-              change_dest.addr = change_account;
-              change_dest.amount = change;
-              change_dest.is_subaddress = bool(subaddr_account);
-              change_dest.is_integrated = false;
-            }
+              static constexpr const rct::RCTConfig config{
+                rct::RangeProofPaddedBulletproof, config::bulletproof_version
+              };
 
-            if (dests.size() < config::minimum_outputs)
-              throw std::logic_error{"Sanity check: config::minium_outputs <= dests.size()"};
+              crypto::secret_key tx_key;
+              std::vector<crypto::secret_key> tx_keys;
+              cryptonote::transaction tx;
+              if (!cryptonote::construct_tx_and_get_tx_key(keys, subs, rsources, rdests, change_account, extra, tx, tx_key, tx_keys, true /* rct */, config, true /* view_tags */))
+                return tx_error(error::tx_failed);
 
-            remaining = 0;
-            for (const auto& source : spending)
-            {
-              const auto output = source.second->receives.find(source.first);
-              if (output == source.second->receives.end())
-                throw std::logic_error{"Failed sanity check: source output does not exist"};
-              remaining += output->second.amount;
-            }
+              auto details = std::make_shared<backend::transaction>();
+              details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
+              details->timestamp = std::chrono::system_clock::now();
+              details->amount = std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
+              details->fee = get_tx_fee(tx);
 
-            for (const auto& dest : dests)
-              remaining -= dest.amount;
+              const std::uint64_t weight = get_transaction_weight(tx, details->raw_bytes.size());
+              const std::uint64_t real_fee = calculate_fee_from_weight(per_byte_fee, weight, fee_mask);
 
-            if (fee != remaining)
-              throw std::logic_error{"Sanity check: inputs.amounts == outputs.amounts + fee"};
-          }
-          unspent_by_amount_then_index.clear(); // free some memory
-
-          const auto rct_amount = [] (const backend::transfer_in& source)
-          {
-            return source.rct_mask ? 0 : source.amount;
-          };
-
-          std::vector<rpc::random_outputs> decoys;
-          {
-            rpc::get_random_outs_request req{};
-            req.count = mixin_count;
-            for (const auto& spend : spending)
-              req.amounts.push_back(rpc::uint64_string(rct_amount(spend.second->receives.at(spend.first))));
-
-            auto resp = data_->get_decoys(req);
-            if (!resp)
-              return tx_error(resp.error());
-            decoys = std::move(*resp);
-          }
-
-          struct by_amount
-          {
-            bool operator()(const rpc::random_outputs& lhs, const rpc::random_outputs& rhs) const noexcept
-            {
-              return lhs.amount < rhs.amount;
-            }
-            bool operator()(const rpc::random_outputs& lhs, const std::uint64_t rhs) const noexcept
-            {
-              return lhs.amount < rpc::uint64_string(rhs);
-            }
-          };
-          std::sort(decoys.begin(), decoys.end(), by_amount{});
-
-          std::unordered_map<crypto::public_key, cryptonote::subaddress_index> subs;
-          std::vector<cryptonote::tx_source_entry> sources;
-          for (const auto& spend : spending)
-          {
-            const auto& source = spend.second->receives.at(spend.first);
-            {
-              const boost::lock_guard<boost::mutex> lock{data_->sync};
-              subs.insert({data_->get_spend_public(source.recipient), {source.recipient.maj_i, source.recipient.min_i}});
-            }
-
-            auto& entry = sources.emplace_back();
-            if (source.rct_mask)
-              entry.outputs.emplace_back(source.global_index, rct::ctkey{rct::pk2rct(spend.first), rct::commit(source.amount, *source.rct_mask)});
-            else
-              entry.push_output(source.global_index, spend.first, source.amount);
-
-            {
-              const std::uint64_t amount = rct_amount(source);
-              const auto ring = std::lower_bound(decoys.begin(), decoys.end(), amount, by_amount{});
-              if (ring == decoys.end() || ring->amount != rpc::uint64_string(amount))
-                return tx_error(error::tx_decoys);
-
-              for (const auto& decoy : ring->outputs)
-                entry.outputs.emplace_back(std::uint64_t(decoy.global_index), rct::ctkey{decoy.public_key, decoy.rct});
-
-              decoys.erase(ring);
-            }
-
-            entry.real_output_in_tx_index = source.index;
-            entry.real_out_tx_key = source.tx_pub;
-            entry.amount = source.amount;
-            entry.rct = bool(source.rct_mask);
-            if (entry.rct)
-              entry.mask = *source.rct_mask;
-          }
-
-          const auto ring_sort = [] (const auto& lhs, const auto& rhs)
-          {
-            return lhs.first < rhs.first;
-          };
-          const auto ring_compare = [] (const auto& lhs, const auto& rhs)
-          {
-            return lhs.first == rhs.first;
-          };
-
-          std::shuffle(sources.begin(), sources.end(), crypto::random_device{});
-          std::shuffle(dests.begin(), dests.end(), crypto::random_device{}); 
-          for (auto& source : sources)
-          {
-            if (source.outputs.empty())
-              throw std::runtime_error{"Sanity check: ring is !empty"};
-
-            const std::uint64_t real_source = source.outputs.front().first;
-            std::sort(source.outputs.begin(), source.outputs.end(), ring_sort);
-            if (std::unique(source.outputs.begin(), source.outputs.end(), ring_compare) != source.outputs.end())
-              throw std::logic_error{"Sanity check: each ring destination is unique"};
-
-            for (std::size_t i = 0; i < source.outputs.size(); ++i)
-            {
-              if (source.outputs.at(i).first == real_source)
+              const auto get_change_index = [&] () -> std::size_t
               {
-                source.real_output = i;
-                break;
+                LWSF_TX_ASSERT(!dests.empty());
+                if (subtract_from_dest)
+                  return 0;
+                if (has_change && dests.back().original == change_address)
+                  return dests.size() - 1;
+                throw need_more_sources{real_fee}; // skipped change address
+              };
+
+              if (details->fee < real_fee)
+              {
+                const std::uint64_t diff = real_fee - details->fee;
+                auto& dest = dests.at(get_change_index());
+                if (dest.amount < diff)
+                  throw need_more_sources{real_fee};
+                dest.amount -= diff;
+                return nullptr; // retry construction with updated `dests`
               }
-            }
-          }
+              else if (details->fee > real_fee)
+              {
+                const std::uint64_t diff = details->fee - real_fee;
+                dests.at(get_change_index()).amount += diff;
+                return nullptr; // retry construction with updated `dests`
+              }
+              // else `details->fee == real_fee`
 
-          static constexpr const rct::RCTConfig config{
-            rct::RangeProofPaddedBulletproof, config::bulletproof_version
-          };
+              details->direction = Monero::TransactionInfo::Direction_Out;
+              if (extra_nonce.size() == sizeof(crypto::hash8) + 1)
+              {
+                crypto::hash8 pid{};
+                std::memcpy(std::addressof(pid), extra_nonce.data() + 1, sizeof(pid));
+                details->payment_id = pid;
+              }
+              get_transaction_hash(tx, details->id);
+              get_transaction_prefix_hash(tx, details->prefix);
 
-          crypto::secret_key tx_key;
-          std::vector<crypto::secret_key> tx_keys;
-          cryptonote::transaction tx;
-          if (!cryptonote::construct_tx_and_get_tx_key(keys, subs, sources, dests, change_account, extra, tx, tx_key, tx_keys, true /* rct */, config, true /* view_tags */))
-            return tx_error(error::tx_failed); 
+              LWSF_TX_ASSERT(rsources.size() == tx.vin.size());
+              for (std::size_t i = 0; i < rsources.size(); ++i)
+              {
+                const auto& source = rsources.at(i);
+                auto spend = details->spends.try_emplace(boost::get<cryptonote::txin_to_key>(tx.vin.at(i)).k_image).first;
+                spend->second.amount = source.amount;
+                spend->second.output_pub = rct2pk(source.outputs.at(source.real_output).second.dest);
 
-          auto details = std::make_shared<backend::transaction>();
-          details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
-          details->timestamp = std::chrono::system_clock::now();
-          details->amount = std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
-          details->fee = get_tx_fee(tx);
-          details->direction = Monero::TransactionInfo::Direction_Out;
-          if (extra_nonce.size() == sizeof(crypto::hash8))
-          {
-            crypto::hash8 pid{};
-            std::memcpy(std::addressof(pid), extra_nonce.data(), sizeof(pid));
-            details->payment_id = pid;
-          }
-          get_transaction_hash(tx, details->id);
-          get_transaction_prefix_hash(tx, details->prefix);
+                const auto elem = std::find_if(spending.begin(), spending.end(), [&] (const auto& e) {
+                  return e.first == spend->second.output_pub;
+                });
+                LWSF_TX_ASSERT(elem != spending.end());
 
-          if (sources.size() != tx.vin.size())
-            throw std::logic_error{"Sanity check: sources.size() == tx.vin.size()"};
+                const auto& base = elem->second->receives.at(spend->second.output_pub);
+                spend->second.sender = base.recipient;
+                spend->second.tx_pub = base.tx_pub;
+              }
 
-          for (std::size_t i = 0; i < sources.size(); ++i)
-          {
-            const auto& source = sources.at(i);
-            auto spend = details->spends.try_emplace(boost::get<cryptonote::txin_to_key>(tx.vin.at(i)).k_image).first;
-            spend->second.amount = source.amount;
-            spend->second.output_pub = rct2pk(source.outputs.at(source.real_output).second.dest);
+              LWSF_TX_ASSERT(rdests.size() == tx.vout.size());
+              LWSF_TX_ASSERT(rdests.size() == tx.rct_signatures.ecdhInfo.size());
+              LWSF_TX_ASSERT(tx_keys.empty() || tx_keys.size() == rdests.size());
 
-            const auto elem = std::find_if(spending.begin(), spending.end(), [&] (const auto& e) {
-              return e.first == spend->second.output_pub;
-            });
-            if (elem == spending.end())
-              throw std::logic_error{"Sanity check spend not found"};
+              struct get_output_pub
+              {
+                crypto::public_key operator()(const cryptonote::txout_to_script&) const noexcept { return {}; }
+                crypto::public_key operator()(const cryptonote::txout_to_scripthash&) const noexcept { return {}; }
+                crypto::public_key operator()(const cryptonote::txout_to_key& src) const noexcept { return src.key; }
+                crypto::public_key operator()(const cryptonote::txout_to_tagged_key& src) const noexcept { return src.key; }
+              };
 
-            const auto& base = elem->second->receives.at(spend->second.output_pub);
-            spend->second.sender = base.recipient;
-            spend->second.tx_pub = base.tx_pub;
-          }
+              for (std::size_t i = 0; i < rdests.size(); ++i)
+              {
+                const auto& dest = rdests.at(i);
+                if (dest.original != change_address)
+                  continue;
 
-          if (dests.size() != tx.vout.size())
-            throw std::logic_error{"Sanity check: dests.size() == tx.vout.size()"};
-          if (dests.size() != tx.rct_signatures.ecdhInfo.size())
-            throw std::logic_error{"Sanity check: dests.size() == ecdhInfo.size()"};
-          if (!tx_keys.empty() && tx_keys.size() != dests.size())
-            throw std::logic_error{"Sanity check tx_keys.empty() || tx_keys.size() == dest.size()"};
+                auto receive = details->receives.try_emplace(
+                  boost::apply_visitor(get_output_pub{}, tx.vout.at(i).target)
+                ).first;
 
-          struct get_output_pub
-          {
-            crypto::public_key operator()(const cryptonote::txout_to_script&) const noexcept { return {}; }
-            crypto::public_key operator()(const cryptonote::txout_to_scripthash&) const noexcept { return {}; }
-            crypto::public_key operator()(const cryptonote::txout_to_key& src) const noexcept { return src.key; }
-            crypto::public_key operator()(const cryptonote::txout_to_tagged_key& src) const noexcept { return src.key; }
-          };
+                receive->second.global_index = std::numeric_limits<std::uint64_t>::max();
+                receive->second.amount = dest.amount;
+                receive->second.recipient = {subaddr_account, 0};
+                receive->second.index = i;
+                receive->second.rct_mask = tx.rct_signatures.ecdhInfo.at(i).mask;
 
-          for (std::size_t i = 0; i < dests.size(); ++i)
-          {
-            const auto& dest = dests.at(i);
-            if (dest.original != change_address)
-              continue;
+                if (tx_keys.empty())
+                  crypto::secret_key_to_public_key(tx_key, receive->second.tx_pub);
+                else
+                  crypto::secret_key_to_public_key(tx_keys.at(i), receive->second.tx_pub);
+              }
 
-            auto receive = details->receives.try_emplace(
-              boost::apply_visitor(get_output_pub{}, tx.vout.at(i).target)
-            ).first;
+              if (!tx_keys.empty())
+              {             
+                auto rtransfers = transfers;
+                for (std::size_t i = 0; i < tx_keys.size(); ++i)
+                {
+                  const auto& dest = rdests.at(i);
+                  const auto is_transfer = rtransfers.find({dest.amount, dest.original});
+                  if (is_transfer == rtransfers.end())
+                    continue;
 
-            receive->second.global_index = std::numeric_limits<std::uint64_t>::max();
-            receive->second.amount = dest.amount;
-            receive->second.recipient = {subaddr_account, 0};
-            receive->second.index = i;
-            receive->second.rct_mask = tx.rct_signatures.ecdhInfo.at(i).mask; 
+                  details->transfers.emplace_back(dest.original, dest.amount).secret = tx_keys.at(i);
+                  rtransfers.erase(is_transfer);
+                }
+                LWSF_TX_ASSERT(rtransfers.empty());
+              }
+              else
+              {
+                for (auto& transfer : transfers)
+                  details->transfers.emplace_back(transfer.second, transfer.first).secret = tx_key;
+              }
 
-            if (tx_keys.empty())
-              crypto::secret_key_to_public_key(tx_key, receive->second.tx_pub);
-            else
-              crypto::secret_key_to_public_key(tx_keys.at(i), receive->second.tx_pub);
-          }
+              return std::make_unique<internal::pending_transaction>(data_, std::move(tx), std::move(details));
+            }; // end `construct_tx` lambda
 
-          if (!tx_keys.empty())
-          {             
-            if (tx_keys.size() != dests.size())
-              throw std::logic_error{"Failed sanity check: tx_keys.size() == dests.size()"};
-
-            for (std::size_t i = 0; i < tx_keys.size(); ++i)
+            // only one retry should be needed
+            for (unsigned attempt = 0; attempt < 2; ++attempt)
             {
-              const auto& dest = dests.at(i);
-              const auto is_transfer = transfers.find({dest.amount, dest.original});
-              if (is_transfer == transfers.end())
-                continue;
-
-              details->transfers.emplace_back(dest.original, dest.amount).secret = tx_keys.at(i);
-              transfers.erase(is_transfer);
+              auto pending = construct_tx(); // throws if more sources needed
+              if (pending)
+                return pending;
+              // else `dests` should've been modified for retry
             }
+            LWSF_TX_ASSERT(false); // this should be unreachable
+          }; // end `gather_sources_and_construct_tx` lamda
 
-            if (!transfers.empty())
-              throw std::logic_error{"Sanity check: missing secret key for outgoing transfer"};
-          }
-          else
+          std::uint64_t min_fee = 0;
+          for (unsigned attempt = 0; attempt < unspent.size(); ++attempt)
           {
-            for (auto& transfer : transfers)
-              details->transfers.emplace_back(transfer.second, transfer.first).secret = tx_key;
-            transfers.clear();
+            try { return gather_sources_and_construct_tx(min_fee); }
+            catch (const need_more_sources& e)
+            {
+              min_fee = e.fee();
+            }
           }
 
-          return std::make_unique<internal::pending_transaction>(data_, std::move(tx), std::move(details));
-        }();
+          return tx_error(error::tx_low_funds);
+        }(); // end unnamed lambda encapsulating all tx construction
+
+      LWSF_TX_ASSERT(out != nullptr);
     }
     catch (const std::exception & e)
     {

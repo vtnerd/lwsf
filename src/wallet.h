@@ -378,7 +378,7 @@ namespace internal
      * @param accountIndex - the major index specifying the subaddress account
      * @param label - the label for the new subaddress
      */
-    virtual void addSubaddress(uint32_t accountIndex, const std::string& label) override { /* TODO */ }
+    virtual void addSubaddress(uint32_t accountIndex, const std::string& label) override { add_subaddress(accountIndex, label); }
     /**
      * @brief getSubaddressLabel - gets the label of the specified subaddress
      * @param accountIndex - the major index specifying the subaddress account
