@@ -393,11 +393,12 @@ namespace lwsf
     return cryptonote::print_money(amount);
   }
 
-  std::uint64_t amountFromString(const std::string &amount)
+  std::optional<std::uint64_t> amountFromString(const std::string &amount)
   {
     std::uint64_t result = 0;
-    cryptonote::parse_amount(result, amount);
-    return result;
+    if (cryptonote::parse_amount(result, amount))
+      return result;
+    return std::nullopt;
   }
 
   bool addressValid(const std::string &str, Monero::NetworkType nettype)

@@ -48,12 +48,12 @@ namespace lwsf { namespace internal
 
   class pending_transaction final : public Monero::PendingTransaction
   {
-    const std::shared_ptr<backend::wallet> wallet_; 
-    std::error_code error_;
-    const std::shared_ptr<backend::transaction> local_;
+    const std::shared_ptr<backend::wallet> wallet_;
+    const std::vector<std::shared_ptr<backend::transaction>> local_;
+    std::string error_;
 
   public:
-    pending_transaction(std::shared_ptr<backend::wallet> wallet, expect<cryptonote::transaction> source, std::shared_ptr<backend::transaction> local = {}); 
+    pending_transaction(std::shared_ptr<backend::wallet> wallet, std::string error, std::vector<std::shared_ptr<backend::transaction>> local = {}); 
 
     pending_transaction(pending_transaction&&) = delete;
     pending_transaction(const pending_transaction&) = delete;
@@ -64,13 +64,13 @@ namespace lwsf { namespace internal
     pending_transaction& operator=(const pending_transaction&) = delete;
 
     virtual int status() const override final;
-    virtual std::string errorString() const override final;
+    virtual std::string errorString() const override final { return error_; }
     virtual bool commit(const std::string &filename = "", bool overwrite = false) override final;
     virtual std::uint64_t amount() const override final;
     virtual std::uint64_t dust() const override final { return 0; }
     virtual std::uint64_t fee() const override final;
     virtual std::vector<std::string> txid() const override final;
-    virtual std::uint64_t txCount() const override final { return 1; }
+    virtual std::uint64_t txCount() const override final { return local_.size(); }
     virtual std::vector<uint32_t> subaddrAccount() const override final { return {}; }
     virtual std::vector<std::set<uint32_t>> subaddrIndices() const override final { return {}; }
 

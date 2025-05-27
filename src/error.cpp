@@ -55,26 +55,6 @@ namespace lwsf
       return "server has subaddresses disabled";
     case error::subaddr_local:
       return "lwsf (local) limits on subaddresses too small";
-    case error::tx_critical:
-      return "Tx construction had critical error";
-    case error::tx_decoys:
-      return "Tx construction failed due to invalid decoy response";
-    case error::tx_extra:
-      return "Tx construction failed to generate tx extra";
-    case error::tx_failed:
-      return "Tx construction failed (construct_tx failure)";
-    case error::tx_invalid_address:
-      return "Tx construction was given invalid address";
-    case error::tx_long_pid:
-      return "Tx construction requested with deprecated long payment id";
-    case error::tx_low_funds:
-      return  "Tx construction failed due to insufficient funds";
-    case error::tx_size_mismatch:
-      return "Tx construction requested with amount and destination mismatch";
-    case error::tx_sweep:
-      return "Tx construction sweep with multiple destinations";
-    case error::tx_two_pid:
-      return "Tx construction given two payment ids";
     case error::unexpected_userinfo:
       return "Unexpected user+pass field in URL";
 

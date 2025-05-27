@@ -262,7 +262,7 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, random_outputs& self)
   {
-    using max_ring = wire::max_element_count<config::max_ring_size>;
+    using max_ring = wire::max_element_count<config::max_ring_size_in_rpc>;
     wire::object(source, WIRE_FIELD_ARRAY(outputs, max_ring), WIRE_FIELD(amount));
   }
 
@@ -274,7 +274,7 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, get_random_outs_response& self)
   {
-    using max_inputs = wire::max_element_count<config::max_inputs>;
+    using max_inputs = wire::max_element_count<config::max_inputs_in_rpc>;
     wire::object(source, WIRE_FIELD_ARRAY(amount_outs, max_inputs));
   }
 
@@ -421,8 +421,10 @@ namespace lwsf { namespace internal { namespace rpc
     using min_output_size = wire::min_element_sizeof<
       ringct, crypto::hash, crypto::hash, crypto::public_key, crypto::public_key
     >;
+    using max_fees = wire::max_element_count<8>;
     wire::object(source,
       WIRE_FIELD_ARRAY(outputs, min_output_size),
+      WIRE_FIELD_ARRAY(fees, max_fees),
       WIRE_FIELD(per_byte_fee),
       WIRE_FIELD(fee_mask)
     );

@@ -576,8 +576,15 @@ namespace lwsf { namespace internal { namespace backend
       self.primary.restore_height = source.start_height;
       self.primary.scan_height = source.scanned_block_height;
 
-      self.per_byte_fee = unspents.per_byte_fee;
       self.fee_mask = unspents.fee_mask;
+      if (unspents.fees.empty())
+      {
+        self.per_byte_fee.resize(1);
+        self.per_byte_fee[0] = unspents.per_byte_fee;
+      }
+      else
+        self.per_byte_fee = unspents.fees;
+
       return out;
     }
 
@@ -787,12 +794,12 @@ namespace lwsf { namespace internal { namespace backend
     : listener(nullptr),
       client(),
       primary{},
+      per_byte_fee(),
       refresh_error(),
       lookahead_error(default_subaddr_state),
       import_error(),
       last_sync(),
       blockchain_height(0),
-      per_byte_fee(0),
       fee_mask(0),
       server_lookahead(0),
       sync(),
@@ -879,7 +886,7 @@ namespace lwsf { namespace internal { namespace backend
     {
       passed_login = false;
       blockchain_height = 0;
-      per_byte_fee = 0;
+      per_byte_fee.clear();
       fee_mask = 0;  
       server_lookahead = 0;
       import_error = {};

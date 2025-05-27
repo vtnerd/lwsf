@@ -227,12 +227,12 @@ namespace lwsf { namespace internal { namespace backend
     Monero::WalletListener* listener;
     rpc::http_client client;
     account primary;
+    std::vector<std::uint64_t> per_byte_fee; //!< by priority level
     std::error_code refresh_error; //!< Cached because `refresh(...)` is rate limited
     std::error_code lookahead_error; //!< warnings/errors of `server_lookahead` value
     std::error_code import_error; //!< Error from `import_wallet_request`
     std::chrono::steady_clock::time_point last_sync;
     std::uint64_t blockchain_height;
-    std::uint64_t per_byte_fee;
     std::uint64_t fee_mask;
     std::uint32_t server_lookahead; //!< Status of major lookahead server-side. Inclusive
     mutable boost::mutex sync;

@@ -29,6 +29,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 #include "wallet/api/wallet2_api.h" // monero/src
@@ -36,7 +37,7 @@
 namespace lwsf
 {
   std::string displayAmount(std::uint64_t amount);
-  std::uint64_t amountFromString(const std::string &amount);
+  std::optional<std::uint64_t> amountFromString(const std::string &amount);
   bool addressValid(const std::string &str, Monero::NetworkType nettype);
 
   std::vector<std::vector<std::uint8_t>> qrcode(Monero::Wallet const* wal, std::uint32_t major, std::uint32_t minor);

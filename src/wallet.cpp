@@ -33,6 +33,7 @@
 #endif
 
 #include <algorithm>
+#include <boost/range/combine.hpp>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -63,11 +64,11 @@
 #include "wire/msgpack.h"
 
 //! Runtime-check (assertion) for tx construction
-#define LWSF_TX_ASSERT(x) \
+#define LWSF_TX_VERIFY(x) \
   do                      \
   {                       \
     if (!(x))             \
-      throw std::logic_error{"Tx construction verify (line " + std::to_string(__LINE__) + "): " + #x}; \
+      throw std::logic_error{"Tx construction assertion failed (line " + std::to_string(__LINE__) + "): " + #x}; \
   } while (0)
 
 namespace lwsf { namespace internal
@@ -88,14 +89,14 @@ namespace lwsf { namespace internal
       }
     };
 
-    std::uint64_t calculate_fee_from_weight(const std::uint64_t base_fee, const std::uint64_t weight, const std::uint64_t fee_quantization_mask)
+    std::uint64_t calculate_fee_from_weight(const std::uint64_t base_fee, const std::uint64_t weight, const std::uint64_t fee_quantization_mask) noexcept
     {
       uint64_t fee = weight * base_fee;
       fee = (fee + fee_quantization_mask - 1) / fee_quantization_mask * fee_quantization_mask;
       return fee;
     }
 
-    std::size_t estimate_rct_tx_size(const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size)
+    std::size_t estimate_rct_tx_size(const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size) noexcept
     {
       std::size_t size = 0;
 
@@ -155,7 +156,7 @@ namespace lwsf { namespace internal
       return size;
     }
 
-    std::uint64_t estimate_tx_weight(const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size)
+    std::uint64_t estimate_tx_weight(const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size) noexcept
     {
       size_t size = estimate_rct_tx_size(n_inputs, n_outputs, mixin, extra_size);
       if (/*use_rct && (bulletproof || bulletproof_plus) && */n_outputs > 2)
@@ -173,22 +174,10 @@ namespace lwsf { namespace internal
       return size;
     }
 
-    std::uint64_t estimate_fee(const std::uint64_t base_fee, const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size, const std::uint64_t fee_mask)
+    std::uint64_t estimate_fee(const std::uint64_t base_fee, const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size, const std::uint64_t fee_mask) noexcept
     {
       return calculate_fee_from_weight(base_fee, estimate_tx_weight(n_inputs, n_outputs, mixin, extra_size), fee_mask);
     }
-
-    class need_more_sources final : public std::exception
-    {
-      std::uint64_t fee_;
-    public:
-      explicit need_more_sources(const std::uint64_t fee) noexcept
-        : std::exception(), fee_(fee)
-      {}
-
-      std::uint64_t fee() const noexcept { return fee_; }
-      const char* what() const noexcept override { return "need_more_sources"; }
-    };
 
     struct encrypted_file
     {
@@ -423,6 +412,18 @@ namespace lwsf { namespace internal
    #error atomic_file_write not implemented for this platform
 #endif
 
+    class need_more_sources final : public std::exception
+    {
+      std::uint64_t fee_;
+    public:
+      explicit need_more_sources(const std::uint64_t fee) noexcept
+        : std::exception(), fee_(fee)
+      {}
+
+      std::uint64_t fee() const noexcept { return fee_; }
+      const char* what() const noexcept override { return "need_more_sources"; }
+    };
+
     struct unknown_exception : std::exception
     {
       unknown_exception() noexcept
@@ -434,9 +435,15 @@ namespace lwsf { namespace internal
 
     constexpr boost::chrono::nanoseconds to_boost(const std::chrono::nanoseconds source) noexcept
     {
-      static_assert(
-        std::is_same<boost::chrono::nanoseconds::rep, std::chrono::nanoseconds::rep>{}
-      );
+      // types could differ - verify they can represent all the same values
+      using boost_rep = boost::chrono::nanoseconds::rep;
+      using std_rep = std::chrono::nanoseconds::rep;
+      static_assert(std::is_integral<boost_rep>());
+      static_assert(std::is_integral<std_rep>());
+      static_assert(std::is_signed<boost_rep>());
+      static_assert(std::is_signed<std_rep>());
+      static_assert(std::numeric_limits<boost_rep>::min() == std::numeric_limits<std_rep>::min());
+      static_assert(std::numeric_limits<boost_rep>::max() == std::numeric_limits<std_rep>::max());
       return boost::chrono::nanoseconds{source.count()};
     }
 
@@ -578,7 +585,7 @@ namespace lwsf { namespace internal
       return false;
 
     encrypted_file contents{};
-    if (!wire::msgpack::from_bytes(std::move(file), contents))
+    if (wire::msgpack::from_bytes(std::move(file), contents))
       return false;
     return !contents.get_payload(password).empty();
   }
@@ -1261,17 +1268,30 @@ namespace lwsf { namespace internal
 
   Monero::PendingTransaction* wallet::createTransactionMultDest(const std::vector<std::string> &dst_addr, const std::string &payment_id,
                                                    Monero::optional<std::vector<uint64_t>> amount, uint32_t mixin_count,
-                                                   Monero::PendingTransaction::Priority priority,
-                                                   uint32_t subaddr_account,
+                                                   const Monero::PendingTransaction::Priority priority,
+                                                   const uint32_t subaddr_account,
                                                    std::set<uint32_t> subaddr_indices)
   {
+    using destinations_vector = std::vector<cryptonote::tx_destination_entry>;
+    using transfers_map = std::multiset<std::pair<std::uint64_t, std::string>>;
+    using unspent_map =
+      std::unordered_map<crypto::public_key, std::pair<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<const backend::transaction>>>;
+    using unspent_by_amount_map =
+      std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>>;
+
+    // default priority not handled like standard wallet
+    static_assert(Monero::PendingTransaction::Priority_Default == 0);
+    static_assert(Monero::PendingTransaction::Priority_Medium == 2);
+
+    const bool subtract_from_dest = !amount;
+    const unsigned priority_int = priority <= 0 ? 2 : unsigned(priority) - 1;
     if (!mixin_count)
       mixin_count = mixin_;
 
     std::unique_ptr<internal::pending_transaction> out;
-    const auto tx_error = [this] (std::error_code error)
+    const auto throw_low_funds = [] ()
     {
-      return std::make_unique<internal::pending_transaction>(data_, std::move(error));
+      throw std::runtime_error{"Unlocked funds too low"};
     };
 
     try
@@ -1282,29 +1302,35 @@ namespace lwsf { namespace internal
       out = [&, this] ()
         {
           if (!amount && dst_addr.size() > 1)
-            return tx_error(error::tx_sweep);
+            throw std::invalid_argument{"Sweep requested with multiple destinations"};
           if (amount && amount->size() != dst_addr.size())
-            return tx_error(error::tx_size_mismatch);
+            throw std::invalid_argument{"Must have equal amounts and destinations"};
+          if (amount && amount->empty())
+            throw std::invalid_argument{"Zero destinations only valid with empty amounts"};
           if (!payment_id.empty())
-            return tx_error(error::tx_long_pid);
+            throw std::invalid_argument{"Long payment id was provided - deprecated"};
 
           cryptonote::network_type ctype{};
           Monero::NetworkType mtype{};
           std::uint64_t per_byte_fee = 0;
           std::uint64_t fee_mask = 0;
-          std::string change_address;
+          std::string change_address{};
           cryptonote::account_keys keys{};
           cryptonote::account_public_address change_account{};
-          std::unordered_map<crypto::public_key, std::pair<std::pair<std::uint64_t, std::uint64_t>, std::shared_ptr<const backend::transaction>>> unspent;
+          unspent_map unspent{};
           {
             data_->refresh(); // get latest outputs, block height, and fee info
 
             const boost::lock_guard<boost::mutex> lock{data_->sync};
-            per_byte_fee = data_->per_byte_fee;
             fee_mask = data_->fee_mask;
 
-            if (!per_byte_fee || !fee_mask || !data_->passed_login)
-              return tx_error(data_->refresh_error);
+            if (data_->per_byte_fee.empty() || !fee_mask || !data_->passed_login)
+              throw std::system_error{data_->refresh_error, "Tx construction"};
+
+            if (data_->per_byte_fee.size() <= priority_int)
+              per_byte_fee = data_->per_byte_fee.back();
+            else
+              per_byte_fee = data_->per_byte_fee[priority_int];
 
             mtype = data_->primary.type;
             ctype = data_->get_net_type();
@@ -1346,86 +1372,36 @@ namespace lwsf { namespace internal
             }
           }
  
-          const bool subtract_from_dest = !amount;
-          if (subtract_from_dest)
-          {
-            std::uint64_t total_unspent = 0;
-            for (const auto& tx : unspent)
-            {
-              const auto output = tx.second.second->receives.find(tx.first);
-              LWSF_TX_ASSERT(output != tx.second.second->receives.end());
-              total_unspent += output->second.amount;
-            }
-            amount = std::vector<std::uint64_t>{total_unspent};
-          }
-
-          LWSF_TX_ASSERT(dst_addr.size() <= amount->size());
-
           // By copy to catch mutations (want each invoke to be consistent)
-          const auto gather_sources_and_construct_tx = [=] (const std::uint64_t min_fee)
-            -> std::unique_ptr<internal::pending_transaction>
+          const auto gather_sources_and_construct_tx =
+            [=] (unspent_by_amount_map unspent_by_amount, destinations_vector dests, const transfers_map& transfers, const std::string& extra_nonce, const std::uint64_t min_fee)
+              -> std::shared_ptr<backend::transaction>
           {
-            std::string extra_nonce;
-            std::vector<cryptonote::tx_destination_entry> dests;
-            std::multiset<std::pair<std::uint64_t, std::string>> transfers;
-            for (std::size_t i = 0; i < dst_addr.size(); ++i)
-            {
-              cryptonote::address_parse_info info{};
-              if (!cryptonote::get_account_address_from_str(info, ctype, dst_addr.at(i)))
-                return tx_error(error::tx_invalid_address);
+            // leave 1 spot for change
+            LWSF_TX_VERIFY(!dests.empty());
+            LWSF_TX_VERIFY(dests.size() < config::max_outputs_in_construction);
+            LWSF_TX_VERIFY(dests.size() == transfers.size());
 
-              if (info.has_payment_id)
-              {
-                if (!extra_nonce.empty())
-                  return tx_error(error::tx_two_pid);
-                cryptonote::set_encrypted_payment_id_to_tx_extra_nonce(extra_nonce, info.payment_id);
-              }
-
-              transfers.insert({amount->at(i), dst_addr.at(i)});
-
-              auto& dest = dests.emplace_back();
-              dest.original = dst_addr.at(i);
-              dest.addr = info.address;
-              dest.amount = amount->at(i);
-              dest.is_subaddress = info.is_subaddress;
-              dest.is_integrated = info.has_payment_id;
-            }
-
-            for (std::size_t i = dst_addr.size(); i < amount->size(); ++i)
-            {
-              // this is a "self-sweep" (consolidation)
-              auto& dest = dests.emplace_back();
-              dest.original = change_address;
-              dest.addr = change_account;
-              dest.amount = amount->at(i);
-              dest.is_subaddress = subaddr_account;
-              dest.is_integrated = false;
-            }
+            std::uint64_t transfer_total = 0;
+            for (const auto & e : dests)
+              transfer_total += e.amount;
 
             std::vector<std::uint8_t> extra;
             if (!extra_nonce.empty() && !cryptonote::add_extra_nonce_to_tx_extra(extra, extra_nonce))
-              return tx_error(error::tx_extra);
-
-
-            // actually sorted by amount then reverse index (see comment above)
-            std::map<std::pair<std::uint64_t, std::uint64_t>, std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> unspent_by_amount_then_index;
-            for (const auto& tx : unspent)
-              unspent_by_amount_then_index.try_emplace(tx.second.first).first->second = {tx.first, tx.second.second};
+              throw std::runtime_error{"cryptonote:add_extra_nonce_to_tx_extra failed"};
 
             bool has_change = false;
             std::vector<std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> spending;
             {
-              std::uint64_t fee = 0;
-              std::uint64_t remaining =
-                std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
-
+              std::uint64_t fee = 1;
+              std::uint64_t remaining = transfer_total;
               while (bool(remaining + fee))
               {
-                if (unspent_by_amount_then_index.empty())
+                if (unspent_by_amount.empty())
                 {
                   if (subtract_from_dest && !remaining)
                     break;
-                  return tx_error(error::tx_low_funds);
+                  throw_low_funds();
                 }
 
                 /* Check if we can omit change address for more efficiency. We
@@ -1435,12 +1411,12 @@ namespace lwsf { namespace internal
                   fee = estimate_fee(per_byte_fee, spending.size() + 1, dests.size(), mixin_count, extra.size(), fee_mask);
                   fee = std::max(min_fee, fee);
                   const std::uint64_t needed = remaining + fee;
-                  const auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
-                  if (output != unspent_by_amount_then_index.end() && needed == output->first.first)
+                  const auto output = unspent_by_amount.lower_bound({needed, 0});
+                  if (output != unspent_by_amount.end() && needed == output->first.first)
                   {
                     remaining = 0;
                     spending.emplace_back(output->second.first, output->second.second);
-                    unspent_by_amount_then_index.erase(output);
+                    unspent_by_amount.erase(output);
                     break;
                   }
                 }
@@ -1450,14 +1426,14 @@ namespace lwsf { namespace internal
                 fee = std::max(min_fee, fee);
 
                 const std::uint64_t needed = remaining + fee;
-                auto output = unspent_by_amount_then_index.lower_bound({needed, 0});
-                if (output == unspent_by_amount_then_index.end())
+                auto output = unspent_by_amount.lower_bound({needed, 0});
+                if (output == unspent_by_amount.end())
                   --output;
 
                 const std::uint64_t this_amount = output->first.first;
                 const bool complete = needed <= this_amount;
                 spending.emplace_back(output->second.first, output->second.second);
-                unspent_by_amount_then_index.erase(output);
+                unspent_by_amount.erase(output);
 
                 remaining -= this_amount;
                 if (complete)
@@ -1466,9 +1442,9 @@ namespace lwsf { namespace internal
 
               if (subtract_from_dest)
               {
-                LWSF_TX_ASSERT(dests.size() == 1);
+                LWSF_TX_VERIFY(dests.size() == 1);
                 if (dests.back().amount < fee)
-                  return tx_error(error::tx_low_funds);
+                  throw_low_funds();
                 dests.back().amount -= fee;
                 fee = 0;
               }
@@ -1485,7 +1461,7 @@ namespace lwsf { namespace internal
                 change_dest.is_integrated = false;
               }
 
-              LWSF_TX_ASSERT(config::minimum_outputs <= dests.size());
+              LWSF_TX_VERIFY(config::min_outputs <= dests.size());
 
               // verify SUM(input) = SUM(output) - fee
 
@@ -1493,14 +1469,14 @@ namespace lwsf { namespace internal
               for (const auto& source : spending)
               {
                 const auto output = source.second->receives.find(source.first);
-                LWSF_TX_ASSERT(output != source.second->receives.end());
+                LWSF_TX_VERIFY(output != source.second->receives.end());
                 remaining += output->second.amount;
               }
 
               for (const auto& dest : dests)
                 remaining -= dest.amount;
 
-              LWSF_TX_ASSERT(fee == remaining);
+              LWSF_TX_VERIFY(fee == remaining);
             }
 
             const auto rct_amount = [] (const backend::transfer_in& source)
@@ -1517,8 +1493,7 @@ namespace lwsf { namespace internal
 
               auto resp = data_->get_decoys(req);
               if (!resp)
-                return tx_error(resp.error());
-
+                throw std::system_error{resp.error()};
               decoys = std::move(*resp);
             }
 
@@ -1555,7 +1530,7 @@ namespace lwsf { namespace internal
                 const std::uint64_t amount = rct_amount(source);
                 const auto ring = std::lower_bound(decoys.begin(), decoys.end(), amount, by_amount{});
                 if (ring == decoys.end() || ring->amount != rpc::uint64_string(amount))
-                  return tx_error(error::tx_decoys);
+                  throw std::runtime_error{"Missing requested decoys"};
 
                 for (const auto& decoy : ring->outputs)
                   entry.outputs.emplace_back(std::uint64_t(decoy.global_index), rct::ctkey{decoy.public_key, decoy.rct});
@@ -1583,11 +1558,11 @@ namespace lwsf { namespace internal
             std::shuffle(sources.begin(), sources.end(), crypto::random_device{});
             for (auto& source : sources)
             {
-              LWSF_TX_ASSERT(!source.outputs.empty());
+              LWSF_TX_VERIFY(!source.outputs.empty());
 
               const std::uint64_t real_source = source.outputs.front().first;
               std::sort(source.outputs.begin(), source.outputs.end(), ring_sort);
-              LWSF_TX_ASSERT(std::unique(source.outputs.begin(), source.outputs.end(), ring_compare) == source.outputs.end());
+              LWSF_TX_VERIFY(std::unique(source.outputs.begin(), source.outputs.end(), ring_compare) == source.outputs.end());
 
               for (std::size_t i = 0; i < source.outputs.size(); ++i)
               {
@@ -1601,7 +1576,7 @@ namespace lwsf { namespace internal
 
             // By copy to catch mutations (want each invoke to be consistent)
             const auto construct_tx = [=, &dests, &sources = std::as_const(sources)] ()
-              -> std::unique_ptr<internal::pending_transaction>
+              -> std::shared_ptr<backend::transaction>
             {
               auto rsources = sources; // already shuffled above
               auto rdests = dests; // in case we need to retry fee
@@ -1614,13 +1589,15 @@ namespace lwsf { namespace internal
               crypto::secret_key tx_key;
               std::vector<crypto::secret_key> tx_keys;
               cryptonote::transaction tx;
+              LWSF_TX_VERIFY(config::min_outputs <= rdests.size());
+              LWSF_TX_VERIFY(rdests.size() <= config::max_outputs_in_construction);
               if (!cryptonote::construct_tx_and_get_tx_key(keys, subs, rsources, rdests, change_account, extra, tx, tx_key, tx_keys, true /* rct */, config, true /* view_tags */))
-                return tx_error(error::tx_failed);
+                throw std::runtime_error{"cryptonote::construct_tx_and_get_tx_key failed"};
 
               auto details = std::make_shared<backend::transaction>();
               details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
               details->timestamp = std::chrono::system_clock::now();
-              details->amount = std::accumulate(amount->begin(), amount->end(), std::uint64_t(0));
+              details->amount = transfer_total;
               details->fee = get_tx_fee(tx);
 
               const std::uint64_t weight = get_transaction_weight(tx, details->raw_bytes.size());
@@ -1628,7 +1605,7 @@ namespace lwsf { namespace internal
 
               const auto get_change_index = [&] () -> std::size_t
               {
-                LWSF_TX_ASSERT(!dests.empty());
+                LWSF_TX_VERIFY(!dests.empty());
                 if (subtract_from_dest)
                   return 0;
                 if (has_change && dests.back().original == change_address)
@@ -1663,7 +1640,7 @@ namespace lwsf { namespace internal
               get_transaction_hash(tx, details->id);
               get_transaction_prefix_hash(tx, details->prefix);
 
-              LWSF_TX_ASSERT(rsources.size() == tx.vin.size());
+              LWSF_TX_VERIFY(rsources.size() == tx.vin.size());
               for (std::size_t i = 0; i < rsources.size(); ++i)
               {
                 const auto& source = rsources.at(i);
@@ -1674,16 +1651,16 @@ namespace lwsf { namespace internal
                 const auto elem = std::find_if(spending.begin(), spending.end(), [&] (const auto& e) {
                   return e.first == spend->second.output_pub;
                 });
-                LWSF_TX_ASSERT(elem != spending.end());
+                LWSF_TX_VERIFY(elem != spending.end());
 
                 const auto& base = elem->second->receives.at(spend->second.output_pub);
                 spend->second.sender = base.recipient;
                 spend->second.tx_pub = base.tx_pub;
               }
 
-              LWSF_TX_ASSERT(rdests.size() == tx.vout.size());
-              LWSF_TX_ASSERT(rdests.size() == tx.rct_signatures.ecdhInfo.size());
-              LWSF_TX_ASSERT(tx_keys.empty() || tx_keys.size() == rdests.size());
+              LWSF_TX_VERIFY(rdests.size() == tx.vout.size());
+              LWSF_TX_VERIFY(rdests.size() == tx.rct_signatures.ecdhInfo.size());
+              LWSF_TX_VERIFY(tx_keys.empty() || tx_keys.size() == rdests.size());
 
               struct get_output_pub
               {
@@ -1728,7 +1705,7 @@ namespace lwsf { namespace internal
                   details->transfers.emplace_back(dest.original, dest.amount).secret = tx_keys.at(i);
                   rtransfers.erase(is_transfer);
                 }
-                LWSF_TX_ASSERT(rtransfers.empty());
+                LWSF_TX_VERIFY(rtransfers.empty());
               }
               else
               {
@@ -1736,7 +1713,7 @@ namespace lwsf { namespace internal
                   details->transfers.emplace_back(transfer.second, transfer.first).secret = tx_key;
               }
 
-              return std::make_unique<internal::pending_transaction>(data_, std::move(tx), std::move(details));
+              return details;
             }; // end `construct_tx` lambda
 
             // only one retry should be needed
@@ -1747,28 +1724,198 @@ namespace lwsf { namespace internal
                 return pending;
               // else `dests` should've been modified for retry
             }
-            LWSF_TX_ASSERT(false); // this should be unreachable
+            LWSF_TX_VERIFY(false); // this should be unreachable
           }; // end `gather_sources_and_construct_tx` lamda
 
-          std::uint64_t min_fee = 0;
-          for (unsigned attempt = 0; attempt < unspent.size(); ++attempt)
+          const auto get_unspent_by_amount = [] (const unspent_map& unspent)
           {
-            try { return gather_sources_and_construct_tx(min_fee); }
-            catch (const need_more_sources& e)
+            // actually sorted by amount then reverse index (see comment above)
+            unspent_by_amount_map out;
+            for (const auto& tx : unspent)
+              out.try_emplace(tx.second.first).first->second = {tx.first, tx.second.second};
+            return out;
+          };
+
+          if (subtract_from_dest)
+          {
+            std::uint64_t total_unspent = 0;
+            for (const auto& tx : unspent)
             {
-              min_fee = e.fee();
+              const auto output = tx.second.second->receives.find(tx.first);
+              LWSF_TX_VERIFY(output != tx.second.second->receives.end());
+              total_unspent += output->second.amount;
             }
+            amount = std::vector<std::uint64_t>{total_unspent};
           }
 
-          return tx_error(error::tx_low_funds);
+          std::string extra_nonce{};
+          destinations_vector dests_flat{};
+          transfers_map transfers_flat{};
+
+          for (std::size_t i = 0; i < dst_addr.size(); ++i)
+          {
+            cryptonote::address_parse_info info{};
+            if (!cryptonote::get_account_address_from_str(info, ctype, dst_addr.at(i)))
+              throw std::invalid_argument{"Invalid destination address"};
+
+            if (info.has_payment_id)
+            {
+              if (!extra_nonce.empty())
+                throw std::invalid_argument{"Two payment ids provided"};
+              cryptonote::set_encrypted_payment_id_to_tx_extra_nonce(extra_nonce, info.payment_id);
+            }
+
+            transfers_flat.insert({amount->at(i), dst_addr.at(i)});
+
+            auto& dest = dests_flat.emplace_back();
+            dest.original = dst_addr.at(i);
+            dest.addr = info.address;
+            dest.amount = amount->at(i);
+            dest.is_subaddress = info.is_subaddress;
+            dest.is_integrated = info.has_payment_id;
+          }
+
+          LWSF_TX_VERIFY(bool(amount));
+          LWSF_TX_VERIFY(dst_addr.size() <= amount->size());
+          for (std::size_t i = dst_addr.size(); i < amount->size(); ++i)
+          {
+            // this is a "self-sweep" (consolidation)
+            auto& dest = dests_flat.emplace_back();
+            dest.original = change_address;
+            dest.addr = change_account;
+            dest.amount = amount->at(i);
+            dest.is_subaddress = subaddr_account;
+            dest.is_integrated = false;
+          }
+
+          std::sort(dests_flat.begin(), dests_flat.end(), [] (const auto& lhs, const auto& rhs) {
+            return lhs.amount < rhs.amount;
+          });
+
+          /* This function makes a crude attempt at breaking up destinations
+            into multiple transactions IFF exceeding output maximum. The
+            algorithm is crude, and does a best effort to minimize source/input
+            usage. Unfortunately capture by reference, just much easier. */
+          const auto get_and_update_destinations = [&] ()
+          {
+            // leave a spot for change
+            LWSF_TX_VERIFY(dests_flat.size() == transfers_flat.size());
+            if (dests_flat.size() < config::max_outputs_in_construction)
+            {
+              auto out = std::make_pair(std::move(dests_flat), std::move(transfers_flat));
+              dests_flat.clear();
+              transfers_flat.clear();
+              return out;
+            }
+
+            // split //
+
+            const std::size_t extra_size = extra_nonce.empty() ? 0 : extra_nonce.size() + 2;
+            auto unspent_by_amount = get_unspent_by_amount(unspent);
+            const std::size_t unspent_initial = unspent_by_amount.size();
+
+            std::pair<destinations_vector, transfers_map> out{};
+
+            const auto stop_condition = [&] ()
+            {
+              // leave one spot for change
+              static_assert(1 <= config::max_outputs_in_construction);
+              return dests_flat.empty() || std::get<0>(out).size() == config::max_outputs_in_construction - 1;
+            };
+            const auto update_transfers = [&] (const auto& dest)
+            {
+              auto transfer = transfers_flat.find({dest.amount, dest.original});
+              LWSF_TX_VERIFY(transfer != transfers_flat.end());
+              std::get<1>(out).insert(std::move(*transfer));
+              transfers_flat.erase(transfer);
+            };
+            const auto by_amount = [] (const auto& lhs, const std::uint64_t rhs)
+            {
+              return lhs.amount < rhs;
+            };
+
+            std::uint64_t remaining = 0;
+            while (!stop_condition())
+            {
+              // add largest amount first
+              std::get<0>(out).push_back(std::move(dests_flat.back()));
+              dests_flat.pop_back();
+              update_transfers(std::get<0>(out).back());
+
+              {
+                const std::uint64_t amount = std::get<0>(out).back().amount;
+                const std::size_t spend_size = unspent_initial - unspent_by_amount.size() + 1;
+                const std::uint64_t fee =
+                  estimate_fee(per_byte_fee, spend_size, std::get<0>(out).size() + 1, mixin_count, extra_size, fee_mask);
+                const auto source = unspent_by_amount.lower_bound({amount + fee, 0});
+                if (source == unspent_by_amount.end())
+                  return out; // the "real" tx construction mechanism needs to run
+                remaining += std::get<0>(source->first) - amount;
+                unspent_by_amount.erase(source);
+              }
+
+              const std::size_t spend_size = unspent_initial - unspent_by_amount.size();
+              while (!stop_condition())
+              {
+                const std::uint64_t fee =
+                  estimate_fee(per_byte_fee, spend_size, std::get<0>(out).size() + 1, mixin_count, extra_size, fee_mask);
+                if (remaining <= fee)
+                  break;
+
+                auto dest = std::lower_bound(dests_flat.begin(), dests_flat.end(), remaining - fee, by_amount);
+                if (dest == dests_flat.end())
+                  --dest;
+
+                std::get<0>(out).push_back(std::move(*dest));
+                dests_flat.erase(dest);
+                update_transfers(std::get<0>(out).back());
+
+                remaining -= std::get<0>(out).back().amount;
+              }
+            }
+
+            return out;
+          };
+
+          std::vector<std::shared_ptr<backend::transaction>> pending;
+          while (!dests_flat.empty())
+          {
+            std::uint64_t min_fee = 0;
+            const auto dests = get_and_update_destinations(); // `dests_flat` pruned
+            const auto unspent_by_amount = get_unspent_by_amount(unspent);
+
+            unsigned attempt = 0;
+            for (; attempt < unspent.size(); ++attempt)
+            {
+              try
+              {
+                auto tx = gather_sources_and_construct_tx(unspent_by_amount, std::get<0>(dests), std::get<1>(dests), extra_nonce, min_fee);
+                LWSF_TX_VERIFY(tx != nullptr);
+                for (const auto& spend : tx->spends)
+                  unspent.erase(spend.second.output_pub);
+                pending.push_back(std::move(tx));
+                break; // goto next tx
+              }
+              catch (const need_more_sources& e)
+              {
+                min_fee = std::max(min_fee, e.fee());
+              }
+            }
+
+            if (attempt == unspent.size())
+              break;
+          }
+
+          if (!dests_flat.empty())
+            throw_low_funds();
+          return std::make_unique<internal::pending_transaction>(data_, std::string{}, std::move(pending));
         }(); // end unnamed lambda encapsulating all tx construction
 
-      LWSF_TX_ASSERT(out != nullptr);
+      LWSF_TX_VERIFY(out != nullptr);
     }
-    catch (const std::exception & e)
+    catch (const std::exception& e)
     {
-      set_critical(e);
-      out = tx_error(error::tx_critical);
+      out = std::make_unique<internal::pending_transaction>(data_, e.what());
     }
 
     return out.release();

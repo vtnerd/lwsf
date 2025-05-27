@@ -370,6 +370,7 @@ namespace lwsf { namespace internal { namespace rpc
     static constexpr const char* endpoint() noexcept { return "/get_unspent_outs"; }
 
     std::vector<output> outputs;
+    std::vector<std::uint64_t> fees;
     std::uint64_t per_byte_fee;
     std::uint64_t fee_mask;
   };
