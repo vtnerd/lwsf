@@ -33,6 +33,7 @@
 #include "byte_slice.h"   // monero/contrib/epee/include
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "error.h"
+#include "numeric.h"
 #include "string_tools.h" // monero/contrib/epee/include
 
 
@@ -93,7 +94,7 @@ namespace lwsf { namespace internal
 
   std::uint64_t pending_transaction::amount() const
   {
-    std::uint64_t out = 0;
+    safe_uint64_t out{};
     for (const auto& e : local_)
       out += e->amount;
     return out;
@@ -101,7 +102,7 @@ namespace lwsf { namespace internal
 
   std::uint64_t pending_transaction::fee() const
   {
-    std::uint64_t out = 0;
+    safe_uint64_t out{};
     for (const auto& e : local_)
       out += e->fee;
     return out;

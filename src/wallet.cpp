@@ -56,6 +56,7 @@
 #include "net/parse.h"         // monero/src
 #include "net/socks.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
+#include "numeric.h"
 #include "pending_transaction.h"
 #include "subaddress_account.h"
 #include "subaddress_minor.h"
@@ -1382,8 +1383,8 @@ namespace lwsf { namespace internal
             LWSF_TX_VERIFY(dests.size() < config::max_outputs_in_construction);
             LWSF_TX_VERIFY(dests.size() == transfers.size());
 
-            std::uint64_t transfer_total = 0;
-            for (const auto & e : dests)
+            safe_uint64_t transfer_total{};
+            for (const auto& e : dests)
               transfer_total += e.amount;
 
             std::vector<std::uint8_t> extra;
@@ -1593,6 +1594,10 @@ namespace lwsf { namespace internal
               LWSF_TX_VERIFY(rdests.size() <= config::max_outputs_in_construction);
               if (!cryptonote::construct_tx_and_get_tx_key(keys, subs, rsources, rdests, change_account, extra, tx, tx_key, tx_keys, true /* rct */, config, true /* view_tags */))
                 throw std::runtime_error{"cryptonote::construct_tx_and_get_tx_key failed"};
+
+              /* Collect all information for `backend::transaction` - this
+                helps with UI as the transaction will appear immediately when
+                `pending_transaction->commit()` is performed. */
 
               auto details = std::make_shared<backend::transaction>();
               details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
@@ -1903,7 +1908,7 @@ namespace lwsf { namespace internal
             }
 
             if (attempt == unspent.size())
-              break;
+              throw_low_funds();
           }
 
           if (!dests_flat.empty())
