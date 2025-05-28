@@ -75,7 +75,7 @@ namespace lwsf { namespace internal
 
     safe_integer& subtract(safe_integer rhs)
     {
-      if ((0 < rhs.value_ && value_ < std::numeric_limits<T>::min() < rhs.value_) || (rhs.value_ < 0 && value_ > std::numeric_limits<T>::max() + rhs.value_))
+      if ((0 < rhs.value_ && value_ < std::numeric_limits<T>::min() + rhs.value_) || (rhs.value_ < 0 && value_ > std::numeric_limits<T>::max() + rhs.value_))
         throw std::underflow_error{"safe_integer underflow in subtraction"};
       value_ -= rhs.value_;
       return *this;
