@@ -1394,6 +1394,12 @@ namespace lwsf { namespace internal
             bool has_change = false;
             std::vector<std::pair<crypto::public_key, std::shared_ptr<const backend::transaction>>> spending;
             {
+              const auto is_rct = [] (const unspent_by_amount_map::iterator output)
+              {
+                return bool(output->second.second->receives.at(output->second.first).rct_mask);
+              };
+
+              bool all_rct = true;
               std::uint64_t fee = 1;
               std::uint64_t remaining = transfer_total;
               while (bool(remaining + fee))
@@ -1416,6 +1422,7 @@ namespace lwsf { namespace internal
                   if (output != unspent_by_amount.end() && needed == output->first.first)
                   {
                     remaining = 0;
+                    all_rct &= is_rct(output);
                     spending.emplace_back(output->second.first, output->second.second);
                     unspent_by_amount.erase(output);
                     break;
@@ -1433,12 +1440,28 @@ namespace lwsf { namespace internal
 
                 const std::uint64_t this_amount = output->first.first;
                 const bool complete = needed <= this_amount;
+                all_rct &= is_rct(output);
                 spending.emplace_back(output->second.first, output->second.second);
                 unspent_by_amount.erase(output);
 
                 remaining -= this_amount;
                 if (complete)
                   break;
+              }
+
+              // merge lowest dust into a 2of2 tx
+              if (all_rct && spending.size() <= 1)
+              {
+                for (auto output = unspent_by_amount.begin(); output != unspent_by_amount.end(); ++output)
+                {
+                  if (is_rct(output))
+                  {
+                    remaining -= output->first.first;
+                    spending.emplace_back(output->second.first, output->second.second);
+                    unspent_by_amount.erase(output);
+                    break;
+                  }
+                }
               }
 
               if (subtract_from_dest)
