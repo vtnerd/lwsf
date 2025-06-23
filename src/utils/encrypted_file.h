@@ -1,20 +1,21 @@
-// Copyright (c) 2024, The Monero Project
+// Copyright (c) 2025, The Monero Project
+// 
 // All rights reserved.
-//
+// 
 // Redistribution and use in source and binary forms, with or without modification, are
 // permitted provided that the following conditions are met:
-//
+// 
 // 1. Redistributions of source code must retain the above copyright notice, this list of
 //    conditions and the following disclaimer.
-//
+// 
 // 2. Redistributions in binary form must reproduce the above copyright notice, this list
 //    of conditions and the following disclaimer in the documentation and/or other
 //    materials provided with the distribution.
-//
+// 
 // 3. Neither the name of the copyright holder nor the names of its contributors may be
 //    used to endorse or promote products derived from this software without specific
 //    prior written permission.
-//
+// 
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY
 // EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
 // MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL
@@ -27,47 +28,22 @@
 
 #pragma once
 
-#include <system_error>
+#include <cstdint>
+#include <string>
+#include <string_view>
 
-namespace lwsf
+#include "byte_slice.h"    // monero/contrib/epee/include
+#include "common/expect.h" // monero/src
+#include "span.h"          // monero/contrib/epee/include
+
+namespace lwsf { namespace internal
 {
-  enum class error : int
-  {
-    none = 0,           //!< Must be zero for `expect<..>`
-    approval,           //!< Account needs approval
-    configuration,      //!< Bad Configuration
-    create,             //!< Account creation not possible
-    decryption,         //!< Failed to decrypt data
-    import_fee,         //!< `import_wallet_request` has fee
-    import_invalid,     //!< `import_wallet_request` has invalid fee
-    import_pending,     //!< `import_wallet_request` not fulfilled/approved
-    invalid_scheme,     //!< Invalid network scheme
-    network_type,       //!< Mismatch on network type
-    subaddr_ahead,      //!< Server limits on subaddresses affects lookahead
-    subaddr_disabled,   //!< Server has subaddresses disabled
-    subaddr_local,      //!< Local limits on subaddresses too small
-    unexpected_userinfo,//!< Unexpected user+pass provided
-    unexpected_nullptr, //!< Expected non-nullptr
-  };
+  //! \return `filename` contents with `file_magic` verified and stripped off.
+  epee::byte_slice try_load(const std::string& filename, std::string_view file_magic);
 
-  //! \return Error message string.
-  const char* get_string(error value) noexcept;
+  //! `file_magic` is pre-pended to file bytes for identification.
+  expect<epee::byte_slice> encrypt(std::string_view file_magic, epee::byte_slice payload, std::uint64_t iterations, epee::span<const std::uint8_t> password);
 
-  //! \return Category for `schema_error`.
-  const std::error_category& error_category() noexcept;
-
-  //! \return Error code with `value` and `schema_category()`.
-  inline std::error_code make_error_code(const error value) noexcept
-  {
-    return std::error_code{int(value), error_category()};
-  }
-
-} // lwsf
-
-namespace std
-{
-  template<>
-  struct is_error_code_enum<lwsf::error>
-    : true_type
-  {};
-}
+  //! Use `try_load` for to retrieve `contents`, then decrypt with `password`.
+  expect<epee::byte_slice> decrypt(epee::byte_slice contents, epee::span<const std::uint8_t> password);
+}} // lwsf // internal

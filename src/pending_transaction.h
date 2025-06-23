@@ -37,6 +37,7 @@
 #include "common/expect.h"                     // monero/src
 #include "cryptonote_basic/cryptonote_basic.h" // monero/src
 #include "wallet/api/wallet2_api.h"            // moneor/src
+#include "wire/fwd.h"
 
 namespace lwsf { namespace internal
 {
@@ -53,7 +54,8 @@ namespace lwsf { namespace internal
     std::string error_;
 
   public:
-    pending_transaction(std::shared_ptr<backend::wallet> wallet, std::string error, std::vector<std::shared_ptr<backend::transaction>> local = {}); 
+    pending_transaction(std::shared_ptr<backend::wallet> wallet, std::string error, std::vector<std::shared_ptr<backend::transaction>> local = {});
+    static std::unique_ptr<pending_transaction> load_from_file(std::shared_ptr<backend::wallet> wallet, const std::string& filename);
 
     pending_transaction(pending_transaction&&) = delete;
     pending_transaction(const pending_transaction&) = delete;
@@ -62,6 +64,8 @@ namespace lwsf { namespace internal
 
     pending_transaction& operator=(pending_transaction&&) = delete;
     pending_transaction& operator=(const pending_transaction&) = delete;
+
+    bool send();
 
     virtual int status() const override final;
     virtual std::string errorString() const override final { return error_; }
@@ -98,4 +102,6 @@ namespace lwsf { namespace internal
      */
     virtual std::vector<std::string> signersKeys() const override final { return {}; }
   };
+
+  WIRE_DECLARE_OBJECT(pending_transaction);
 }} // lwsf // internal

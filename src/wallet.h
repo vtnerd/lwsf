@@ -449,7 +449,7 @@ namespace internal
      * @param signData encrypted unsigned transaction. Obtained with PendingTransaction::multisigSignData
      * @return PendingTransaction
      */
-    virtual Monero::PendingTransaction*  restoreMultisigTransaction(const std::string& signData) override { /* TODO */ return nullptr; }
+    virtual Monero::PendingTransaction* restoreMultisigTransaction(const std::string& signData) override { /* TODO */ return nullptr; }
 
     /*!
      * \brief createTransactionMultDest creates transaction with multiple destinations. if dst_addr is an integrated address, payment_id is ignored
@@ -508,7 +508,7 @@ namespace internal
     * \brief submitTransaction - submits transaction in signed tx file
     * \return                  - true on success
     */
-    virtual bool submitTransaction(const std::string &fileName) override { /* TODO */ return false; }
+    virtual bool submitTransaction(const std::string &fileName) override;
     
 
     /*!

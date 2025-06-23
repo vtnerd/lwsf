@@ -36,11 +36,8 @@
 #include <boost/range/combine.hpp>
 #include <exception>
 #include <filesystem>
-#include <fstream>
 #include <sodium/core.h>
-#include <sodium/crypto_pwhash_argon2id.h>
 #include <sodium/randombytes.h>
-#include <sodium/crypto_aead_chacha20poly1305.h>
 #include <stdexcept>
 #include <string_view>
 #include "address_book.h"
@@ -61,6 +58,7 @@
 #include "subaddress_account.h"
 #include "subaddress_minor.h"
 #include "transaction_history.h"
+#include "utils/encrypted_file.h"
 #include "wire.h"
 #include "wire/msgpack.h"
 
@@ -77,7 +75,7 @@ namespace lwsf { namespace internal
   namespace
   {
     //! The stored wallet file always has this at beginning
-    static constexpr std::string_view file_magic{"lwsf-wallet-1.0"};
+    static constexpr std::string_view wallet_file_magic{"lwsf-wallet-1.0"};
 
     struct null_connector
     {
@@ -178,209 +176,6 @@ namespace lwsf { namespace internal
     std::uint64_t estimate_fee(const std::uint64_t base_fee, const std::size_t n_inputs, const std::size_t n_outputs, const std::uint32_t mixin, const std::size_t extra_size, const std::uint64_t fee_mask) noexcept
     {
       return calculate_fee_from_weight(base_fee, estimate_tx_weight(n_inputs, n_outputs, mixin, extra_size), fee_mask);
-    }
-
-    struct encrypted_file
-    {
-      std::string cipher;        //!< Name of cipher+authentication used
-      std::string pwhasher;      //!< Name of pwhasher used
-      epee::byte_slice salt;     //!< Pwhashing salt
-      epee::byte_slice nonce;    //!< Encryption iv/nonce
-      epee::byte_slice epayload; //!< Encrypted contents
-      std::uint64_t iterations;  //!< Pwhashing iterations
-      std::uint32_t memory;      //!< Pwhashing memory
-
-      encrypted_file() = delete;
-
-      //! \pre `sodium_init()` has been called
-      static epee::byte_slice get_random(const std::size_t length)
-      {
-        epee::byte_stream out;
-        out.put_n(0, length);
-        randombytes_buf(out.data(), length);
-        return epee::byte_slice{std::move(out)};
-      }
-
-      static constexpr const char* pwhasher_name() noexcept
-      {
-        return "argon2id";
-      }
-      static constexpr int pwhash_algorithm() noexcept
-      {
-        return crypto_pwhash_argon2id_ALG_ARGON2ID13;
-      }
-      static constexpr std::size_t salt_size() noexcept
-      {
-        return crypto_pwhash_argon2id_SALTBYTES;
-      }
-      static constexpr std::uint64_t ops_min() noexcept { return 5; }
-      static constexpr std::size_t memory_limit() noexcept { return 7 * 1024 * 1024; }
-      static epee::byte_slice get_salt() { return get_random(salt_size()); }
-
-      static constexpr const char* cipher_name() noexcept
-      {
-        return "chacha20-poly1305_ietf";
-      }
-      static constexpr unsigned long long max_size() noexcept
-      {
-        return crypto_aead_chacha20poly1305_ietf_MESSAGEBYTES_MAX;
-      }
-      static constexpr std::size_t key_size() noexcept
-      {
-        return crypto_aead_chacha20poly1305_ietf_KEYBYTES;
-      }
-      static constexpr std::size_t tag_size() noexcept
-      {
-        return crypto_aead_chacha20poly1305_ietf_ABYTES;
-      }
-      static constexpr std::size_t nonce_size() noexcept
-      {
-        return crypto_aead_chacha20poly1305_ietf_NPUBBYTES;
-      }
-      static epee::byte_slice get_nonce() { return get_random(nonce_size()); }
-
-      //! \pre `sodium_init()` has been called
-      std::array<std::uint8_t, 32> get_key(const std::string& password) const
-      {
-        std::array<std::uint8_t, key_size()> key{{}};
-        if (crypto_pwhash_argon2id(
-          key.data(), key.size(),
-          password.data(), password.size(),
-          salt.data(),
-          iterations, memory, pwhash_algorithm()) != 0)
-        {
-          throw std::runtime_error{std::string{pwhasher_name()} + " failed"};
-        }
-        return key;
-      }
-
-      static encrypted_file
-        make(const epee::byte_slice& upayload, const std::uint64_t iterations, const std::string& password)
-      {
-        if (sodium_init() < 0)
-          throw std::runtime_error{"Failed to initialize libsodium"};
-
-        if (max_size() < upayload.size())
-          throw std::runtime_error{std::string{"Exceeded max size for "} + cipher_name()};
-        if (std::numeric_limits<std::size_t>::max() - upayload.size() < tag_size())
-          throw std::runtime_error{"Exceeded max size_t after authentication tag"};
-
-        encrypted_file out{
-          cipher_name(),
-          pwhasher_name(),
-          get_salt(),
-          get_nonce(),
-          nullptr,
-          std::max(iterations, ops_min()),
-          memory_limit()
-        };
-
-        const auto key = out.get_key(password);
-
-        epee::byte_stream buffer;
-        buffer.put_n(0, upayload.size() + tag_size());
-
-        unsigned long long out_bytes = buffer.size();
-        if (crypto_aead_chacha20poly1305_ietf_encrypt(
-          buffer.data(), std::addressof(out_bytes),
-          upayload.data(), upayload.size(),
-          nullptr, 0,
-          nullptr,
-          out.nonce.data(), key.data()) != 0)
-        {
-          throw std::runtime_error{std::string{cipher_name()} + " encryption failed"};
-        }
-
-        out.epayload = epee::byte_slice{std::move(buffer)}.take_slice(out_bytes);
-        return out;
-      }
-
-      //! \return Unencrypted payload, or `nullptr`.
-      epee::byte_slice get_payload(const std::string& password) const
-      {
-        if (nonce.size() != nonce_size())
-          return nullptr;
-        if (salt.size() != salt_size())
-          return nullptr;
-        if (cipher != cipher_name())
-          return nullptr;
-        if (pwhasher != pwhasher_name())
-          return nullptr;
-        if (max_size() < epayload.size())
-          return nullptr;
-
-        if (sodium_init() < 0)
-          throw std::runtime_error{"Failed to initialize libsodium"};
-
-        const auto key = get_key(password);
-        static_assert(key_size() == key.size());
-
-        epee::byte_stream buffer;
-        buffer.put_n(0, epayload.size());
-
-        static_assert(
-          std::numeric_limits<std::size_t>::max() <= std::numeric_limits<unsigned long long>::max()
-        );
-
-        unsigned long long out_bytes = buffer.size();
-        if (crypto_aead_chacha20poly1305_ietf_decrypt(
-          buffer.data(), std::addressof(out_bytes),
-          nullptr,
-          epayload.data(), epayload.size(),
-          nullptr, 0,
-          nonce.data(), key.data()) != 0)
-        {
-          throw std::runtime_error{std::string{cipher_name()} + " decryption failed"};
-        }
-
-        return epee::byte_slice{std::move(buffer)}.take_slice(out_bytes);
-      }
-    };
-
-    template<typename F, typename T>
-    void map_encrypted_file(F& format, T& self)
-    {
-      wire::object(format,
-        WIRE_FIELD(cipher),
-        WIRE_FIELD(pwhasher),
-        WIRE_FIELD(salt),
-        WIRE_FIELD(nonce),
-        WIRE_FIELD(epayload),
-        WIRE_FIELD(iterations),
-        WIRE_FIELD(memory)
-      );
-    }
-
-    WIRE_DEFINE_OBJECT(encrypted_file, map_encrypted_file);
-
-    epee::byte_slice try_load(const std::string& filename)
-    {
-      std::ifstream file{filename, std::ios::binary};
-      if (!file.is_open())
-        return nullptr;
-
-      {
-        std::string magic;
-        magic.resize(file_magic.size());
-        file.read(magic.data(), magic.size());
-        if (!file.good() || magic != file_magic)
-          return nullptr;
-      }
-
-      file.seekg(0, std::ios::end);
-      const auto size = file.tellg();
-      if (size < 0 || std::size_t(size) < file_magic.size())
-        return nullptr;
-
-      epee::byte_stream buffer;
-      buffer.put_n(0, std::size_t(size) - file_magic.size());
-
-      file.seekg(file_magic.size());
-      file.read(reinterpret_cast<char*>(buffer.data()), buffer.size());
-
-      if (file.good())
-        return epee::byte_slice{std::move(buffer)};
-      return nullptr;
     }
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
@@ -571,7 +366,7 @@ namespace lwsf { namespace internal
 
   bool wallet::is_wallet_file(const std::string& path)
   {
-    return !try_load(path).empty();
+    return !try_load(path, wallet_file_magic).empty();
   }
 
   bool wallet::verify_password(std::string path, const std::string& password)
@@ -581,14 +376,10 @@ namespace lwsf { namespace internal
     if (keys_suffix.size() <= path.size() && std::string_view{path.data() + path.size() - keys_suffix.size()} == keys_suffix)
       path.erase(path.size() - keys_suffix.size());
 
-    epee::byte_slice file = try_load(path);
+    epee::byte_slice file = try_load(path, wallet_file_magic);
     if (file.empty())
       return false;
-
-    encrypted_file contents{};
-    if (wire::msgpack::from_bytes(std::move(file), contents))
-      return false;
-    return !contents.get_payload(password).empty();
+    return bool(decrypt(try_load(path, wallet_file_magic), epee::strspan<std::uint8_t>(password)));
   }
 
   std::vector<std::string> wallet::find(const std::string& path)
@@ -604,7 +395,7 @@ namespace lwsf { namespace internal
       if (std::filesystem::is_regular_file(itr->status()))
       {
         std::string filename = itr->path().filename().string();
-        if (!try_load(filename).empty())
+        if (!try_load(filename, wallet_file_magic).empty())
           out.push_back(std::move(filename));
       }
     }
@@ -667,19 +458,14 @@ namespace lwsf { namespace internal
   {
     try
     {
-      epee::byte_slice file = try_load(filename_ + ".new");
+      epee::byte_slice file = try_load(filename_ + ".new", wallet_file_magic);
       if (file.empty())
-        file = try_load(filename_);
+        file = try_load(filename_, wallet_file_magic);
 
       if (file.empty())
         throw std::runtime_error{"Unable to open wallet file " + filename_};
 
-      encrypted_file contents{};
-      if (std::error_code error = wire::msgpack::from_bytes(std::move(file), contents))
-        throw std::system_error{error};
-
-      epee::byte_slice payload = contents.get_payload(password_);
-      if (std::error_code error = data_->from_bytes(std::move(payload)))
+      if (std::error_code error = data_->from_bytes(decrypt(std::move(file), epee::strspan<std::uint8_t>(password_)).value()))
         throw std::system_error{error};
 
       // lock not needed; data_ was created and unique to us
@@ -714,9 +500,6 @@ namespace lwsf { namespace internal
       thread_state_(state::stop),
       mandatory_refresh_(false)
   {
-    if (sodium_init() < 0)
-      throw std::runtime_error{"Failed to initialize libsodium"};
-
     crypto::secret_key recovery;
     std::string language;
     if (!crypto::ElectrumWords::words_to_bytes(mnemonic, recovery, language))
@@ -926,18 +709,6 @@ namespace lwsf { namespace internal
 
     try
     {
-      epee::byte_slice payload = data_->to_bytes().value();
-      const auto contents = encrypted_file::make(payload, iterations_, password_);
-      const auto payload_size = payload.size();
-      payload = nullptr; // free up some memory that is no longer needed
-
-      epee::byte_stream buffer;
-      buffer.reserve(payload_size + 2048);
-      buffer.write(file_magic.data(), file_magic.size());
-
-      if (std::error_code error = wire::msgpack::to_bytes(buffer, contents))
-        throw std::system_error{error};
-
       const std::filesystem::path file = real_path;
       const std::filesystem::path new_file = real_path + ".new";
       const std::filesystem::path directory =
@@ -947,7 +718,9 @@ namespace lwsf { namespace internal
         std::filesystem::rename(new_file, file);
 
       // blocks until file and directory contents are synced
-      if (!atomic_file_write(new_file, directory, epee::byte_slice{std::move(buffer)}))
+      epee::byte_slice blob =
+        encrypt(wallet_file_magic, data_->to_bytes().value(), iterations_, epee::strspan<std::uint8_t>(password_)).value();
+      if (!atomic_file_write(new_file, directory, std::move(blob)))
         throw std::runtime_error{"Failed to write file " + real_path};
 
       std::filesystem::rename(new_file, file);
@@ -1956,6 +1729,14 @@ namespace lwsf { namespace internal
                                                    std::set<uint32_t> subaddr_indices)
   {
     return createTransactionMultDest({dst_addr}, payment_id, amount ? std::optional<std::vector<uint64_t>>{{*amount}} : std::nullopt, mixin_count, priority, subaddr_account, subaddr_indices);
+  }
+
+  bool wallet::submitTransaction(const std::string &fileName)
+  {
+    const auto tx = pending_transaction::load_from_file(data_, fileName);
+    if (!tx)
+      throw std::runtime_error{"Expected non-null from load_from_file"};
+    return tx->status() == Monero::PendingTransaction::Status_Ok && tx->send();
   }
 
   void wallet::disposeTransaction(Monero::PendingTransaction * t)

@@ -41,6 +41,8 @@ namespace lwsf
       return "Configuration issue";
     case error::create:
       return "Account creation not possible";
+    case error::decryption:
+      return "Unable to decrypt file (likely bad password)";
     case error::import_fee:
       return "Import/restore from height needs payment, see address book";
     case error::import_invalid:
@@ -57,6 +59,8 @@ namespace lwsf
       return "lwsf (local) limits on subaddresses too small";
     case error::unexpected_userinfo:
       return "Unexpected user+pass field in URL";
+    case error::unexpected_nullptr:
+      return "Unexpected nullptr";
 
     default:
       break;
