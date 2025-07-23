@@ -270,7 +270,7 @@ namespace internal
     * @brief watchOnly - checks if wallet is watch only
     * @return - true if watch only
     */
-    virtual bool watchOnly() const override { /* TODO */ return false; }
+    virtual bool watchOnly() const override { return false; }
 
     /**
      * @brief isDeterministic - checks if wallet keys are deterministic
@@ -428,7 +428,7 @@ namespace internal
      * @return new info string if more rounds required or exception if no more rounds (i.e. no rounds to boost)
      */
     virtual std::string getMultisigKeyExchangeBooster(const std::vector<std::string> &info, const uint32_t threshold, const uint32_t num_signers) override { /* TODO */ return {}; }
-#endif
+#endif // LWSF_MASTER_ENABLE
 
     /**
      * @brief exportMultisigImages - exports transfers' key images
@@ -737,7 +737,7 @@ namespace internal
 
     //! Initiates a light wallet import wallet request
     virtual bool lightWalletImportWalletRequest(std::string &payment_id, uint64_t &fee, bool &new_request, bool &request_fulfilled, std::string &payment_address, std::string &status) override;
-#endif LWSF_MASTER_ENABLE
+#endif // LWSF_MASTER_ENABLE
 
     //! locks/unlocks the keys file; returns true on success
     virtual bool lockKeysFile() override { return false; }

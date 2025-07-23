@@ -387,7 +387,7 @@ namespace lwsf { namespace internal
     std::vector<std::string> out;
     std::filesystem::path work_dir(path);
     if(!std::filesystem::is_directory(path))
-        return out;
+      return out;
 
     std::filesystem::recursive_directory_iterator end_itr;
     for (std::filesystem::recursive_directory_iterator itr(path); itr != end_itr; ++itr)
@@ -1921,6 +1921,6 @@ namespace lwsf { namespace internal
     payment_address = import->payment_address.value_or({});
     status = std::move(import->status);
   }
-#endif LWSF_MASTER_ENABLE
+#endif // LWSF_MASTER_ENABLE
 
 }} // lwsf // internal

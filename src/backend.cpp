@@ -243,7 +243,7 @@ namespace lwsf { namespace internal { namespace backend
 
       if constexpr (!std::is_const<T>())
       {
-        self.timestamp = std::nullopt;
+        self.timestamp = boost::none;
         if (timestamp)
           self.timestamp = time_point{time_point::duration{boost::numeric_cast<time_point::rep>(*timestamp)}};
       }
@@ -320,7 +320,7 @@ namespace lwsf { namespace internal { namespace backend
       default:
         throw std::runtime_error{"Unexpected ringct mask type"};
       case rpc::ringct::format::none:
-        out.rct_mask = std::nullopt;
+        out.rct_mask = boost::none;
         break;
       case rpc::ringct::format::encrypted:
       case rpc::ringct::format::recompute:
@@ -356,7 +356,7 @@ namespace lwsf { namespace internal { namespace backend
       }
     }
 
-    crypto::secret_key get_spend_secret(const account& self, const std::optional<rpc::address_meta>& index)
+    crypto::secret_key get_spend_secret(const account& self, const boost::optional<rpc::address_meta>& index)
     {
       if (!index || index->is_default())
         return self.spend.sec;
@@ -378,7 +378,7 @@ namespace lwsf { namespace internal { namespace backend
       return self.subaccounts[sub.maj_i].last < sub.min_i; // last is inclusive
     }
 
-    std::optional<std::vector<rpc::address_meta>> update_tx(const account& self, transaction& out, const rpc::transaction& source)
+    boost::optional<std::vector<rpc::address_meta>> update_tx(const account& self, transaction& out, const rpc::transaction& source)
     {
       /* Let `receives` re-populate in `merge_output`. This works because the
         server supplies all info - there is no local info to keep. */
@@ -390,7 +390,7 @@ namespace lwsf { namespace internal { namespace backend
       if (source.timestamp)
         out.timestamp = std::chrono::system_clock::from_time_t(*source.timestamp);
       else
-        out.timestamp = std::nullopt;
+        out.timestamp = boost::none;
       out.fee = std::uint64_t(source.fee.value_or(rpc::uint64_string(0)));
       out.height = source.height;
       out.unlock_time = source.unlock_time;
@@ -423,7 +423,7 @@ namespace lwsf { namespace internal { namespace backend
       }
 
       if (!std::uint64_t(source.total_received) && !total_spent)
-        return std::nullopt; // used as decoy
+        return boost::none; // used as decoy
 
       if (out.fee <= total_spent)
         total_spent -= out.fee;
@@ -516,7 +516,7 @@ namespace lwsf { namespace internal { namespace backend
 
               if (!rescanning)
               {
-                iter->second->height = std::nullopt;
+                iter->second->height = boost::none;
                 iter->second->failed = false;
               }
             }
@@ -1266,13 +1266,13 @@ namespace lwsf { namespace internal { namespace backend
         this->import_error = {};
       else
         this->import_error = value.error();
-      return value
-    }
+      return value;
+    };
 
     boost::unique_lock<boost::mutex> lock{sync};
 
     if (primary.restore_height <= height)
-      return update_import(import_response{});
+      return update_import(rpc::import_response{});
     if (import_error && import_error == error::import_pending)
       return import_error;
 
@@ -1289,14 +1289,14 @@ namespace lwsf { namespace internal { namespace backend
     rpc::login login{primary.address, primary.view.sec};
 
     lock.unlock();
-    const auto import = rpc::invoke<rpc::import_response>(client, login);
+    auto import = rpc::invoke<rpc::import_response>(client, login);
     lock.lock();
 
     if (!import)
       return update_import(import.error());
 
     if (import->request_fulfilled)
-      return update_import(std::move(*import));
+      return update_import(std::move(import));
 
     const unsigned total =
       unsigned(bool(import->import_fee)) + bool(import->payment_address);
@@ -1304,22 +1304,22 @@ namespace lwsf { namespace internal { namespace backend
     {
       default:
       case 0:
-        return update_import(error::import_pending);
+        return update_import({error::import_pending});
       case 1:
         if (import->import_fee.value_or(rpc::uint64_string(0)) == rpc::uint64_string(0))
-          return update_import(error::import_pending);
-        return update_import(error::import_invalid);
+          return update_import({error::import_pending});
+        return update_import({error::import_invalid});
       case 2:
         break;
     }
 
     cryptonote::address_parse_info info{};
     if (!cryptonote::get_account_address_from_str(info, convert_net_type(primary.type), *import->payment_address))
-      return update_import(error::import_invalid);
+      return update_import({error::import_invalid});
     if (info.has_payment_id && import->payment_id)
-      return update_import(error::import_invalid);
+      return update_import({error::import_invalid});
     if (import->payment_id && (import->payment_id->empty() || (import->payment_id->size() != sizeof(crypto::hash8) && import->payment_id->size() != sizeof(crypto::hash))))
-      return update_import(error::import_invalid);
+      return update_import({error::import_invalid});
 
 #ifdef LWSF_MASTER_ENABLE
     std::string payment_id;
@@ -1342,7 +1342,7 @@ namespace lwsf { namespace internal { namespace backend
     else
       primary.addressbook[i] = address_book_entry{std::move(*import->payment_address), std::move(payment_id), std::move(description)};
 #endif
-    return update_import(std::move(*import));
+    return update_import(std::move(import));
   }
 
   expect<std::vector<rpc::random_outputs>> wallet::get_decoys(const rpc::get_random_outs_request& req)

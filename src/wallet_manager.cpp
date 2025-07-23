@@ -291,6 +291,7 @@ namespace lwsf
       bool queryWalletDevice(Monero::Wallet::Device& device_type, const std::string &keys_file_name, const std::string &password, uint64_t kdf_rounds) const override
       {
         //! \TODO Complete
+        return false;
       }
 
     /*!

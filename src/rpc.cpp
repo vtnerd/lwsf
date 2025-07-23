@@ -184,8 +184,8 @@ namespace lwsf { namespace internal { namespace rpc
   {
     using min_spent = wire::min_element_sizeof<crypto::key_image>;
 
-    std::optional<std::string> timestamp;
-    std::optional<epee::byte_slice> payment_id;
+    boost::optional<std::string> timestamp;
+    boost::optional<epee::byte_slice> payment_id;
     wire::object(source,
       WIRE_FIELD_ARRAY(spent_outputs, min_spent),
       wire::optional_field("payment_id", std::ref(payment_id)),

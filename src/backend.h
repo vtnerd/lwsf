@@ -30,6 +30,7 @@
 
 #include <atomic>
 #include <boost/container/flat_map.hpp>
+#include <boost/optional/optional.hpp>
 #include <boost/thread/mutex.hpp>
 #include <chrono>
 #include <cstdint>
@@ -37,7 +38,6 @@
 #include <filesystem>
 #include <map>
 #include <memory>
-#include <optional>
 #include <unordered_map>
 #include <type_traits>
 #include <variant>
@@ -130,7 +130,7 @@ namespace lwsf { namespace internal { namespace backend
     std::uint64_t amount;
     rpc::address_meta recipient;
     std::uint16_t index;
-    std::optional<rct::key> rct_mask;
+    boost::optional<rct::key> rct_mask;
     crypto::public_key tx_pub;
 
     transfer_in() noexcept
@@ -178,8 +178,8 @@ namespace lwsf { namespace internal { namespace backend
     boost::container::flat_map<crypto::public_key, transfer_in, memory> receives; //!< Key is output pub
     std::vector<transfer_out> transfers;
     std::string description;
-    std::optional<std::chrono::system_clock::time_point> timestamp; //!< guaranteed to be unix epoch in C++20
-    std::optional<std::uint64_t> height;
+    boost::optional<std::chrono::system_clock::time_point> timestamp; //!< guaranteed to be unix epoch in C++20
+    boost::optional<std::uint64_t> height;
     std::uint64_t amount;
     std::uint64_t fee;
     std::uint64_t unlock_time;

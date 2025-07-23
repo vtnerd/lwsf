@@ -29,9 +29,9 @@
 #pragma once
 
 #include <boost/container/flat_set.hpp>
+#include <boost/optional/optional.hpp>
 #include <boost/variant.hpp>
 #include <ctime>
-#include <optional>
 #include <system_error>
 #include <type_traits>
 #include <vector>
@@ -120,7 +120,7 @@ namespace lwsf { namespace internal { namespace rpc
     login_response() = delete;
     static constexpr const char* endpoint() noexcept { return "/login"; }
 
-    std::optional<std::uint64_t> start_height;
+    boost::optional<std::uint64_t> start_height;
   };
   void read_bytes(wire::json_reader&, login_response&);
 
@@ -171,7 +171,7 @@ namespace lwsf { namespace internal { namespace rpc
   struct transaction_spend
   {
     uint64_string amount;
-    std::optional<address_meta> sender;
+    boost::optional<address_meta> sender;
     std::uint16_t out_index;
     crypto::key_image key_image;
     crypto::public_key tx_pub_key;
@@ -190,11 +190,11 @@ namespace lwsf { namespace internal { namespace rpc
   {
     std::vector<transaction_spend> spent_outputs;
     std::variant<empty, crypto::hash8, crypto::hash> payment_id;
-    std::optional<std::time_t> timestamp;
-    std::optional<uint64_string> fee;
+    boost::optional<std::time_t> timestamp;
+    boost::optional<uint64_string> fee;
     uint64_string total_received;
     std::uint64_t unlock_time;
-    std::optional<std::uint64_t> height;
+    boost::optional<std::uint64_t> height;
     crypto::hash hash;
     bool coinbase;
     bool mempool;
@@ -380,11 +380,13 @@ namespace lwsf { namespace internal { namespace rpc
   struct import_response
   {
     import_response() = delete;
+    import_response(import_response&&) = default;
+    import_response(const import_response&) = delete;
     static constexpr const char* endpoint() noexcept { return "/import_wallet_request"; }
 
-    std::optional<std::string> payment_address;
-    std::optional<epee::byte_slice> payment_id;
-    std::optional<uint64_string> import_fee;
+    boost::optional<std::string> payment_address;
+    boost::optional<epee::byte_slice> payment_id;
+    boost::optional<uint64_string> import_fee;
     std::string status;
     bool new_request;
     bool request_fulfilled;
