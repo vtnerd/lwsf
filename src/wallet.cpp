@@ -38,10 +38,12 @@
 #include <filesystem>
 #include <sodium/core.h>
 #include <sodium/randombytes.h>
+#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include "address_book.h"
 #include "backend.h"
+#include "common/expect.h"                            // monero/src
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "cryptonote_config.h"                        // monero/src
 #include "cryptonote_core/cryptonote_tx_utils.h"      // monero/src
@@ -402,6 +404,29 @@ namespace lwsf { namespace internal
     return out;
   }
 
+  wallet::wallet(error, std::string msg)
+    : data_(std::make_shared<backend::wallet>()),
+      addressbook_(),
+      history_(),
+      subaddresses_(),
+      subaddress_minor_(),
+      filename_(),
+      password_(),
+      work_queue_(),
+      exception_error_(std::move(msg)),
+      error_(),
+      thread_(),
+      iterations_(1),
+      mixin_(config::mixin_default),
+      refresh_interval_(config::refresh_interval),
+      refresh_notify_(),
+      error_sync_(),
+      refresh_sync_(),
+      thread_sync_(),
+      thread_state_(state::stop),
+      mandatory_refresh_(false)
+  {}
+
   wallet::wallet(create, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
     : data_(std::make_shared<backend::wallet>()),
       addressbook_(),
@@ -514,8 +539,7 @@ namespace lwsf { namespace internal
     init_wallet(*data_, recovery, nettype, false);
   }
 
-
-  wallet::wallet(from_keys, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const std::string& address_string, const std::string& view_key, const std::string& spend_key)
+  wallet::wallet(from_keys, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const boost::optional<crypto::secret_key>& view_key, const boost::optional<crypto::secret_key>& spend_key)
     : data_(std::make_shared<backend::wallet>()),
       addressbook_(),
       history_(),
@@ -540,32 +564,50 @@ namespace lwsf { namespace internal
     if (sodium_init() < 0)
       throw std::runtime_error{"Failed to initialize libsodium"};
 
-    data_->primary.generated_locally = false;
-    data_->primary.type = nettype;
-
-    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(unwrap(unwrap(data_->primary.view.sec))), view_key))
+    if (!view_key)
     {
-      exception_error_ = "view_key contained invalid hex";
+      exception_error_ = "view_key is invalid";
       return;
     }
+
+    if (!spend_key)
+    {
+      exception_error_ = "spend_key is invalid";
+      return;
+    }
+
+    data_->primary.generated_locally = false;
+    data_->primary.type = nettype;
+    data_->primary.view.sec = *view_key;
+    data_->primary.spend.sec = *spend_key;
+ 
     if (!crypto::secret_key_to_public_key(data_->primary.view.sec, data_->primary.view.pub))
     {
       exception_error_ = "view_pub could not be computed";
       return;
     }
 
-    crypto::secret_key spend_sec;
-    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(unwrap(unwrap(data_->primary.spend.sec))), spend_key))
-    {
-      exception_error_ = "spend_key contained invalid hex";
-      return;
-    }
     if (!crypto::secret_key_to_public_key(data_->primary.spend.sec, data_->primary.spend.pub))
     {
       exception_error_ = "spend_pub could not be computed";
       return;
     }
+  }
 
+  namespace
+  {
+    boost::optional<crypto::secret_key> to_secret_key(const std::string& hex)
+    {
+      crypto::secret_key out{};
+      if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(unwrap(unwrap(out))), hex))
+	return boost::none;
+      return out;
+    }
+  }
+
+  wallet::wallet(from_keys, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const std::string& address_string, const std::string& view_key, const std::string& spend_key)
+    : wallet(from_keys{}, nettype, std::move(filename), std::move(password), kdf_rounds, to_secret_key(view_key), to_secret_key(spend_key))
+  {
     if (data_->get_spend_address({0, 0}) != address_string)
       exception_error_ = "view_key, spend_key, and address_string do not match";
   }
@@ -910,6 +952,58 @@ namespace lwsf { namespace internal
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     return data_->blockchain_height == data_->primary.scan_height;
   }
+
+#ifdef LWSF_POLYSEED_ENABLE
+  void wallet::setPolyseed(epee::byte_slice seed, std::string passphrase)
+  {
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    data_->primary.poly = backend::account::polyseed{std::move(seed), std::move(passphrase)};
+  }
+
+  bool wallet::getPolyseed(std::string &seed, std::string &passphrase) const
+  {
+    struct release_polyseed
+    {
+      void operator()(polyseed_data* ptr) const noexcept
+      {
+        if (ptr) polyseed_free(ptr);
+      }
+    };
+
+    std::unique_ptr<polyseed_data, release_polyseed> cleanup{};
+
+    seed.clear();
+    passphrase.clear();
+
+    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    if (!data_->primary.poly)
+      return false;
+    if (data_->primary.poly->seed.size() != sizeof(polyseed_storage))
+      return false;
+   
+    polyseed_data* temp = nullptr;
+    if (polyseed_load(data_->primary.poly->seed.data(), &temp) != POLYSEED_OK)
+      return false;
+    cleanup.reset(temp);
+
+    const polyseed_lang* lang = nullptr;
+    const int langs = polyseed_get_num_langs();
+    for (int i = 0; i < langs; ++i)
+    {
+      lang = polyseed_get_lang(i);
+      if (lang && polyseed_get_lang_name(lang) == data_->primary.language)
+	break;
+    }
+
+    if (!lang)
+      return false;
+
+    seed.resize(POLYSEED_STR_SIZE);
+    seed.resize(polyseed_encode(temp, lang, POLYSEED_MONERO, &seed[0]));
+    passphrase = data_->primary.poly->passphrase;
+    return true;
+  }
+#endif // LWSF_POLYSEED_ENABLE
 
   void wallet::startRefresh()
   {
@@ -1728,7 +1822,7 @@ namespace lwsf { namespace internal
                                                    uint32_t subaddr_account,
                                                    std::set<uint32_t> subaddr_indices)
   {
-    return createTransactionMultDest({dst_addr}, payment_id, amount ? Monero::optional<std::vector<uint64_t>>{{*amount}} : std::nullopt, mixin_count, priority, subaddr_account, subaddr_indices);
+    return createTransactionMultDest({dst_addr}, payment_id, amount ? Monero::optional<std::vector<uint64_t>>{{*amount}} : Monero::optional<std::vector<uint64_t>>{}, mixin_count, priority, subaddr_account, subaddr_indices);
   }
 
   bool wallet::submitTransaction(const std::string &fileName)
@@ -1887,39 +1981,41 @@ namespace lwsf { namespace internal
       return {};
     }
 
-    static constexpr const auto hex_size = sizeof(crypto::secret_key) * 2;
-
-    std::string out;
-    out.reserve(iter->second->spends.size() * hex_size);
-
+    std::stringstream out;
     for (const auto& transfer : iter->second->transfers)
-    {
-      out.insert(out.end(), hex_size, 0);
-      if (!epee::to_hex::buffer({out.data() + out.size() - hex_size, hex_size}, epee::as_byte_span(unwrap(unwrap(transfer.secret)))))
-      {
-        set_critical(std::runtime_error{"getTxKey conversion to hex failure"});
-        return {};
-      }
-    }
+      epee::to_hex::buffer(out, epee::as_byte_span(unwrap(unwrap(transfer.secret))));
 
-    return out;
+    return out.str();
   }
 
 #ifndef LWSF_MASTER_ENABLE
-  bool wallet::lightWalletLogin(bool &isNewWallet) const override
+  bool wallet::lightWalletLogin(bool &isNewWallet) const
   {
+    isNewWallet = false;
+    {
+      const boost::lock_guard lock{data_->sync};
+      if (data_->passed_login)
+        return true;
+    }
+
+    const expect<bool> is_new = data_->login_is_new();
+    if (!is_new)
+      return false;
+    isNewWallet = *is_new;
+    return true;
   }
 
-  bool wallet::lightWalletImportWalletRequest(std::string &payment_id, uint64_t &fee, bool &new_request, bool &request_fulfilled, std::string &payment_address, std::string &status) override
+  bool wallet::lightWalletImportWalletRequest(std::string &payment_id, uint64_t &fee, bool &new_request, bool &request_fulfilled, std::string &payment_address, std::string &status)
   {
-    expect<rpc::import_wallet_response> import = data_->restore_height(0);
+    expect<rpc::import_response> import = data_->restore_height(0);
     if (!import)
       return false;
     fee = std::uint64_t(import->import_fee.value_or(rpc::uint64_string(0)));
     new_request = import->new_request;
     request_fulfilled = import->request_fulfilled;
-    payment_address = import->payment_address.value_or({});
+    payment_address = import->payment_address.value_or(std::string{});
     status = std::move(import->status);
+    return true;
   }
 #endif // LWSF_MASTER_ENABLE
 

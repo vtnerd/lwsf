@@ -133,7 +133,7 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, login_response& self)
   {
-    wire::object(source, WIRE_OPTIONAL_FIELD(start_height));
+    wire::object(source, WIRE_OPTIONAL_FIELD(start_height), WIRE_FIELD(new_address));
   }
 
   void read_bytes(wire::json_reader& source, daemon_status& self)

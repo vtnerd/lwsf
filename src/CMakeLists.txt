@@ -57,12 +57,29 @@ set(lwsf_headers
 )
 
 add_library(lwsf-api ${lwsf_sources} ${lwsf_headers})
+
+set(LWSF_COMPILE_DEFINITIONS)
+if (${LWSF_MASTER_ENABLE})
+  list(APPEND LWSF_COMPILE_DEFINITIONS "LWSF_MASTER_ENABLE")
+endif()
+
+set(LWSF_POLYSEED_INCLUDE "")
+set(LWSF_POLYSEED_LIBRARY "")
+if (NOT ("${LWSF_POLYSEED_SOURCE}" STREQUAL ""))
+  list(APPEND LWSF_COMPILE_DEFINITIONS "LWSF_POLYSEED_ENABLE")
+  set(LWSF_POLYSEED_INCLUDE "${LWSF_POLYSEED_SOURCE}/include")
+  set(LWSF_POLYSEED_LIBRARY polyseed)
+endif()
+
+target_compile_definitions(lwsf-api PRIVATE ${LWSF_COMPILE_DEFINITIONS})
 target_include_directories(lwsf-api
   PUBLIC
     "${lwsf_SOURCE_DIR}/include"
   PRIVATE
+    ${LWSF_POLYSEED_INCLUDE}
     "."
 )
+
 target_link_libraries(lwsf-api
   PUBLIC
     monero::libraries
@@ -73,12 +90,10 @@ target_link_libraries(lwsf-api
     lwsf-wire-wrapper
     ${Boost_THREAD_LIBRARY}
     ${sodium_LIBRARY_RELEASE}
+    ${LWSF_POLYSEED_LIBRARY}
     Threads::Threads
 )
 
-if (${LWSF_MASTER_ENABLE})
-  target_compile_definitions(lwsf-api PRIVATE LWSF_MASTER_ENABLE)
-endif()
 
 add_executable(lwsf-ledger ledger_main.cpp)
 target_link_libraries(lwsf-ledger

@@ -121,6 +121,7 @@ namespace lwsf { namespace internal { namespace rpc
     static constexpr const char* endpoint() noexcept { return "/login"; }
 
     boost::optional<std::uint64_t> start_height;
+    bool new_address;
   };
   void read_bytes(wire::json_reader&, login_response&);
 
@@ -332,7 +333,7 @@ namespace lwsf { namespace internal { namespace rpc
   {
     uint64_string amount;
     uint64_string global_index;
-    std::optional<address_meta> recipient;
+    boost::optional<address_meta> recipient;
     std::uint16_t index;
     ringct rct;
     crypto::hash tx_hash;	

@@ -277,6 +277,7 @@ namespace lwsf { namespace internal { namespace backend
     {
       wire::object(format,
         WIRE_FIELD(language),
+        WIRE_OPTIONAL_FIELD(poly),
         wire::optional_field("addressbook", wire::trusted_array(std::ref(self.addressbook))),
         wire::optional_field("subaccounts", wire::trusted_array(std::ref(self.subaccounts))),
         wire::optional_field("txes", wire::trusted_array(std::ref(self.txes))),
@@ -290,6 +291,12 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_FIELD(spend),
         WIRE_FIELD_DEFAULTED(generated_locally, true)
       );
+    }
+
+    template<typename F, typename T>
+    void map_polyseed(F& format, T& self)
+    {
+      wire::object(format, WIRE_FIELD(seed), WIRE_FIELD(passphrase));
     }
 
     rct::key get_mask(const crypto::secret_key& view_key, const rpc::output& source)
@@ -719,6 +726,7 @@ namespace lwsf { namespace internal { namespace backend
   WIRE_DEFINE_OBJECT(transfer_out, map_transfer_out);
   WIRE_DEFINE_OBJECT(transaction, map_transaction);
   WIRE_DEFINE_OBJECT(keypair, map_keypair);
+  WIRE_DEFINE_OBJECT(account::polyseed, map_polyseed);
   void read_bytes(wire::reader& source, account& dest)
   {
     map_account(source, dest);
@@ -892,9 +900,10 @@ namespace lwsf { namespace internal { namespace backend
     return status;
   }
 
-  std::error_code wallet::login()
+  expect<bool> wallet::login_is_new()
   {
     // Remember that this function provides the strong exception guarantee.
+    bool new_account = false;
     boost::unique_lock<boost::mutex> lock{sync};
     {
       passed_login = false;
@@ -929,8 +938,9 @@ namespace lwsf { namespace internal { namespace backend
       if (no_subaddresses(epee::to_span(primary.subaccounts), primary.lookahead))
       {
         lookahead_error = {};
-        return {};
+        return response->new_address;
       }
+      new_account = response->new_address;
     }
 
     // Converting `rpc::invoke` into exceptions is easier here
@@ -942,7 +952,7 @@ namespace lwsf { namespace internal { namespace backend
         const auto response = rpc::invoke<rpc::get_subaddrs>(client, login).value();
         lock.lock();
         if (update_lookaheads(*this, response.all_subaddrs))
-          return {};
+          return new_account;
       }
 
       // lookaheads not far enough
@@ -962,7 +972,7 @@ namespace lwsf { namespace internal { namespace backend
         lookahead_error = handle_lookahead_error(e.code());
     }
 
-    return {};
+    return new_account;
   }
 
   std::error_code wallet::refresh(const bool mandatory)

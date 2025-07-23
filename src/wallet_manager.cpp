@@ -39,6 +39,9 @@
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "lwsf_config.h"
 #include "lws_frontend.h"
+#ifdef LWSF_POLYSEED_ENABLE
+  #include "polyseed.h"
+#endif
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
@@ -232,7 +235,87 @@ namespace lwsf
                                             Monero::WalletListener * listener) override
       {
         //! \TODO Complete
+	return nullptr;
       }
+
+#ifdef LWSF_POLYSEED_ENABLE
+    /*!
+     * \brief creates a wallet from a polyseed mnemonic phrase
+     * \param path                         Name of the wallet file to be created
+     * \param password                     Password of wallet file
+     * \param nettype                      Network type
+     * \param mnemonic                     Polyseed mnemonic
+     * \param passphrase                   Optional seed offset passphrase
+     * \param newWallet                    Whether it is a new wallet
+     * \param restoreHeight                Override the embedded restore height
+     * \param kdf_rounds                   Number of rounds for key derivation function
+     * @return
+     */
+    virtual Monero::Wallet * createWalletFromPolyseed(const std::string &path,
+                                              const std::string &password,
+                                              const Monero::NetworkType nettype,
+                                              const std::string &mnemonic,
+                                              const std::string &passphrase = "",
+                                              const bool newWallet = true,
+                                              const uint64_t restore_height = 0,
+                                              const uint64_t kdf_rounds = 1) override
+    {
+      struct release_polyseed
+      {
+        void operator()(polyseed_data* ptr) const noexcept
+        {
+          if (ptr) polyseed_free(ptr);
+        }
+      };
+
+      std::uint64_t birthday{};
+      crypto::secret_key base{};
+      std::string language{};
+      epee::byte_slice raw_seed{};
+      {
+        // polyseed is initialized elsewhere, a requirement of enabling polyseed in lwsf
+        std::unique_ptr<polyseed_data, release_polyseed> cleanup;
+
+        polyseed_data* temp = nullptr;
+        const polyseed_lang* lang = nullptr;
+        if (polyseed_decode(mnemonic.c_str(), POLYSEED_MONERO, &lang, &temp) != POLYSEED_OK)
+          return std::make_unique<wallet>(wallet::error{}, "Failed polyseed decode").release();
+	cleanup.reset(temp);
+
+	language = polyseed_get_lang_name(lang);
+
+        if (polyseed_is_encrypted(temp))
+          polyseed_crypt(temp, passphrase.c_str());
+
+	birthday = polyseed_get_birthday(temp);
+	polyseed_keygen(temp, POLYSEED_MONERO, sizeof(base), reinterpret_cast<std::uint8_t*>(unwrap(unwrap(base)).data));
+
+	polyseed_storage storage{};
+	polyseed_store(temp, storage);
+	try { raw_seed = epee::byte_slice{{storage, sizeof(storage)}}; } catch (...) {}
+	memwipe(storage, sizeof(storage));
+	if (raw_seed.empty())
+	  throw std::bad_alloc{};
+      } // cleanup polyseed
+
+      if (!passphrase.empty())
+        base = cryptonote::decrypt_key(base, passphrase);
+
+      cryptonote::account_base keys{};
+      keys.generate(base, true, false);
+      auto out = std::make_unique<wallet>(
+        wallet::from_keys{}, nettype, path, password, kdf_rounds, keys.get_keys().m_view_secret_key, keys.get_keys().m_spend_secret_key
+      );
+      out->setSeedLanguage(language);
+      out->setPolyseed(std::move(raw_seed), passphrase);
+      if (!newWallet)
+      {
+        //! TODO convert birthday to block height
+        out->setRefreshFromBlockHeight(restore_height);
+      }
+      return out.release();
+    }
+#endif // LWSF_POLYSEED_ENABLE
 
     /*!
      * \brief Closes wallet. In case operation succeeded, wallet object deleted. in case operation failed, wallet object not deleted
@@ -394,12 +477,12 @@ namespace lwsf
     return cryptonote::print_money(amount);
   }
 
-  std::optional<std::uint64_t> amountFromString(const std::string &amount)
+  Monero::optional<std::uint64_t> amountFromString(const std::string &amount)
   {
     std::uint64_t result = 0;
     if (cryptonote::parse_amount(result, amount))
       return result;
-    return std::nullopt;
+    return {};
   }
 
   bool addressValid(const std::string &str, Monero::NetworkType nettype)

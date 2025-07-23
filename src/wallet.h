@@ -40,8 +40,9 @@
 #include <memory>
 #include <string>
 #include <system_error>
-#include "net/http_client.h"          // monero/contrib/epee/include
-#include "wallet/api/wallet2_api.h"   // monero/src
+#include "crypto/crypto.h"          // monero/src
+#include "net/http_client.h"        // monero/contrib/epee/include
+#include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf
 {
@@ -86,6 +87,7 @@ namespace internal
 
   public:
     struct create{};
+    struct error{};
     struct from_keys{};
     struct from_mnemonic{};
     struct open{};
@@ -94,9 +96,11 @@ namespace internal
     static bool verify_password(std::string path, const std::string& password);
     static std::vector<std::string> find(const std::string& path);
 
+    wallet(error, std::string msg);
     wallet(create, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds);
     wallet(open, Monero::NetworkType nettpe, std::string filename, std::string password, std::uint64_t kdf_rounds);
     wallet(from_mnemonic, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset);
+    wallet(from_keys, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const boost::optional<crypto::secret_key>& view_key, const boost::optional<crypto::secret_key>& spend_key);
     wallet(from_keys, Monero::NetworkType nettype, std::string filename, std::string password, std::uint64_t kdf_rounds, const std::string& address_string, const std::string& view_key, const std::string& spend_key);
 
     wallet(const wallet&) = delete;
@@ -315,6 +319,11 @@ namespace internal
      * @return
      */
     virtual bool synchronized() const override;
+
+#ifdef LWSF_POLYSEED_ENABLE
+    void setPolyseed(epee::byte_slice seed, std::string passphrase);
+    virtual bool getPolyseed(std::string &seed, std::string &passphrase) const override;
+#endif
 
    /**
     * @brief StartRefresh - Start/resume refresh thread (refresh every 10 seconds)

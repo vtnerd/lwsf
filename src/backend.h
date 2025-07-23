@@ -204,8 +204,15 @@ namespace lwsf { namespace internal { namespace backend
   {
     account() = delete;
 
+    struct polyseed
+    {
+      epee::byte_slice seed;
+      std::string passphrase;
+    };
+
     std::string address; //!< not serialized, recovered on read_bytes
     std::string language;
+    boost::optional<polyseed> poly;
     std::vector<address_book_entry> addressbook;
     std::vector<sub_account> subaccounts; //! Enabled major subaccounts. Index indicates `sub.major` value.
     std::unordered_map<crypto::hash, std::shared_ptr<transaction>> txes;
@@ -220,6 +227,7 @@ namespace lwsf { namespace internal { namespace backend
     bool generated_locally; //!< True iff wallet was generated and not recovered
   };
   WIRE_DECLARE_OBJECT(account);
+  WIRE_DECLARE_OBJECT(account::polyseed);
 
   //! All functions should provide the strong-exception guarantee
   struct wallet
@@ -262,8 +270,14 @@ namespace lwsf { namespace internal { namespace backend
 
     /*! Attempt login and sync subaddresses. The result of subaddress syncing,
     including errors, is stored in `server_lookahead`.
+    \return No errors if login succeeded, and true if new account */
+    expect<bool> login_is_new();
+
+    /*! Attempt login and sync subaddresses. The result of subaddress syncing,
+    including errors, is stored in `server_lookahead`.
     \return No errors if login succeeded. */
-    std::error_code login();
+    std::error_code login() { return login_is_new().error(); }
+
 
     //! Refreshes txes information. Strong exception guarantee.
     std::error_code refresh(bool mandatory = false);
