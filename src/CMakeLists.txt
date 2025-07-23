@@ -76,10 +76,15 @@ target_link_libraries(lwsf-api
     Threads::Threads
 )
 
+if (${LWSF_MASTER_ENABLE})
+  target_compile_definitions(lwsf-api PRIVATE LWSF_MASTER_ENABLE)
+endif()
+
 add_executable(lwsf-ledger ledger_main.cpp)
 target_link_libraries(lwsf-ledger
   PRIVATE
     lwsf-api
     ${Boost_PROGRAM_OPTIONS_LIBRARY}
 )
+
 

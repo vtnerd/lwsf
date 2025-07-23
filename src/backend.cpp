@@ -343,6 +343,19 @@ namespace lwsf { namespace internal { namespace backend
       return out.sender;
     }
 
+    namespace
+    {
+      const unsigned char* ec_to_bytes(const crypto::ec_scalar& out)
+      {
+        return reinterpret_cast<const unsigned char*>(out.data);
+      }
+
+      unsigned char* ec_to_bytes(crypto::ec_scalar& out)
+      {
+        return reinterpret_cast<unsigned char*>(out.data);
+      }
+    }
+
     crypto::secret_key get_spend_secret(const account& self, const std::optional<rpc::address_meta>& index)
     {
       if (!index || index->is_default())
@@ -353,7 +366,7 @@ namespace lwsf { namespace internal { namespace backend
 
       // D = B + M
       crypto::secret_key out;
-      sc_add(to_bytes(out), to_bytes(m), to_bytes(self.spend.sec));
+      sc_add(ec_to_bytes(out), ec_to_bytes(m), ec_to_bytes(self.spend.sec));
       return out;
     }
 
@@ -1245,12 +1258,21 @@ namespace lwsf { namespace internal { namespace backend
     return {};
   }
 
-  std::error_code wallet::restore_height(const std::uint64_t height)
+  expect<rpc::import_response> wallet::restore_height(const std::uint64_t height)
   {
+    const auto update_import = [this](expect<rpc::import_response> value)
+    {
+      if (value)
+        this->import_error = {};
+      else
+        this->import_error = value.error();
+      return value
+    }
+
     boost::unique_lock<boost::mutex> lock{sync};
 
     if (primary.restore_height <= height)
-      return import_error = {};
+      return update_import(import_response{});
     if (import_error && import_error == error::import_pending)
       return import_error;
 
@@ -1271,10 +1293,10 @@ namespace lwsf { namespace internal { namespace backend
     lock.lock();
 
     if (!import)
-      return import_error = import.error();
+      return update_import(import.error());
 
     if (import->request_fulfilled)
-      return import_error = {};
+      return update_import(std::move(*import));
 
     const unsigned total =
       unsigned(bool(import->import_fee)) + bool(import->payment_address);
@@ -1282,23 +1304,24 @@ namespace lwsf { namespace internal { namespace backend
     {
       default:
       case 0:
-        return import_error = error::import_pending;
+        return update_import(error::import_pending);
       case 1:
         if (import->import_fee.value_or(rpc::uint64_string(0)) == rpc::uint64_string(0))
-          return import_error = error::import_pending;
-        return import_error = error::import_invalid;
+          return update_import(error::import_pending);
+        return update_import(error::import_invalid);
       case 2:
         break;
     }
 
     cryptonote::address_parse_info info{};
     if (!cryptonote::get_account_address_from_str(info, convert_net_type(primary.type), *import->payment_address))
-      return import_error = error::import_invalid;
+      return update_import(error::import_invalid);
     if (info.has_payment_id && import->payment_id)
-      return import_error = error::import_invalid;
+      return update_import(error::import_invalid);
     if (import->payment_id && (import->payment_id->empty() || (import->payment_id->size() != sizeof(crypto::hash8) && import->payment_id->size() != sizeof(crypto::hash))))
-      return import_error = error::import_invalid;
+      return update_import(error::import_invalid);
 
+#ifdef LWSF_MASTER_ENABLE
     std::string payment_id;
     if (import->payment_id)
       payment_id = epee::to_hex::string(epee::to_span(*import->payment_id));
@@ -1318,8 +1341,8 @@ namespace lwsf { namespace internal { namespace backend
       primary.addressbook.push_back(address_book_entry{std::move(*import->payment_address), std::move(payment_id), std::move(description)});
     else
       primary.addressbook[i] = address_book_entry{std::move(*import->payment_address), std::move(payment_id), std::move(description)};
-
-    return import_error = {};
+#endif
+    return update_import(std::move(*import));
   }
 
   expect<std::vector<rpc::random_outputs>> wallet::get_decoys(const rpc::get_random_outs_request& req)

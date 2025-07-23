@@ -277,7 +277,7 @@ namespace lwsf { namespace internal { namespace backend
     //! Modify local and possibly server lookahead
     std::error_code set_lookahead(std::uint32_t major, std::uint32_t minor);
 
-    std::error_code restore_height(const std::uint64_t height);
+    expect<rpc::import_response> restore_height(const std::uint64_t height);
 
     expect<std::vector<rpc::random_outputs>> get_decoys(const rpc::get_random_outs_request& req);
     std::error_code send_tx(epee::byte_slice tx_bytes);

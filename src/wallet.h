@@ -417,6 +417,8 @@ namespace internal
      * @return new info string if more rounds required or an empty string if wallet creation is done
      */
     virtual std::string exchangeMultisigKeys(const std::vector<std::string> &info, const bool force_update_use_with_caution) override { /* TODO */ return {}; }
+
+#ifdef LWSF_MASTER_ENABLE
     /**
      * @brief getMultisigKeyExchangeBooster - obtain partial information for the key exchange round after the in-progress round,
      *                                        to speed up another signer's key exchange process
@@ -426,6 +428,8 @@ namespace internal
      * @return new info string if more rounds required or exception if no more rounds (i.e. no rounds to boost)
      */
     virtual std::string getMultisigKeyExchangeBooster(const std::vector<std::string> &info, const uint32_t threshold, const uint32_t num_signers) override { /* TODO */ return {}; }
+#endif
+
     /**
      * @brief exportMultisigImages - exports transfers' key images
      * @param images - output paramter for hex encoded array of images
@@ -484,7 +488,7 @@ namespace internal
      */
 
     virtual Monero::PendingTransaction* createTransaction(const std::string &dst_addr, const std::string &payment_id,
-                                                   std::optional<uint64_t> amount, uint32_t mixin_count,
+                                                   Monero::optional<uint64_t> amount, uint32_t mixin_count,
                                                    Monero::PendingTransaction::Priority = Monero::PendingTransaction::Priority_Low,
                                                    uint32_t subaddr_account = 0,
                                                    std::set<uint32_t> subaddr_indices = {}) override;
@@ -726,6 +730,14 @@ namespace internal
 
     //! secondary key reuse mitigation
     virtual void keyReuseMitigation2(bool mitigation) override {  /* TODO */ }
+
+#ifndef LWSF_MASTER_ENABLE
+    //! Light wallet authenticate and login
+    virtual bool lightWalletLogin(bool &isNewWallet) const override;
+
+    //! Initiates a light wallet import wallet request
+    virtual bool lightWalletImportWalletRequest(std::string &payment_id, uint64_t &fee, bool &new_request, bool &request_fulfilled, std::string &payment_address, std::string &status) override;
+#endif LWSF_MASTER_ENABLE
 
     //! locks/unlocks the keys file; returns true on success
     virtual bool lockKeysFile() override { return false; }

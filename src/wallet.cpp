@@ -778,7 +778,7 @@ namespace lwsf { namespace internal
   {
     const boost::lock_guard<boost::mutex> lock{data_->sync};
     data_->primary.requested_start = std::min(data_->primary.requested_start, height);
-    queue_work([this, height] () { return data_->restore_height(height); });
+    queue_work([this, height] () { return data_->restore_height(height).error(); });
   }
 
   uint64_t wallet::getRefreshFromBlockHeight() const
@@ -1077,9 +1077,9 @@ namespace lwsf { namespace internal
         {
           if (!amount && dst_addr.size() > 1)
             throw std::invalid_argument{"Sweep requested with multiple destinations"};
-          if (amount && amount->size() != dst_addr.size())
+          if (amount && (*amount).size() != dst_addr.size())
             throw std::invalid_argument{"Must have equal amounts and destinations"};
-          if (amount && amount->empty())
+          if (amount && (*amount).empty())
             throw std::invalid_argument{"Zero destinations only valid with empty amounts"};
           if (!payment_id.empty())
             throw std::invalid_argument{"Long payment id was provided - deprecated"};
@@ -1566,25 +1566,25 @@ namespace lwsf { namespace internal
               cryptonote::set_encrypted_payment_id_to_tx_extra_nonce(extra_nonce, info.payment_id);
             }
 
-            transfers_flat.insert({amount->at(i), dst_addr.at(i)});
+            transfers_flat.insert({(*amount).at(i), dst_addr.at(i)});
 
             auto& dest = dests_flat.emplace_back();
             dest.original = dst_addr.at(i);
             dest.addr = info.address;
-            dest.amount = amount->at(i);
+            dest.amount = (*amount).at(i);
             dest.is_subaddress = info.is_subaddress;
             dest.is_integrated = info.has_payment_id;
           }
 
           LWSF_TX_VERIFY(bool(amount));
-          LWSF_TX_VERIFY(dst_addr.size() <= amount->size());
-          for (std::size_t i = dst_addr.size(); i < amount->size(); ++i)
+          LWSF_TX_VERIFY(dst_addr.size() <= (*amount).size());
+          for (std::size_t i = dst_addr.size(); i < (*amount).size(); ++i)
           {
             // this is a "self-sweep" (consolidation)
             auto& dest = dests_flat.emplace_back();
             dest.original = change_address;
             dest.addr = change_account;
-            dest.amount = amount->at(i);
+            dest.amount = (*amount).at(i);
             dest.is_subaddress = subaddr_account;
             dest.is_integrated = false;
           }
@@ -1723,12 +1723,12 @@ namespace lwsf { namespace internal
   }
 
   Monero::PendingTransaction* wallet::createTransaction(const std::string &dst_addr, const std::string &payment_id,
-                                                   std::optional<uint64_t> amount, uint32_t mixin_count,
+                                                   Monero::optional<uint64_t> amount, uint32_t mixin_count,
                                                    Monero::PendingTransaction::Priority priority,
                                                    uint32_t subaddr_account,
                                                    std::set<uint32_t> subaddr_indices)
   {
-    return createTransactionMultDest({dst_addr}, payment_id, amount ? std::optional<std::vector<uint64_t>>{{*amount}} : std::nullopt, mixin_count, priority, subaddr_account, subaddr_indices);
+    return createTransactionMultDest({dst_addr}, payment_id, amount ? Monero::optional<std::vector<uint64_t>>{{*amount}} : std::nullopt, mixin_count, priority, subaddr_account, subaddr_indices);
   }
 
   bool wallet::submitTransaction(const std::string &fileName)
@@ -1904,4 +1904,23 @@ namespace lwsf { namespace internal
 
     return out;
   }
+
+#ifndef LWSF_MASTER_ENABLE
+  bool wallet::lightWalletLogin(bool &isNewWallet) const override
+  {
+  }
+
+  bool wallet::lightWalletImportWalletRequest(std::string &payment_id, uint64_t &fee, bool &new_request, bool &request_fulfilled, std::string &payment_address, std::string &status) override
+  {
+    expect<rpc::import_wallet_response> import = data_->restore_height(0);
+    if (!import)
+      return false;
+    fee = std::uint64_t(import->import_fee.value_or(rpc::uint64_string(0)));
+    new_request = import->new_request;
+    request_fulfilled = import->request_fulfilled;
+    payment_address = import->payment_address.value_or({});
+    status = std::move(import->status);
+  }
+#endif LWSF_MASTER_ENABLE
+
 }} // lwsf // internal

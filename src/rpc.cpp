@@ -437,6 +437,8 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_OPTIONAL_FIELD(payment_address),
       WIRE_OPTIONAL_FIELD(payment_id),
       WIRE_OPTIONAL_FIELD(import_fee),
+      WIRE_FIELD(status),
+      WIRE_FIELD(new_request),
       WIRE_FIELD(request_fulfilled)
     );
   }

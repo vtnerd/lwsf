@@ -385,6 +385,8 @@ namespace lwsf { namespace internal { namespace rpc
     std::optional<std::string> payment_address;
     std::optional<epee::byte_slice> payment_id;
     std::optional<uint64_string> import_fee;
+    std::string status;
+    bool new_request;
     bool request_fulfilled;
   };
   void read_bytes(wire::json_reader&, import_response&);

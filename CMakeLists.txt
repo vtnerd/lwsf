@@ -67,10 +67,12 @@ endif()
 find_package(Sodium REQUIRED)
 
 add_library(monero::libraries INTERFACE IMPORTED)
+
 set_property(TARGET monero::libraries PROPERTY
   INTERFACE_INCLUDE_DIRECTORIES
     ${Boost_INCLUDE_DIR}
     "${MONERO_SOURCE_DIR}/contrib/epee/include"
+    "${MONERO_SOURCE_DIR}/external"
     "${MONERO_SOURCE_DIR}/external/easylogging++"
     "${MONERO_SOURCE_DIR}/external/rapidjson/include"
     "${MONERO_SOURCE_DIR}/external/supercop/include"
@@ -79,6 +81,7 @@ set_property(TARGET monero::libraries PROPERTY
 set_property(TARGET monero::libraries PROPERTY
   INTERFACE_LINK_LIBRARIES
     common
+    cryptonote_basic
     epee
     mnemonics
     qrcodegen
