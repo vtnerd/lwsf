@@ -1780,7 +1780,8 @@ namespace lwsf { namespace internal
             const auto unspent_by_amount = get_unspent_by_amount(unspent);
 
             unsigned attempt = 0;
-            for (; attempt < unspent.size(); ++attempt)
+            const std::size_t max_attempts = unspent.size();
+            for (; attempt < max_attempts; ++attempt)
             {
               try
               {
@@ -1797,7 +1798,7 @@ namespace lwsf { namespace internal
               }
             }
 
-            if (attempt == unspent.size())
+            if (attempt == max_attempts)
               throw_low_funds();
           }
 
