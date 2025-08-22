@@ -410,11 +410,18 @@ namespace lwsf { namespace internal { namespace backend
         crypto::key_derivation derivation{};
         if (!crypto::generate_key_derivation(spend.tx_pub_key, self.view.sec, derivation))
           continue;
-        crypto::public_key output_pub{};
-        if (!crypto::derive_public_key(derivation, spend.out_index, self.spend.pub, output_pub))
+
+        crypto::public_key spend_pub{};
+        const crypto::secret_key spend_sec = get_spend_secret(self, spend.sender);
+        if (!crypto::secret_key_to_public_key(spend_sec, spend_pub))
           continue;
+
+        crypto::public_key output_pub{};
+        if (!crypto::derive_public_key(derivation, spend.out_index, spend_pub, output_pub))
+          continue;
+
         crypto::secret_key output_secret{};
-        crypto::derive_secret_key(derivation, spend.out_index, get_spend_secret(self, spend.sender), output_secret);
+        crypto::derive_secret_key(derivation, spend.out_index, spend_sec, output_secret);
 
         crypto::key_image image{};
         crypto::generate_key_image(output_pub, output_secret, image);
