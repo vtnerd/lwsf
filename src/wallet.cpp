@@ -1779,7 +1779,7 @@ namespace lwsf { namespace internal
             const auto dests = get_and_update_destinations(); // `dests_flat` pruned
             const auto unspent_by_amount = get_unspent_by_amount(unspent);
 
-            unsigned attempt = 0;
+            std::size_t attempt = 0;
             const std::size_t max_attempts = unspent.size();
             for (; attempt < max_attempts; ++attempt)
             {
