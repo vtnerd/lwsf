@@ -1331,12 +1331,14 @@ namespace lwsf { namespace internal
                 }
               }
 
+              const std::uint64_t real_fee = fee;
               if (subtract_from_dest)
               {
                 LWSF_TX_VERIFY(dests.size() == 1);
                 if (dests.back().amount < fee)
                   throw_low_funds();
                 dests.back().amount -= fee;
+                transfer_total -= fee;
                 fee = 0;
               }
 
@@ -1367,7 +1369,7 @@ namespace lwsf { namespace internal
               for (const auto& dest : dests)
                 remaining -= dest.amount;
 
-              LWSF_TX_VERIFY(fee == remaining);
+              LWSF_TX_VERIFY(real_fee == remaining);
             }
 
             const auto rct_amount = [] (const backend::transfer_in& source)
