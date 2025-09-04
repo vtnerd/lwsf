@@ -374,6 +374,8 @@ namespace lwsf { namespace internal { namespace rpc
           ringct_triplet rct{};
           if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(rct), source))
             WIRE_DLOG_THROW(wire::error::schema::binary, "Invalid hex for ringct");
+          if (rct.amount == rct::key{} && rct.mask == rct::identity())
+            return ringct{rct::identity(), ringct::format::unencrypted};
           return ringct{rct.mask, ringct::format::encrypted}; 
         }
 
