@@ -402,8 +402,8 @@ namespace lwsf
         if (url.schema == "https")
           use_ssl = true;
 
-        const epee::net_utils::ssl_options_t options{
-          use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_disabled : epee::net_utils::ssl_support_t::e_ssl_support_enabled
+        epee::net_utils::ssl_options_t options{
+          use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_enabled : epee::net_utils::ssl_support_t::e_ssl_support_disabled
         };
 
         client_.set_server(std::move(url.host), std::to_string(url.port), boost::none, std::move(options));
