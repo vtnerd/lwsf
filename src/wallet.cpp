@@ -592,6 +592,8 @@ namespace lwsf { namespace internal
       exception_error_ = "spend_pub could not be computed";
       return;
     }
+
+    data_->primary.address = data_->get_spend_address({0, 0});
   }
 
   namespace
