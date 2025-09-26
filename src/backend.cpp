@@ -903,6 +903,7 @@ namespace lwsf { namespace internal { namespace backend
     {
       const boost::lock_guard<boost::mutex> lock{sync};
       primary = std::move(reload);
+      blockchain_height = primary.scan_height;
     }
     return status;
   }
@@ -914,7 +915,6 @@ namespace lwsf { namespace internal { namespace backend
     boost::unique_lock<boost::mutex> lock{sync};
     {
       passed_login = false;
-      blockchain_height = 0;
       per_byte_fee.clear();
       fee_mask = 0;  
       server_lookahead = 0;
