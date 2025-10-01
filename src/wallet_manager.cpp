@@ -398,13 +398,18 @@ namespace lwsf
         if (!url.m_uri_content.m_path.empty())
           throw std::runtime_error{"LWS URL contains path (unsupported)"};
 
-        bool use_ssl = false;
-        if (url.schema == "https")
-          use_ssl = true;
-
+        const bool use_ssl = (url.schema == "https");
         epee::net_utils::ssl_options_t options{
           use_ssl ? epee::net_utils::ssl_support_t::e_ssl_support_enabled : epee::net_utils::ssl_support_t::e_ssl_support_disabled
         };
+
+        if (!url.port)
+        {
+          if (use_ssl)
+            url.port = 443;
+          else
+            url.port = 80;
+        }
 
         client_.set_server(std::move(url.host), std::to_string(url.port), boost::none, std::move(options));
       }

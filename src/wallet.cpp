@@ -807,6 +807,13 @@ namespace lwsf { namespace internal
             epee::net_utils::ssl_support_t::e_ssl_support_enabled
       };
 
+      if (!url.port)
+      {
+        if ((use_ssl || https))
+          url.port = 443;
+        else
+          url.port = 80;
+      }
       data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
     }
     catch (const std::exception& e)
