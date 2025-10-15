@@ -814,6 +814,27 @@ namespace lwsf { namespace internal
         else
           url.port = 80;
       }
+
+      // Configure SSL certificate verification
+      if (options.support != epee::net_utils::ssl_support_t::e_ssl_support_disabled)
+      {
+        bool ca_file_valid = !ca_file_path_.empty() && std::filesystem::exists(ca_file_path_);
+        
+        if (ca_file_valid) {
+          try {
+            options = epee::net_utils::ssl_options_t(
+              std::vector<std::vector<std::uint8_t>>{},
+              ca_file_path_
+            );
+            options.verification = epee::net_utils::ssl_verification_t::user_ca;
+          } catch (const std::exception& e) {
+            options.verification = epee::net_utils::ssl_verification_t::system_ca;
+          }
+        } else {
+          options.verification = epee::net_utils::ssl_verification_t::system_ca;
+        }
+      }
+
       data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
     }
     catch (const std::exception& e)
@@ -884,6 +905,11 @@ namespace lwsf { namespace internal
       data_->client.set_connector(net::socks::connector{std::move(*endpoint)});
     }
     return true;
+  }
+
+  void wallet::setCaFilePath(const std::string &path)
+  {
+    ca_file_path_ = path;
   }
 
   uint64_t wallet::balance(const uint32_t accountIndex) const
