@@ -1161,7 +1161,7 @@ namespace lwsf { namespace internal
     static_assert(Monero::PendingTransaction::Priority_Medium == 2);
 
     const bool subtract_from_dest = !amount;
-    const unsigned priority_int = priority <= 0 ? 2 : unsigned(priority) - 1;
+    const unsigned priority_int = priority <= 0 ? 1 : unsigned(priority) - 1;
     if (!mixin_count)
       mixin_count = mixin_;
 
