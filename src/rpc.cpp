@@ -433,6 +433,15 @@ namespace lwsf { namespace internal { namespace rpc
   }
 
 
+  void write_bytes(wire::json_writer& source, const import_request& self)
+  {
+    wire::object(source,
+      wire::field("address", std::cref(self.creds.address)),
+      wire::field("view_key", std::cref(self.creds.view_key)),
+      WIRE_FIELD(from_height)
+    );
+  }
+
   void read_bytes(wire::json_reader& source, import_response& self)
   {
     wire::object(source,

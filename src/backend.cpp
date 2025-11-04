@@ -1303,7 +1303,7 @@ namespace lwsf { namespace internal { namespace backend
     }
 
     // current api does not allow height selection, defaults to 0
-    rpc::login login{primary.address, primary.view.sec};
+    rpc::import_request login{{primary.address, primary.view.sec}, height};
 
     lock.unlock();
     auto import = rpc::invoke<rpc::import_response>(client, login);

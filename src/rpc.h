@@ -378,6 +378,14 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::json_reader&, get_unspent_outs_response&);
 
 
+  struct import_request
+  {
+    import_request() = delete;
+    login creds;
+    std::uint64_t from_height;
+  };
+  void write_bytes(wire::json_writer&, const import_request&);
+
   struct import_response
   {
     import_response() = delete;
