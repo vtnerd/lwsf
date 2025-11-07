@@ -33,6 +33,7 @@
 #include <ctime>
 #include <iostream>
 #include <filesystem>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -46,17 +47,20 @@
 
 namespace
 {
+  enum class backend_type : unsigned char { lws = 0, monerod };
   struct options
   {
     const command_line::arg_descriptor<std::string> wallet_file;
     const command_line::arg_descriptor<std::string> lws_url;
     const command_line::arg_descriptor<std::string> network;
+    const command_line::arg_descriptor<std::string> backend;
     const command_line::arg_descriptor<std::string> config_file;
 
     options()
       : wallet_file{"wallet-file", "Path to read-and-store wallet. Omit to skip wallet cache storage."}
-      , lws_url{"lws-url", "<protocol>://address:port of LWS server REST API. Omit to read cached data."}
+      , lws_url{"lws-url", "<protocol>://address:port of LWS server REST API (or monerod if using that backend). Omit to read cached data."}
       , network{"network", "<\"main\"|\"stage\"|\"test\"> - Blockchain net type", "main"}
+      , backend{"backend", "<\"lws\"|\"monerod\"> - Backend used for file cache and probing", "lws"}
       , config_file{"config-file", "Specify any option in a config file; <name>=<value> on separate lines"}
     {}
 
@@ -66,6 +70,7 @@ namespace
       command_line::add_arg(description, lws_url);
       command_line::add_arg(description, config_file);
       command_line::add_arg(description, network);
+      command_line::add_arg(description, backend);
       command_line::add_arg(description, command_line::arg_help);
     }
 
@@ -81,6 +86,17 @@ namespace
       else
         throw std::runtime_error{"Bad --network value"};
     }
+
+    backend_type get_backend(boost::program_options::variables_map const& args) const
+    {
+      const std::string type = command_line::get_arg(args, backend);
+      if (type == "lws")
+        return backend_type::lws;
+      else if (type == "monerod")
+        return backend_type::monerod;
+      else
+        throw std::runtime_error{"Bad --backend value"};
+    }
   };
 
   struct program
@@ -88,6 +104,7 @@ namespace
     std::string wallet_file;
     std::string lws_url;
     Monero::NetworkType network;
+    backend_type backend;
   };
 
   void print_help(std::ostream& out)
@@ -136,7 +153,8 @@ namespace
     program prog{
       command_line::get_arg(args, opts.wallet_file),
       command_line::get_arg(args, opts.lws_url),
-      opts.get_network(args)
+      opts.get_network(args),
+      opts.get_backend(args)
     };
 
     return prog;
@@ -144,8 +162,16 @@ namespace
 
   void run(program prog)
   {
-    const std::unique_ptr<Monero::WalletManager> wm{
-      lwsf::WalletManagerFactory::getWalletManager()
+    std::unique_ptr<Monero::WalletManager> wm;
+    switch (prog.backend)
+    {
+    default:
+    case backend_type::lws:
+      wm.reset(lwsf::WalletManagerFactory::getWalletManager());
+      break;
+    case backend_type::monerod:
+      wm.reset(Monero::WalletManagerFactory::getWalletManager());
+      break;
     };
     if (!wm)
       throw std::runtime_error{"Unexpected WalletManager nullptr"};
@@ -217,11 +243,16 @@ namespace
 
     std::cout << "; Transactions: " << info_list.size() << std::endl << std::endl;
 
+    std::multimap<std::uint64_t, const Monero::TransactionInfo*> ordered;
     for (const Monero::TransactionInfo* info : info_list)
     {
-      if (!info)
-        throw std::runtime_error{"Unexpected info nullptr"};
+      if (info)
+        ordered.emplace(info->blockHeight(), info);
+    }
 
+    for (const auto elem : ordered)
+    {
+      auto info = elem.second;
       std::tm expanded{};
       const std::time_t timestamp = info->timestamp();
       if (!gmtime_r(std::addressof(timestamp), std::addressof(expanded)))
