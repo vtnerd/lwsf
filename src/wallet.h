@@ -62,6 +62,7 @@ namespace internal
     const std::string filename_;
     std::string password_;
     std::string language_;
+    std::string ca_file_path_;
     std::deque<std::function<std::error_code()>> work_queue_;
     mutable std::string exception_error_;
     mutable std::error_code error_;
@@ -267,6 +268,7 @@ namespace internal
     virtual void setTrustedDaemon(bool) override {} 
     virtual bool trustedDaemon() const override { return true; }
     virtual bool setProxy(const std::string &address) override;
+    void setCaFilePath(const std::string &path);
     virtual uint64_t balance(uint32_t accountIndex = 0) const override;
     virtual uint64_t unlockedBalance(uint32_t accountIndex = 0) const override;
 
