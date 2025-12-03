@@ -836,6 +836,8 @@ namespace lwsf { namespace internal
       }
 
       data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
+      const boost::unique_lock<boost::mutex> lock{data_->sync};
+      data_->passed_login = false;
     }
     catch (const std::exception& e)
     {
