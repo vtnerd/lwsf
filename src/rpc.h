@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <boost/container/flat_map.hpp>
 #include <boost/container/flat_set.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/variant.hpp>
@@ -39,6 +40,7 @@
 #include "byte_stream.h" // moneor/contrib/epee/include
 #include "common/expect.h"   // monero/src
 #include "crypto/crypto.h"   // monero/src
+#include "lwsf_config.h"
 #include "ringct/rctTypes.h" // monero/src
 #include "wire/basic_value.h"
 #include "wire/fwd.h"
@@ -53,7 +55,7 @@ namespace epee { namespace net_utils
 
 namespace lwsf { namespace internal { namespace rpc
 {
-  using max_subaddrs = wire::max_element_count<43690>;
+  using max_subaddrs = wire::max_element_count<16384>;
   using http_client = epee::net_utils::http::http_simple_client_template<
     epee::net_utils::blocked_mode_client
   >;
@@ -93,6 +95,42 @@ namespace lwsf { namespace internal { namespace rpc
 
   struct empty {};
   WIRE_DECLARE_OBJECT(empty);
+
+  struct address_meta
+  {
+    std::uint32_t maj_i;
+    std::uint32_t min_i;
+
+    constexpr address_meta() noexcept
+      : maj_i(0), min_i(0)
+    {}
+
+    constexpr address_meta(const std::uint32_t maj, std::uint32_t min) noexcept
+      : maj_i(maj), min_i(min)
+    {}
+
+    constexpr address_meta(config::lookahead src) noexcept
+      : maj_i(src.major), min_i(src.minor)
+    {}
+
+    constexpr bool is_default() const noexcept { return !maj_i && !min_i; }
+  };
+  WIRE_DECLARE_OBJECT(address_meta);
+
+  inline constexpr bool operator<(const address_meta& lhs, const address_meta& rhs) noexcept
+  {
+    return lhs.maj_i == rhs.maj_i ?
+      lhs.min_i < rhs.min_i : lhs.maj_i < rhs.maj_i;
+  }
+  inline constexpr bool operator==(const address_meta& lhs, const address_meta& rhs) noexcept
+  {
+    return lhs.maj_i == rhs.maj_i && lhs.min_i == rhs.min_i;
+  }
+  inline constexpr bool operator!=(const address_meta& lhs, const address_meta& rhs) noexcept
+  {
+    return lhs.maj_i != rhs.maj_i || lhs.min_i != rhs.min_i;
+  }
+
  
   struct login
   {
@@ -110,6 +148,7 @@ namespace lwsf { namespace internal { namespace rpc
 
     std::string address;
     crypto::secret_key view_key;
+    address_meta lookahead;
     bool create_account;
     bool generated_locally;
   };
@@ -121,6 +160,7 @@ namespace lwsf { namespace internal { namespace rpc
     static constexpr const char* endpoint() noexcept { return "/login"; }
 
     boost::optional<std::uint64_t> start_height;
+    boost::optional<address_meta> lookahead;
     bool new_address;
   };
   void read_bytes(wire::json_reader&, login_response&);
@@ -141,34 +181,7 @@ namespace lwsf { namespace internal { namespace rpc
   enum class uint64_string : std::uint64_t {};
   void write_bytes(wire::json_writer&, uint64_string);
   void read_bytes(wire::json_reader&, uint64_string&); 
-
-  struct address_meta
-  {
-    std::uint32_t maj_i;
-    std::uint32_t min_i;
-
-    constexpr address_meta() noexcept
-      : maj_i(0), min_i(0)
-    {}
-
-    constexpr address_meta(const std::uint32_t maj, std::uint32_t min) noexcept
-      : maj_i(maj), min_i(min)
-    {}
-
-    constexpr bool is_default() const noexcept { return !maj_i && !min_i; }
-  };
-  WIRE_DECLARE_OBJECT(address_meta);
-
-  inline constexpr bool operator<(const address_meta& lhs, const address_meta& rhs) noexcept
-  {
-    return lhs.maj_i == rhs.maj_i ?
-      lhs.min_i < rhs.min_i : lhs.maj_i < rhs.maj_i;
-  }
-  inline constexpr bool operator==(const address_meta& lhs, const address_meta& rhs) noexcept
-  {
-    return lhs.maj_i == rhs.maj_i && lhs.min_i == rhs.min_i;
-  }
-
+ 
   struct transaction_spend
   {
     uint64_string amount;
@@ -221,11 +234,23 @@ namespace lwsf { namespace internal { namespace rpc
     static constexpr const char* endpoint() noexcept { return "/get_address_txs"; }
 
     std::vector<transaction> transactions;
+    boost::optional<std::uint64_t> lookahead_fail;
     std::uint64_t scanned_block_height;
     std::uint64_t start_height;
     std::uint64_t blockchain_height;
+    address_meta lookahead;
   };
   void read_bytes(wire::json_reader&, get_address_txs&);
+
+
+  struct get_version
+  {
+    get_version() = delete;
+    static constexpr const char* endpoint() noexcept { return "/get_version"; }
+
+    std::uint64_t max_subaddresses;
+  };
+  void read_bytes(wire::json_reader&, get_version&);
 
 
   struct random_output
@@ -272,44 +297,33 @@ namespace lwsf { namespace internal { namespace rpc
 
   struct subaddrs
   {
-    constexpr subaddrs() noexcept
-      : head({0, 0}), key(0)
+    subaddrs() noexcept
+      : value()
     {}
 
-    constexpr explicit subaddrs(const std::uint32_t key) noexcept
-      : head({0, 0}), key(key)
-    {}
+    explicit subaddrs(const std::uint32_t last) noexcept
+      : value()
+    {
+      value.insert({0, last});
+    }
 
-    std::array<std::uint32_t, 2> head; //!< Only the first element of array 
-    std::uint32_t key;
+    bool is_valid() const noexcept;
+    void merge(std::uint32_t index);
+
+    boost::container::flat_set<std::array<std::uint32_t, 2>, std::less<>> value;
   };
   WIRE_JSON_DECLARE_OBJECT(subaddrs);
   void read_bytes(wire::json_reader&, subaddrs&);
 
-  constexpr inline bool operator<(const subaddrs& lhs, const subaddrs& rhs) noexcept
-  { return lhs.key < rhs.key; }
-
-  template<typename T>
-  constexpr inline bool operator<(const subaddrs& lhs, const T rhs) noexcept
-  { 
-    static_assert(std::is_unsigned<T>());
-    return lhs.key < rhs;
-  }
-
-  template<typename T>
-  inline bool operator<(const T lhs, const subaddrs& rhs) noexcept
-  { 
-    static_assert(std::is_unsigned<T>());
-    return lhs < rhs.key;
-  }
-
   struct get_subaddrs
   {
+    using mapped_type = std::pair<std::uint32_t, subaddrs>;
     get_subaddrs() = delete;
     static constexpr const char* endpoint() noexcept { return "/get_subaddrs"; }
 
-    boost::container::flat_set<subaddrs, std::less<>> all_subaddrs;
+    boost::container::flat_map<std::uint32_t, subaddrs> all_subaddrs;
   };
+  WIRE_JSON_DECLARE_OBJECT(get_subaddrs::mapped_type);
   void read_bytes(wire::json_reader&, get_subaddrs&);
 
 
@@ -383,6 +397,7 @@ namespace lwsf { namespace internal { namespace rpc
     import_request() = delete;
     login creds;
     std::uint64_t from_height;
+    address_meta lookahead;
   };
   void write_bytes(wire::json_writer&, const import_request&);
 
@@ -396,6 +411,7 @@ namespace lwsf { namespace internal { namespace rpc
     boost::optional<std::string> payment_address;
     boost::optional<epee::byte_slice> payment_id;
     boost::optional<uint64_string> import_fee;
+    boost::optional<address_meta> lookahead;
     std::string status;
     bool new_request;
     bool request_fulfilled;
@@ -420,8 +436,8 @@ namespace lwsf { namespace internal { namespace rpc
     provision_subaddrs_response() = delete;
     static constexpr const char* endpoint() noexcept { return "/provision_subaddrs"; }
 
-    boost::container::flat_set<subaddrs> new_subaddrs;
-    boost::container::flat_set<subaddrs> all_subaddrs;
+    boost::container::flat_map<std::uint32_t, subaddrs> new_subaddrs;
+    boost::container::flat_map<std::uint32_t, subaddrs> all_subaddrs;
   };
   void read_bytes(wire::json_reader&, provision_subaddrs_response&);
 
@@ -447,7 +463,7 @@ namespace lwsf { namespace internal { namespace rpc
   {
     upsert_subaddrs_request() = delete;
     login creds;
-    boost::container::flat_set<subaddrs, std::less<>> subaddrs_;
+    boost::container::flat_map<std::uint32_t, subaddrs> subaddrs_;
     bool get_all;
   };
   void write_bytes(wire::json_writer&, const upsert_subaddrs_request&);
@@ -456,9 +472,6 @@ namespace lwsf { namespace internal { namespace rpc
   {
     upsert_subaddrs_response() = delete;
     static constexpr const char* endpoint() noexcept { return "/upsert_subaddrs"; }
-
-    boost::container::flat_set<subaddrs> new_subaddrs;
-    boost::container::flat_set<subaddrs, std::less<>> all_subaddrs;
   };
   void read_bytes(wire::json_reader&, upsert_subaddrs_response&);
      
