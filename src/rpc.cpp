@@ -360,12 +360,14 @@ namespace lwsf { namespace internal { namespace rpc
 
   bool subaddrs::is_valid() const noexcept
   {
-    std::uint32_t last = 0;
+    std::int64_t last = -1;
     for (const auto& elem : value)
     {
       if (std::get<1>(elem) < std::get<0>(elem))
         return false;
-      if (std::get<1>(elem) < last)
+      if (std::int64_t(std::get<0>(elem)) <= last)
+        return false;
+      if (std::int64_t(std::get<1>(elem)) <= last)
         return false;
       last = std::get<1>(elem);
     }
@@ -375,8 +377,18 @@ namespace lwsf { namespace internal { namespace rpc
   void subaddrs::merge(const std::uint32_t index)
   {
     auto start = value.lower_bound({index, 0});
-    if (start != value.end() && (std::get<0>(*start) != 0 || std::get<1>(*start) < index))
+    if (start != value.end())
     { // merge lower ranges
+      if (index < std::get<0>(*start))
+      {
+        if (start == value.begin())
+        {
+          value.insert({0, index});
+          return;
+        }
+        --start;
+      }
+
       const auto highest = std::max(index, std::get<1>(*start));
       value.erase(value.begin(), start + 1);
       value.insert({0, highest});

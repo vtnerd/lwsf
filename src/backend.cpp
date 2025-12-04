@@ -679,6 +679,9 @@ namespace lwsf { namespace internal { namespace backend
 
   std::uint64_t account::needed_subaddresses(boost::container::flat_map<std::uint32_t, rpc::subaddrs> subaddrs) const
   {
+    if (this->lookahead.major == 0 || this->lookahead.minor == 0)
+      return 0;
+
     std::uint64_t count = 0;
     const auto add_subaddresses = [&count] (const std::uint64_t next)
     {
@@ -696,9 +699,9 @@ namespace lwsf { namespace internal { namespace backend
 
       // tally minium first, as determined by minor lookahead
       {
-        auto next = this->lookahead.minor;
+        std::uint64_t next = this->lookahead.minor;
         if (last != minors.end())
-          next = std::max(next, std::get<1>(*last));
+          next = std::max(next, std::uint64_t(std::get<1>(*last)) + 1);
 
         add_subaddresses(next);
       }
@@ -709,9 +712,7 @@ namespace lwsf { namespace internal { namespace backend
 
       // tally any upserted out of lookahead range
       for ( ; last != minors.end(); ++last)
-        add_subaddresses(std::get<1>(*last) - std::get<0>(*last));
-
-      return true;
+        add_subaddresses(std::uint64_t(std::get<1>(*last)) - std::uint64_t(std::get<0>(*last)) + 1);
     };
 
     if (this->subaccounts.empty())
@@ -724,7 +725,7 @@ namespace lwsf { namespace internal { namespace backend
         throw std::runtime_error{"Invalid subaddress major index"};
 
       auto major = subaddrs.emplace(std::uint32_t(i), rpc::subaddrs{}).first;
-      major->second.merge(add_uint32_clamp(this->subaccounts[i].last, this->lookahead.minor));
+      major->second.merge(add_uint32_clamp(this->subaccounts[i].last, this->lookahead.minor - 1));
       count_subaddresses(major->second.value);
     }
 
@@ -734,8 +735,11 @@ namespace lwsf { namespace internal { namespace backend
       add_subaddresses(this->lookahead.minor);
 
     // go through subaddresses after main lookahead
-    for (auto elem = subaddrs.upper_bound(this->lookahead.major); elem != subaddrs.end(); ++elem)
-      count_subaddresses(elem->second.value);
+    for (auto elem = subaddrs.lower_bound(this->lookahead.major); elem != subaddrs.end(); ++elem)
+    {
+      for (const auto& minor : elem->second.value)
+        add_subaddresses(std::uint64_t(std::get<1>(minor)) - std::uint64_t(std::get<0>(minor)) + 1);
+    }
 
     return count;
   }
