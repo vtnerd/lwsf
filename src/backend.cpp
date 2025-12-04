@@ -637,7 +637,7 @@ namespace lwsf { namespace internal { namespace backend
       return self.needed_subaddresses(std::move(subaddrs)) <= max_subaddresses;
     }
 
-    std::error_code prep_subs(rpc::http_client& client, const rpc::login& creds, std::vector<sub_account> required_subs)
+    std::error_code prep_subs(rpc::http_client& client, const boost::string_ref client_prefix, const rpc::login& creds, std::vector<sub_account> required_subs)
     {
       if (std::numeric_limits<std::uint32_t>::max() < required_subs.size())
         throw std::runtime_error{"prep_subs exceeded max major addresses"};
@@ -652,7 +652,7 @@ namespace lwsf { namespace internal { namespace backend
       }
       if (!needed)
         return {};
-      return rpc::invoke<rpc::upsert_subaddrs_response>(client, request).error(); 
+      return rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, request).error(); 
     }
   } // anonymous
 
@@ -936,18 +936,12 @@ namespace lwsf { namespace internal { namespace backend
         primary.address, primary.view.sec, primary.lookahead, true, primary.generated_locally
       };
 
-<<<<<<< HEAD
-      lock.unlock();
-      const auto response = rpc::invoke<rpc::login_response>(client, client_prefix, login);
-      if (!response)
-=======
       for (unsigned i = 0; i < 2; ++i)
->>>>>>> 0437a47 (Update subaddr lookahead to use new LWS lookahead features)
       {
         /* Do not release `lock` during login calls, want to temporarily block
           everything until complete or timeout. */
 
-        const auto response = rpc::invoke<rpc::login_response>(client, login);
+        const auto response = rpc::invoke<rpc::login_response>(client, client_prefix, login);
         if (!response)
         {
           if (response == rpc_unapproved)
@@ -980,7 +974,7 @@ namespace lwsf { namespace internal { namespace backend
           auto subs = primary.subaccounts;
           lock.unlock();
           const std::error_code error =
-            prep_subs(client, {login.address, login.view_key}, std::move(subs));
+            prep_subs(client, client_prefix, {login.address, login.view_key}, std::move(subs));
           lock.lock();
           if (error && !subaddress_error)
             subaddress_error = handle_subaddress_error(error);
@@ -988,39 +982,6 @@ namespace lwsf { namespace internal { namespace backend
           break; // retry loop
         }
       }
-<<<<<<< HEAD
-      new_account = response->new_address;
-    }
-
-    // Converting `rpc::invoke` into exceptions is easier here
-    try
-    {
-      rpc::login login{primary.address, primary.view.sec};
-      {
-        lock.unlock();
-        const auto response = rpc::invoke<rpc::get_subaddrs>(client, client_prefix, login).value();
-        lock.lock();
-        if (update_lookaheads(*this, response.all_subaddrs))
-          return new_account;
-      }
-
-      // lookaheads not far enough
-      rpc::upsert_subaddrs_request request{std::move(login), {}, true /* get_all */};
-      fill_upsert(*this, request.subaddrs_);
-
-      lock.unlock();
-      const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, request).value();
-      lock.lock();
-      update_lookaheads(*this, response.all_subaddrs);
-    }
-    catch (const std::system_error& e)
-    {
-      if (e.code() == rpc_unapproved) // happens on new account creation
-        return {error::approval};
-      else
-        lookahead_error = handle_lookahead_error(e.code());
-=======
->>>>>>> 0437a47 (Update subaddr lookahead to use new LWS lookahead features)
     }
 
     if (!lookahead_good() && !lookahead_error)
@@ -1101,10 +1062,10 @@ namespace lwsf { namespace internal { namespace backend
       if (!this->probed_lookahead)
       {
         this->probed_lookahead = true; // check just once for re-scan
-        const auto info = rpc::invoke<rpc::get_version>(client, rpc::empty{});
+        const auto info = rpc::invoke<rpc::get_version>(client, client_prefix, rpc::empty{});
         if (info)
         {
-          const auto subaddrs = rpc::invoke<rpc::get_subaddrs>(client, login);
+          const auto subaddrs = rpc::invoke<rpc::get_subaddrs>(client, client_prefix, login);
           if (subaddrs && should_attempt_rescan(primary, std::move(subaddrs->all_subaddrs), info->max_subaddresses))
           {
             lock.unlock();
@@ -1128,68 +1089,10 @@ namespace lwsf { namespace internal { namespace backend
     {
       const auto height = primary.requested_start;
       lock.unlock();
-<<<<<<< HEAD
-      const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, request);
-=======
       restore_height(height);
->>>>>>> 0437a47 (Update subaddr lookahead to use new LWS lookahead features)
       lock.lock();
     }
 
-<<<<<<< HEAD
-    if (!merged.new_subaddrs.empty() && !lookahead_error)
-    {
-      server_lookahead = std::max(server_lookahead, merged.new_subaddrs.rbegin()->key);
-
-      // ensure lookahead is from zero, or our logic is busted
-      for (auto& sub : merged.new_subaddrs)
-      {
-        std::get<0>(sub.head) = 0;
-        std::get<1>(sub.head) = add_uint32_clamp(std::get<1>(sub.head), primary.lookahead.minor);
-      }
-
-      const rpc::upsert_subaddrs_request upsert_request{
-        login, std::move(merged.new_subaddrs), false /* get_all */
-      };
-
-      lock.unlock();
-      const auto upsert_response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, upsert_request);
-      lock.lock();
-
-      if (upsert_response)
-      {
-        for (const auto& sub : upsert_request.subaddrs_)
-        {
-          auto& acct = primary.subaccounts.at(sub.key);
-          acct.server_lookahead = std::max(acct.server_lookahead, std::get<1>(sub.head));
-        }
-
-        if (primary.lookahead.major)
-        {
-          const std::uint32_t last_used = upsert_request.subaddrs_.rbegin()->key;
-          const std::uint32_t maj_i = add_uint32_clamp(unsigned(1), last_used);
-          const std::uint32_t maj_count = primary.lookahead.major;
-          const std::uint32_t min_count = std::max(std::uint32_t(1), primary.lookahead.minor);
-          const rpc::provision_subaddrs_request provision_request{
-            login, maj_i, 0, maj_count, min_count, false /* get_all */
-          };
-
-          lock.unlock();
-          const auto provision_response = rpc::invoke<rpc::provision_subaddrs_response>(client, client_prefix, provision_request);
-          lock.lock();
-
-          if (provision_response)
-            server_lookahead = std::max(server_lookahead, add_uint32_clamp(last_used, maj_count));
-          else // if !provision_response
-            lookahead_error = handle_lookahead_error(provision_response.error());
-        }
-      }
-      else // if !upsert_response
-        lookahead_error = handle_lookahead_error(upsert_response.error());
-    } // if new subaddress(es)
-
-=======
->>>>>>> 0437a47 (Update subaddr lookahead to use new LWS lookahead features)
     // return error if subaddresses enabled, and recovered wallet
     refresh_on_exit.release(); // release before acquiring `sync_listener`.
     const std::error_code rc = refresh_error =
@@ -1303,17 +1206,7 @@ namespace lwsf { namespace internal { namespace backend
 
     const std::uint64_t from_height = primary.scan_height;
     lock.unlock();
-<<<<<<< HEAD
-    const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, request);
-    lock.lock();
-    if (!response) 
-      return (lookahead_error = handle_lookahead_error(response.error()));
-
-    update_lookaheads(*this, response->all_subaddrs);
-    return {};
-=======
     return restore_height(from_height).error();
->>>>>>> 0437a47 (Update subaddr lookahead to use new LWS lookahead features)
   }
 
   expect<rpc::import_response> wallet::restore_height(const std::uint64_t height)

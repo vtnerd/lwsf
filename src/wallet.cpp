@@ -835,13 +835,8 @@ namespace lwsf { namespace internal
 
       const boost::unique_lock<boost::mutex> lock{data_->sync};
       data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
-<<<<<<< HEAD
       data_->passed_login = false;
       data_->client_prefix = std::move(url.uri);
-=======
-      const boost::unique_lock<boost::mutex> lock{data_->sync};
-      data_->passed_login = false;
->>>>>>> 0437a47 (Update subaddr lookahead to use new LWS lookahead features)
     }
     catch (const std::exception& e)
     {
