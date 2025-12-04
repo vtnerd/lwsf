@@ -1,4 +1,4 @@
-# Copyright (c) 2020, The Monero Project
+# Copyright (c) 2025, The Monero Project
 #
 # All rights reserved.
 #
@@ -26,10 +26,12 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-set(lwsf-wire_sources variant.cpp)
-set(lwsf-wire_headers variant.h)
+add_library(lwsf-unit-framework framework.test.cpp)
+target_include_directories(lwsf-unit-framework PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(lwsf-unit-framework)
 
-add_library(lwsf-wire-wrapper ${lwsf-wire_sources} ${lwsf-wire_headers})
-target_include_directories(lwsf-wire-wrapper PUBLIC "${LMDB_INCLUDE}")
-target_link_libraries(lwsf-wire-wrapper PRIVATE lwsf-wire monero::libraries)
+add_executable(lwsf-unit main.cpp backend.test.cpp rpc.test.cpp)
 
+target_include_directories(lwsf-unit PRIVATE "${lwsf_SOURCE_DIR}/src")
+target_link_libraries(lwsf-unit PRIVATE lwsf-api lwsf-unit-framework monero::libraries)
+add_test(NAME lwsf-unit COMMAND lwsf-unit -v)
