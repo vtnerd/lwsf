@@ -33,6 +33,8 @@ enable_language(CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(LWSF_BUILD_TESTS "Build Tests" OFF)
+
 if (NOT MONERO_SOURCE_DIR)
   message(FATAL_ERROR "The argument -DMONERO_SOURCE_DIR must specify a location of a monero source tree")
 endif()
@@ -89,4 +91,7 @@ set_property(TARGET monero::libraries PROPERTY
 )
 
 add_subdirectory(src)
-
+if (LWSF_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(tests)
+endif()

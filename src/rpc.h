@@ -307,7 +307,10 @@ namespace lwsf { namespace internal { namespace rpc
       value.insert({0, last});
     }
 
+    //! \return true if `this` represents a canonical range of values.
     bool is_valid() const noexcept;
+
+    // Merge `{0, index}` to the set of subaddresses.
     void merge(std::uint32_t index);
 
     boost::container::flat_set<std::array<std::uint32_t, 2>, std::less<>> value;
