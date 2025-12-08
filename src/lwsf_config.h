@@ -41,7 +41,7 @@ namespace lwsf { namespace config
   };
 
   constexpr const std::size_t bulletproof_version = 4;
-  constexpr const std::chrono::seconds connect_timeout{5};
+  constexpr const std::chrono::seconds connect_timeout{10};
   constexpr const std::chrono::seconds daemon_status_cache{10};
   constexpr const std::string_view default_account_name{"Untitled account"};
   constexpr const lookahead default_lookahead{50, 200};
@@ -57,5 +57,5 @@ namespace lwsf { namespace config
   constexpr const std::uint32_t mixin_default = 15;
   constexpr const std::chrono::seconds refresh_interval{30};
   constexpr const std::chrono::seconds refresh_interval_min{5};
-  constexpr const std::chrono::seconds rpc_timeout{5};
+  constexpr const std::chrono::seconds rpc_timeout{30};
 }} // lwsf // config

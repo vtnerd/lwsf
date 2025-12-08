@@ -98,6 +98,12 @@ namespace lwsf { namespace internal { namespace rpc
       {"Content-Type", "application/json; charset=utf-8"}
     };
 
+    if (!client.is_connected())
+    {
+      if (client.connect(config::connect_timeout))
+        return {error::no_response};
+    }
+
     const epee::net_utils::http::http_response_info* response = nullptr;
     if (!client.invoke(endpoint, "POST", {reinterpret_cast<const char*>(payload.data()), payload.size()}, config::rpc_timeout, std::addressof(response), headers))
       return {error::no_response};

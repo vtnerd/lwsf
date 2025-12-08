@@ -31,5 +31,5 @@ set(lwsf-wire_headers variant.h)
 
 add_library(lwsf-wire-wrapper ${lwsf-wire_sources} ${lwsf-wire_headers})
 target_include_directories(lwsf-wire-wrapper PUBLIC "${LMDB_INCLUDE}")
-target_link_libraries(lwsf-wire-wrapper PRIVATE monero::libraries)
+target_link_libraries(lwsf-wire-wrapper PRIVATE lwsf-wire monero::libraries)
 
