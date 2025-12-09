@@ -58,6 +58,7 @@ namespace lwsf
     class wallet_manager : public Monero::WalletManager
     {
       rpc::http_client client_;
+      std::string client_prefix_;
       std::string error_;
       rpc::daemon_status cached_;
       std::chrono::steady_clock::time_point cached_last_;
@@ -66,7 +67,7 @@ namespace lwsf
       {
         if (std::chrono::steady_clock::now() - cached_last_ > config::daemon_status_cache)
         {
-          const auto resp = rpc::invoke<rpc::daemon_status>(client_, rpc::empty{});
+          const auto resp = rpc::invoke<rpc::daemon_status>(client_, client_prefix_, rpc::empty{});
           if (!resp)
           {
             error_ = resp.error().message();
@@ -395,8 +396,6 @@ namespace lwsf
         epee::net_utils::http::url_content url{};
         if (!epee::net_utils::parse_url(address, url))
           throw std::runtime_error{"Invalid LWS URL: " + address};
-        if (!url.m_uri_content.m_path.empty())
-          throw std::runtime_error{"LWS URL contains path (unsupported)"};
 
         const bool use_ssl = (url.schema == "https");
         epee::net_utils::ssl_options_t options{
@@ -411,6 +410,7 @@ namespace lwsf
             url.port = 80;
         }
 
+        client_prefix_ = std::move(url.uri);
         client_.set_server(std::move(url.host), std::to_string(url.port), boost::none, std::move(options));
       }
 

@@ -92,7 +92,7 @@ namespace lwsf { namespace internal { namespace rpc
     return instance;
   }
 
-  expect<std::string> invoke_payload(http_client& client, const boost::string_ref endpoint, const epee::byte_slice payload)
+  expect<std::string> invoke_payload(http_client& client, const boost::string_ref prefix, boost::string_ref endpoint, const epee::byte_slice payload)
   {
     static const epee::net_utils::http::fields_list headers{
       {"Content-Type", "application/json; charset=utf-8"}
@@ -102,6 +102,13 @@ namespace lwsf { namespace internal { namespace rpc
     {
       if (client.connect(config::connect_timeout))
         return {error::no_response};
+    }
+
+    std::string real;
+    if (!prefix.empty())
+    {
+      real = std::string{prefix} + std::string{endpoint};
+      endpoint = real;
     }
 
     const epee::net_utils::http::http_response_info* response = nullptr;

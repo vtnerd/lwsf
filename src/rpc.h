@@ -70,17 +70,17 @@ namespace lwsf { namespace internal { namespace rpc
   }
 
   //! Send `payload` to `client` at uri `endpoint`, and \return payload response
-  expect<std::string> invoke_payload(http_client& client, boost::string_ref endpoint, epee::byte_slice payload);
+  expect<std::string> invoke_payload(http_client& client, boost::string_ref prefix, boost::string_ref endpoint, epee::byte_slice payload);
 
   template<typename F, typename G>
-  expect<F> invoke(http_client& client, const G& in)
+  expect<F> invoke(http_client& client, boost::string_ref prefix, const G& in)
   {
     epee::byte_stream sink{};
     std::error_code error = wire::json::to_bytes(sink, in);
     if (error)
       return error;
 
-    expect<std::string> result = invoke_payload(client, F::endpoint(), epee::byte_slice{std::move(sink)});
+    expect<std::string> result = invoke_payload(client, prefix, F::endpoint(), epee::byte_slice{std::move(sink)});
     if (!result)
       return result.error();
     

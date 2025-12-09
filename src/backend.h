@@ -235,6 +235,7 @@ namespace lwsf { namespace internal { namespace backend
     Monero::WalletListener* listener;
     rpc::http_client client;
     account primary;
+    std::string client_prefix;
     std::vector<std::uint64_t> per_byte_fee; //!< by priority level
     std::error_code refresh_error; //!< Cached because `refresh(...)` is rate limited
     std::error_code lookahead_error; //!< warnings/errors of `server_lookahead` value

@@ -788,8 +788,6 @@ namespace lwsf { namespace internal
       epee::net_utils::http::url_content url{};
       if (!epee::net_utils::parse_url(daemon_address, url))
         throw std::runtime_error{"Invalid LWS URL: " + daemon_address};
-      if (!url.m_uri_content.m_path.empty())
-        throw std::runtime_error{"LWS URL contains path (unsupported)"};
 
       if (!proxy_address.empty() && !setProxy(proxy_address))
         return false;
@@ -835,7 +833,10 @@ namespace lwsf { namespace internal
         }
       }
 
+      const boost::unique_lock<boost::mutex> lock{data_->sync};
       data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
+      data_->passed_login = false;
+      data_->client_prefix = std::move(url.uri);
     }
     catch (const std::exception& e)
     {
