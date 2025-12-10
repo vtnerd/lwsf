@@ -98,7 +98,6 @@ namespace lwsf { namespace internal { namespace backend
   {
     boost::container::flat_map<std::uint32_t, subaddress> detail; //!< Minor address info
     std::uint32_t last; //!< Last minor index in use (inclusive)
-    std::uint32_t server_lookahead; //!< Status of server (minor) lookahead. Inclusive
 
     //! Creates 1 subaddress entry (key == `0`) with default label
     sub_account();
@@ -204,6 +203,9 @@ namespace lwsf { namespace internal { namespace backend
   {
     account() = delete;
 
+    //! \return # subaddresses needed for `lookahead, `txes`, and `subaddrs`.
+    std::uint64_t needed_subaddresses(boost::container::flat_map<std::uint32_t, rpc::subaddrs> subaddrs) const;
+
     struct polyseed
     {
       epee::byte_slice seed;
@@ -238,16 +240,18 @@ namespace lwsf { namespace internal { namespace backend
     std::string client_prefix;
     std::vector<std::uint64_t> per_byte_fee; //!< by priority level
     std::error_code refresh_error; //!< Cached because `refresh(...)` is rate limited
+    std::error_code subaddress_error; //!< Errors with subaddresses (not via lookahead)
     std::error_code lookahead_error; //!< warnings/errors of `server_lookahead` value
     std::error_code import_error; //!< Error from `import_wallet_request`
     std::chrono::steady_clock::time_point last_sync;
     std::uint64_t blockchain_height;
     std::uint64_t fee_mask;
-    std::uint32_t server_lookahead; //!< Status of major lookahead server-side. Inclusive
+    config::lookahead server_lookahead; //!< Status of lookahead server-side
     mutable boost::mutex sync;
     boost::mutex sync_listener;
     boost::mutex sync_refresh;
     bool passed_login;
+    bool probed_lookahead; //!< True iff queries were done to determine lookahead re-sync
 
     wallet();
 
@@ -258,6 +262,7 @@ namespace lwsf { namespace internal { namespace backend
     cryptonote::account_keys get_primary_keys() const;
     cryptonote::account_public_address get_spend_account(const rpc::address_meta& index) const;
     std::string get_spend_address(const rpc::address_meta& index) const;
+    bool lookahead_good() const noexcept;
 
     // End GROUP
 
@@ -269,16 +274,13 @@ namespace lwsf { namespace internal { namespace backend
     //! De-serialize `this` from msgpack. Locks+replaces contents.
     std::error_code from_bytes(epee::byte_slice source);
 
-    /*! Attempt login and sync subaddresses. The result of subaddress syncing,
-    including errors, is stored in `server_lookahead`.
-    \return No errors if login succeeded, and true if new account */
+    /*! Attempt login and check lookahead status. Updates `lookahead_error`.
+      \return No errors if login succeeded, and true if new account */
     expect<bool> login_is_new();
 
-    /*! Attempt login and sync subaddresses. The result of subaddress syncing,
-    including errors, is stored in `server_lookahead`.
-    \return No errors if login succeeded. */
+    /*! Attempt login and check lookahead status. Updates `lookahead_error`.
+      \return No errors if login succeeded. */
     std::error_code login() { return login_is_new().error(); }
-
 
     //! Refreshes txes information. Strong exception guarantee.
     std::error_code refresh(bool mandatory = false);
