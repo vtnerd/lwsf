@@ -100,7 +100,7 @@ namespace lwsf { namespace internal { namespace rpc
 
     if (!client.is_connected())
     {
-      if (client.connect(config::connect_timeout))
+      if (!client.connect(config::connect_timeout))
         return {error::no_response};
     }
 
