@@ -42,6 +42,7 @@
 #ifdef LWSF_POLYSEED_ENABLE
   #include "polyseed.h"
 #endif
+#include "net/context.h"
 #include "net/http_client.h"   // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
@@ -57,27 +58,51 @@ namespace lwsf
     //! \TODO Mark final when completely implemented
     class wallet_manager : public Monero::WalletManager
     {
-      rpc::http_client client_;
-      std::string client_prefix_;
+      boost::asio::io_context io_;
+      http::client client_;
       std::string error_;
       rpc::daemon_status cached_;
       std::chrono::steady_clock::time_point cached_last_;
+      boost::mutex sync_;
+
+      template<typename T, typename F>
+      T wait_for(F f)
+      {
+        const boost::lock_guard<boost::mutex> lock{sync_};
+
+        net::to_future<T> callable{};
+        auto value = callable.inner_->promise.get_future();
+        f(std::move(callable));
+        for (;;)
+        {
+          switch (value.wait_for(std::chrono::seconds{0}))
+          {
+          case std::future_status::deferred:
+          case std::future_status::ready:
+            return value.get();
+
+          case std::future_status::timeout:
+            io_.restart();
+            io_.run_one();
+            break;
+          };
+        }
+        throw std::logic_error{"unreachable"};
+      }
 
       rpc::daemon_status get_daemon_status()
       {
         if (std::chrono::steady_clock::now() - cached_last_ > config::daemon_status_cache)
         {
-          const auto resp = rpc::invoke<rpc::daemon_status>(client_, client_prefix_, rpc::empty{});
-          if (!resp)
-          {
-            error_ = resp.error().message();
-            cached_ = rpc::daemon_status{};
-          }
+          rpc::daemon_status out{};
+          const auto error = wait_for<std::error_code>(
+            [this, &out] (auto&& f) { rpc::invoke_async(client_, rpc::empty{}, std::addressof(out), std::move(f)); }
+          );
+          if (error)
+            error_ = error.message();
           else
-          {
             error_.clear();
-            cached_ = std::move(*resp);
-          }
+          cached_ = std::move(out);
         }
         return cached_;
       }
@@ -85,7 +110,7 @@ namespace lwsf
     public:
 
       wallet_manager()
-        : client_(), error_(), cached_{}, cached_last_(std::chrono::seconds{0})
+        : io_(), client_(), error_(), cached_{}, cached_last_(std::chrono::seconds{0}), sync_()
       {}
 
       virtual ~wallet_manager() /* override */
@@ -410,8 +435,7 @@ namespace lwsf
             url.port = 80;
         }
 
-        client_prefix_ = std::move(url.uri);
-        client_.set_server(std::move(url.host), std::to_string(url.port), boost::none, std::move(options));
+        client_.init(io_,std::move(url.host), std::move(url.uri), boost::numeric_cast<std::uint16_t>(url.port), std::move(options));
       }
 
     //! returns whether the daemon can be reached, and its version number
@@ -465,13 +489,13 @@ namespace lwsf
 
       bool setProxy(const std::string &address) override
       {
-        auto endpoint = net::get_tcp_endpoint(address);
+        auto endpoint = ::net::get_tcp_endpoint(address);
         if (!endpoint)
         {
           error_ = endpoint.error().message();
           return false;
         }
-        client_.set_connector(net::socks::connector{std::move(*endpoint)});
+        client_.set_proxy(http::client::socks{std::move(*endpoint)});
         return true;
       }
     };

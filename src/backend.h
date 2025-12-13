@@ -29,6 +29,8 @@
 #pragma once
 
 #include <atomic>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/container/flat_map.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/thread/mutex.hpp>
@@ -36,6 +38,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -98,7 +101,6 @@ namespace lwsf { namespace internal { namespace backend
   {
     boost::container::flat_map<std::uint32_t, subaddress> detail; //!< Minor address info
     std::uint32_t last; //!< Last minor index in use (inclusive)
-    std::uint32_t server_lookahead; //!< Status of server (minor) lookahead. Inclusive
 
     //! Creates 1 subaddress entry (key == `0`) with default label
     sub_account();
@@ -204,6 +206,9 @@ namespace lwsf { namespace internal { namespace backend
   {
     account() = delete;
 
+    //! \return # subaddresses needed for `lookahead, `txes`, and `subaddrs`.
+    std::uint64_t needed_subaddresses(boost::container::flat_map<std::uint32_t, rpc::subaddrs> subaddrs) const;
+
     struct polyseed
     {
       epee::byte_slice seed;
@@ -233,23 +238,26 @@ namespace lwsf { namespace internal { namespace backend
   struct wallet
   {
     Monero::WalletListener* listener;
-    rpc::http_client client;
+    boost::asio::io_context::strand strand; //<! useful in preventing contention on `sync` 
+    http::client client;
     account primary;
     std::string client_prefix;
     std::vector<std::uint64_t> per_byte_fee; //!< by priority level
     std::error_code refresh_error; //!< Cached because `refresh(...)` is rate limited
+    std::error_code subaddress_error; //!< Errors with subaddresses (not via lookahead)
     std::error_code lookahead_error; //!< warnings/errors of `server_lookahead` value
     std::error_code import_error; //!< Error from `import_wallet_request`
     std::chrono::steady_clock::time_point last_sync;
     std::uint64_t blockchain_height;
     std::uint64_t fee_mask;
-    std::uint32_t server_lookahead; //!< Status of major lookahead server-side. Inclusive
+    config::lookahead server_lookahead; //!< Status of lookahead server-side
     mutable boost::mutex sync;
     boost::mutex sync_listener;
     boost::mutex sync_refresh;
     bool passed_login;
+    bool probed_lookahead; //!< True iff queries were done to determine lookahead re-sync
 
-    wallet();
+    wallet(boost::asio::io_context& io);
 
     // `sync` mutex is NOT acquired for this group
 
@@ -258,6 +266,7 @@ namespace lwsf { namespace internal { namespace backend
     cryptonote::account_keys get_primary_keys() const;
     cryptonote::account_public_address get_spend_account(const rpc::address_meta& index) const;
     std::string get_spend_address(const rpc::address_meta& index) const;
+    bool lookahead_good() const noexcept;
 
     // End GROUP
 
@@ -269,32 +278,35 @@ namespace lwsf { namespace internal { namespace backend
     //! De-serialize `this` from msgpack. Locks+replaces contents.
     std::error_code from_bytes(epee::byte_slice source);
 
-    /*! Attempt login and sync subaddresses. The result of subaddress syncing,
-    including errors, is stored in `server_lookahead`.
-    \return No errors if login succeeded, and true if new account */
-    expect<bool> login_is_new();
+    /*! Attempt login and check lookahead status. Updates `lookahead_error`.
+      \return No errors if login succeeded, and true if new account */
+    static void login_is_new(std::shared_ptr<wallet> self, std::function<void(expect<bool>)>);
 
-    /*! Attempt login and sync subaddresses. The result of subaddress syncing,
-    including errors, is stored in `server_lookahead`.
-    \return No errors if login succeeded. */
-    std::error_code login() { return login_is_new().error(); }
-
+    /*! Attempt login and check lookahead status. Updates `lookahead_error`.
+      \return No errors if login succeeded. */
+    template<typename F>
+    static void login(std::shared_ptr<wallet> self, F f)
+    { 
+      login_is_new(std::move(self), [f = std::move(f)] (expect<bool> r) mutable { f(r.error()); });
+    }
 
     //! Refreshes txes information. Strong exception guarantee.
-    std::error_code refresh(bool mandatory = false);
+    static void refresh(std::shared_ptr<wallet> self, bool mandatory, std::function<void(std::error_code)>);
 
     //! Notify server that new major accounts need to be watched.
-    std::error_code register_subaccount(std::uint32_t maj_i);
+    static void register_subaccount(std::shared_ptr<wallet> self, std::uint32_t maj_i, std::function<void(std::error_code)> f);
 
-    //! Notify server that new minor accounts need to be watched.
-    std::error_code register_subaddress(std::uint32_t maj_i, std::uint32_t min_i);
+    //! Notify server that new minor accounts need to be watched. Do not hold `self->sync`.
+    static void register_subaddress(std::shared_ptr<wallet> self, std::uint32_t maj_i, std::uint32_t min_i, std::function<void(std::error_code)>);
 
-    //! Modify local and possibly server lookahead
-    std::error_code set_lookahead(std::uint32_t major, std::uint32_t minor);
+    //! Modify local and possibly server lookahead. Do not hold `self->sync`.
+    static void set_lookahead(std::shared_ptr<wallet> self, std::uint32_t major, std::uint32_t minor, std::function<void(std::error_code)>);
 
-    expect<rpc::import_response> restore_height(const std::uint64_t height);
+    static void restore_height(std::shared_ptr<wallet> self, const std::uint64_t height, std::function<void(std::error_code)>);
 
-    expect<std::vector<rpc::random_outputs>> get_decoys(const rpc::get_random_outs_request& req);
-    std::error_code send_tx(epee::byte_slice tx_bytes);
+    using decoys_callable = void(expect<std::vector<rpc::random_outputs>>);
+    static void get_decoys(std::shared_ptr<wallet> self, rpc::get_random_outs_request&& req, std::function<decoys_callable> f);
+
+    static void send_tx(std::shared_ptr<wallet> slef, epee::byte_slice tx_bytes, std::function<void(std::error_code)> f);
   };
 }}} // lwsf // internal // backend

@@ -26,6 +26,7 @@
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include "error.h"
+#include "common/error.h" // monero/src
 
 namespace lwsf
 {
@@ -61,6 +62,8 @@ namespace lwsf
       return "Unexpected user+pass field in URL";
     case error::unexpected_nullptr:
       return "Unexpected nullptr";
+    case error::unknown_exception:
+      return "Unknown exception";
 
     default:
       break;
@@ -84,5 +87,15 @@ namespace lwsf
     };
     static const category instance{};
     return instance;
+  }
+
+  void throw_invalid_argument(const int line, const char* file)
+  {
+    if (!file)
+      file = "";
+    char const* const end = std::strrchr(file, '/');
+    if (end)
+      file = end + 1;
+    throw std::invalid_argument{"Failed pre-condition at " + std::string{file} + ":" + std::to_string(line)};
   }
 } // lwsf
