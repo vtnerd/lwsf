@@ -35,6 +35,7 @@
 #include "byte_slice.h"   // monero/contrib/epee/include
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "error.h"
+#include "net/context.h"
 #include "numeric.h"
 #include "string_tools.h" // monero/contrib/epee/include
 #include "utils/encrypted_file.h"
@@ -99,27 +100,24 @@ namespace lwsf { namespace internal
   }
 
 
-  pending_transaction::pending_transaction(std::shared_ptr<backend::wallet> wallet, std::string error, std::vector<std::shared_ptr<backend::transaction>> local)
-    : wallet_(std::move(wallet)), local_(std::move(local)), error_(std::move(error))
+  pending_transaction::pending_transaction(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<net::context> context, std::string error, std::vector<std::shared_ptr<backend::transaction>> local)
+    : context_(std::move(context)), wallet_(std::move(wallet)), local_(std::move(local)), error_(std::move(error))
   {
-    if (!wallet_)
-      throw std::invalid_argument{"lwsf::internal::pending_transaction cannot be given nullptr backend"};
+    LWSF_VERIFY(wallet_);
 
     for (const auto& e : local_)
     {
-      if (!e)
-        throw std::invalid_argument{"lwsf::internal::pending_transaction cannot be given nullptr backend::transaction"};
+      LWSF_VERIFY(bool(e));
     }
   }
 
-  std::unique_ptr<pending_transaction> pending_transaction::load_from_file(std::shared_ptr<backend::wallet> wallet, const std::string& filename)
+  std::unique_ptr<pending_transaction> pending_transaction::load_from_file(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<net::context> context, const std::string& filename)
   {
-    if (!wallet)
-      throw std::invalid_argument{"lwsf::internal::pending_transaction::load_from_file cannot be given nullptr backend"};
+    LWSF_VERIFY(wallet && context);
 
     epee::byte_slice file = try_load(filename, tx_file_magic);
     if (file.empty())
-      return std::make_unique<pending_transaction>(wallet, "Invalid path/file for tx");
+      return std::make_unique<pending_transaction>(wallet, context, "Invalid path/file for tx");
 
     expect<epee::byte_slice> payload = epee::byte_slice{};
     {
@@ -127,12 +125,12 @@ namespace lwsf { namespace internal
       payload = decrypt(std::move(file), epee::as_byte_span(unwrap(unwrap(wallet->primary.view.sec))));
     }
     if (!payload)
-      return std::make_unique<pending_transaction>(wallet, payload.error().message());
+      return std::make_unique<pending_transaction>(wallet, context, payload.error().message());
 
     txes_file dest{};
     if (std::error_code error = wire::msgpack::from_bytes(std::move(*payload), dest))
-      return std::make_unique<pending_transaction>(wallet, error.message());
-    return std::make_unique<pending_transaction>(wallet, "", std::move(dest.txes));
+      return std::make_unique<pending_transaction>(wallet, context, error.message());
+    return std::make_unique<pending_transaction>(wallet, context, "", std::move(dest.txes));
   }
 
   pending_transaction::~pending_transaction()
@@ -143,18 +141,29 @@ namespace lwsf { namespace internal
     if (!error_.empty())
       return false;
 
-    for (auto e : local_)
+    try
     {
-      const std::error_code error = wallet_->send_tx(e->raw_bytes.clone());
-      if (error)
+      for (auto e : local_)
       {
-        error_ = error.message();
-        return false;
+        const auto error = context_->wait_for<std::error_code>(
+          [this, &e] (auto&& f)
+          { backend::wallet::send_tx(this->wallet_, e->raw_bytes.clone(), std::move(f)); }
+        );
+        if (error)
+        {
+          error_ = error.message();
+          return false;
+        }
+        const boost::lock_guard<boost::mutex> lock{wallet_->sync};
+        auto entry = wallet_->primary.txes.try_emplace(e->id).first;
+        if (!entry->second)
+          entry->second = std::move(e);
       }
-      const boost::lock_guard<boost::mutex> lock{wallet_->sync};
-      auto entry = wallet_->primary.txes.try_emplace(e->id).first;
-      if (!entry->second)
-        entry->second = std::move(e);
+    }
+    catch(const std::exception& e)
+    {
+      error_ = e.what();
+      return false;
     }
     return true;
   }

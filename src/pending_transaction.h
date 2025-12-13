@@ -47,15 +47,18 @@ namespace lwsf { namespace internal
     struct wallet;
   }
 
+  namespace net { struct context; }
+
   class pending_transaction final : public Monero::PendingTransaction
   {
+    const std::shared_ptr<net::context> context_; // `wallet_` holds `io_context` references
     const std::shared_ptr<backend::wallet> wallet_;
     const std::vector<std::shared_ptr<backend::transaction>> local_;
     std::string error_;
 
   public:
-    pending_transaction(std::shared_ptr<backend::wallet> wallet, std::string error, std::vector<std::shared_ptr<backend::transaction>> local = {});
-    static std::unique_ptr<pending_transaction> load_from_file(std::shared_ptr<backend::wallet> wallet, const std::string& filename);
+    pending_transaction(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<net::context> context, std::string error, std::vector<std::shared_ptr<backend::transaction>> local = {});
+    static std::unique_ptr<pending_transaction> load_from_file(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<net::context> context, const std::string& filename);
 
     pending_transaction(pending_transaction&&) = delete;
     pending_transaction(const pending_transaction&) = delete;

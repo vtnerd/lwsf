@@ -41,7 +41,7 @@
 #include <string>
 #include <system_error>
 #include "crypto/crypto.h"          // monero/src
-#include "net/http_client.h"        // monero/contrib/epee/include
+#include "net/http.h"
 #include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf
@@ -49,12 +49,35 @@ namespace lwsf
 namespace internal
 {
   namespace backend { struct wallet; }
+  namespace net { struct context; }
 
   class wallet final : public Monero::Wallet
   {
     enum class state : std::uint8_t { stop = 0, paused, skip_once, run };
 
+    struct frame
+    {
+      std::string exception_error_;
+      std::error_code error_;
+      std::chrono::milliseconds refresh_interval_;
+      boost::mutex sync_;
+      state thread_state_;
+
+      frame();
+
+      bool set_error(std::error_code error, bool clear);
+      struct async_error
+      {
+        std::shared_ptr<frame> self;
+        void operator()(std::error_code error) const;
+      };
+
+      bool thead_start();
+    };
+
+    const std::shared_ptr<net::context> context_; // `data_` holds `io_service` references
     const std::shared_ptr<backend::wallet> data_;
+    const std::shared_ptr<frame> status_;
     std::unique_ptr<Monero::AddressBook> addressbook_;
     std::unique_ptr<Monero::TransactionHistory> history_;
     std::unique_ptr<Monero::SubaddressAccount> subaddresses_;
@@ -63,26 +86,21 @@ namespace internal
     std::string password_;
     std::string language_;
     std::string ca_file_path_;
-    std::deque<std::function<std::error_code()>> work_queue_;
-    mutable std::string exception_error_;
-    mutable std::error_code error_;
     boost::thread thread_;
     const std::uint64_t iterations_;
-    std::chrono::milliseconds refresh_interval_;  
     std::uint32_t mixin_;
     boost::condition_variable refresh_notify_;
-    mutable boost::mutex error_sync_;
     boost::mutex refresh_sync_; //!< Synchronizes with requests from other threads
     boost::mutex thread_sync_;  //!< Syncrhonizes thread destruction+creation
-    state thread_state_;
     bool mandatory_refresh_;
 
     bool set_error(std::error_code status, bool clear = false) const;
     void set_critical(const std::exception& e) const;
 
-    template<typename F>
-    void queue_work(F&& f);
+    template<typename T, typename F>
+    T wait_for(F&& f);
 
+    void check_worker_thread();
     void stop_refresh_loop();
     void refresh_loop();
 

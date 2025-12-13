@@ -47,6 +47,9 @@ namespace lwsf { namespace config
   constexpr const lookahead default_lookahead{50, 200};
   constexpr const lookahead default_minimal_lookahead{5, 15};
   constexpr const std::string_view default_primary_name{"Primary account"};
+  constexpr const std::size_t http_body_limit = 25 * 1024 * 1024; // 25 MiB
+  constexpr const std::size_t http_parser_buffer_size = 16 * 1024; // 16 KiB
+  constexpr const unsigned http_version = 11;
   constexpr const std::size_t initial_buffer_size = 1024 * 64; // 64 KiB
   constexpr const std::size_t max_file_read_size = 50 * 1024 * 1024; // 50 MiB
   constexpr const std::size_t max_inputs_in_rpc = 512;

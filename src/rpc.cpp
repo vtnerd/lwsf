@@ -44,86 +44,12 @@
 #include "wire/json.h"
 #include "wire/traits.h"
 #include "wire/wrapper/array.h"
+#include "wire/wrapper/defaulted.h"
 #include "wire/wrapper/trusted_array.h"
 #include "wire/wrappers_impl.h"
 
 namespace lwsf { namespace internal { namespace rpc
 {
-  namespace
-  {
-    //! \return Error message string.
-    const char* get_string(error value) noexcept
-    {
-      switch (value)
-      {
-      default:
-        break;
-
-      case error::none:
-        return "No rpc errors";
-      case error::no_response:
-        return "No response from HTTP server";
-      case error::invalid_code:
-        return "Invalid status code from HTTP server";
-      }
-      return nullptr;
-    }
-  }
-
-  //! \return Category for `error`.
-  const std::error_category& error_category() noexcept
-  {
-    struct category final : std::error_category
-    {
-      virtual const char* name() const noexcept override final
-      {
-        return "lwsf::internal::rpc::error_category()";
-      }
-
-      virtual std::string message(int value) const override final
-      {
-        char const * const msg = get_string(error(value));
-        if (msg)
-          return msg;
-        return "HTTP error code " + std::to_string(value);
-      }
-    };
-    static const category instance{};
-    return instance;
-  }
-
-  expect<std::string> invoke_payload(http_client& client, const boost::string_ref prefix, boost::string_ref endpoint, const epee::byte_slice payload)
-  {
-    static const epee::net_utils::http::fields_list headers{
-      {"Content-Type", "application/json; charset=utf-8"}
-    };
-
-    if (!client.is_connected())
-    {
-      if (!client.connect(config::connect_timeout))
-        return {error::no_response};
-    }
-
-    std::string real;
-    if (!prefix.empty())
-    {
-      real = std::string{prefix} + std::string{endpoint};
-      endpoint = real;
-    }
-
-    const epee::net_utils::http::http_response_info* response = nullptr;
-    if (!client.invoke(endpoint, "POST", {reinterpret_cast<const char*>(payload.data()), payload.size()}, config::rpc_timeout, std::addressof(response), headers))
-      return {error::no_response};
-    if (!response)
-      return {error::no_response};
-    if(response->m_response_code == 200 || response->m_response_code == 201)
-      return response->m_body;
-
-    if (response->m_response_code <= 0 || std::numeric_limits<int>::max() < response->m_response_code)
-      return {error::invalid_code};
-    return {error(int(response->m_response_code))};
-  }
-
   void write_bytes(wire::writer& dest, const empty&)
   { wire::object(dest); }
   void read_bytes(wire::reader& source, empty&)
@@ -139,6 +65,7 @@ namespace lwsf { namespace internal { namespace rpc
     wire::object(dest,
       WIRE_FIELD(address),
       WIRE_FIELD(view_key),
+      WIRE_FIELD_DEFAULTED(lookahead, address_meta{}),
       WIRE_FIELD(create_account),
       WIRE_FIELD(generated_locally)
     );
@@ -146,7 +73,11 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, login_response& self)
   {
-    wire::object(source, WIRE_OPTIONAL_FIELD(start_height), WIRE_FIELD(new_address));
+    wire::object(source,
+      WIRE_OPTIONAL_FIELD(start_height),
+      WIRE_OPTIONAL_FIELD(lookahead),
+      WIRE_FIELD(new_address)
+    );
   }
 
   void read_bytes(wire::json_reader& source, daemon_status& self)
@@ -247,14 +178,21 @@ namespace lwsf { namespace internal { namespace rpc
     }
   }
 
+  void read_bytes(wire::json_reader& source, get_version& self)
+  {
+    wire::object(source, WIRE_FIELD_DEFAULTED(max_subaddresses, unsigned(0)));
+  }
+
   void read_bytes(wire::json_reader& source, get_address_txs& self)
   {
     using max_transactions = wire::max_element_count<config::max_txes_in_rpc>; 
     wire::object(source,
       WIRE_FIELD_ARRAY(transactions, max_transactions),
+      WIRE_OPTIONAL_FIELD(lookahead_fail),
       WIRE_FIELD(scanned_block_height),
       WIRE_FIELD(start_height),
-      WIRE_FIELD(blockchain_height)
+      WIRE_FIELD(blockchain_height),
+      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
     );
   }
 
@@ -336,19 +274,72 @@ namespace lwsf { namespace internal { namespace rpc
     { return {std::move(val)}; }
 
     template<typename F, typename T>
-    void map_subaddrs(F& format, T& self)
+    void map_subaddr(F& format, T& self)
     {
-      auto head = array_head(std::ref(self.head));
       wire::object(format,
-        WIRE_FIELD(key),
-        wire::field("value", wire::trusted_array(std::ref(head)))
+        wire::field("key", std::ref(self.first)),
+        wire::field("value", std::ref(self.second))
       );
-      if (head.empty())
-        WIRE_DLOG_THROW(wire::error::schema::array, "unexpected empty array");
     }
   }
- 
-  WIRE_JSON_DEFINE_OBJECT(subaddrs, map_subaddrs); 
+
+  bool subaddrs::is_valid() const noexcept
+  {
+    std::int64_t last = -1;
+    for (const auto& elem : value)
+    {
+      if (std::get<1>(elem) < std::get<0>(elem))
+        return false;
+      if (std::int64_t(std::get<0>(elem)) <= last)
+        return false;
+      if (std::int64_t(std::get<1>(elem)) <= last)
+        return false;
+      last = std::get<1>(elem);
+    }
+    return true;
+  }
+
+  void subaddrs::merge(const std::uint32_t index)
+  {
+    auto start = value.lower_bound({index, 0});
+    if (start != value.end())
+    { // merge lower ranges
+      if (index < std::get<0>(*start))
+      {
+        if (start == value.begin())
+        {
+          value.insert({0, index});
+          return;
+        }
+        --start;
+      }
+
+      const auto highest = std::max(index, std::get<1>(*start));
+      value.erase(value.begin(), start + 1);
+      value.insert({0, highest});
+    }
+    else if (start == value.end())
+    {
+      auto highest = index;
+      if (!value.empty())
+        highest = std::max(highest, std::get<1>(*value.rbegin()));
+      value.clear();
+      value.insert({0, highest});
+    }
+  }
+
+  void read_bytes(wire::json_reader& source, subaddrs& self)
+  {
+    wire_read::array(source, self.value, wire::min_element_size<2>{});
+    if (!self.is_valid())
+      WIRE_DLOG_THROW(wire::error::schema::array, "invalid array mapping");
+  } 
+  void write_bytes(wire::json_writer& dest, const subaddrs& self)
+  {
+    wire_write::array(dest, self.value);
+  }
+
+  WIRE_JSON_DEFINE_OBJECT(get_subaddrs::mapped_type, map_subaddr);
   void read_bytes(wire::json_reader& source, get_subaddrs& self)
   {
     wire::object(source, WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs));
@@ -451,7 +442,8 @@ namespace lwsf { namespace internal { namespace rpc
     wire::object(source,
       wire::field("address", std::cref(self.creds.address)),
       wire::field("view_key", std::cref(self.creds.view_key)),
-      WIRE_FIELD(from_height)
+      WIRE_FIELD_DEFAULTED(from_height, unsigned(0)),
+      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
     );
   }
 
@@ -461,6 +453,7 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_OPTIONAL_FIELD(payment_address),
       WIRE_OPTIONAL_FIELD(payment_id),
       WIRE_OPTIONAL_FIELD(import_fee),
+      WIRE_OPTIONAL_FIELD(lookahead),
       WIRE_FIELD(status),
       WIRE_FIELD(new_request),
       WIRE_FIELD(request_fulfilled)
@@ -513,10 +506,7 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, upsert_subaddrs_response& self)
   {
-    wire::object(source,
-      WIRE_FIELD_ARRAY(new_subaddrs, max_subaddrs),
-      WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs)
-    );
+    wire::object(source);
   }
 }}} // lwsf // internal // rpc
 
