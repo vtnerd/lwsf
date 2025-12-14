@@ -249,9 +249,9 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, get_address_txs& self)
   {
-    using max_transactions = wire::max_element_count<config::max_txes_in_rpc>; 
+    using min_tx_size = wire::min_element_size<sizeof(crypto::hash) + 7>;
     wire::object(source,
-      WIRE_FIELD_ARRAY(transactions, max_transactions),
+      WIRE_FIELD_ARRAY(transactions, min_tx_size),
       WIRE_FIELD(scanned_block_height),
       WIRE_FIELD(start_height),
       WIRE_FIELD(blockchain_height)
