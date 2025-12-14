@@ -694,7 +694,7 @@ namespace lwsf { namespace internal { namespace backend
       out.reserve(end);
 
       for (std::size_t i = 0; i < accts.size() && i <= max_index; ++i)
-        out.insert(out.end(), rpc::subaddrs{std::uint32_t(i)})->head = {0, add_uint32_clamp(accts[i].last, self.primary.lookahead.major)};
+        out.insert(out.end(), rpc::subaddrs{std::uint32_t(i)})->head = {0, std::max(std::uint32_t(1), add_uint32_clamp(accts[i].last, self.primary.lookahead.minor)) - 1};
 
       /* `0 < lookahead.major & lookahead.minor == 0` is a strange edge case.
         Assume `lookahead.minor == 1` in that scenario. */
