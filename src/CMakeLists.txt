@@ -71,7 +71,7 @@ if (NOT ("${LWSF_POLYSEED_SOURCE}" STREQUAL ""))
   set(LWSF_POLYSEED_LIBRARY polyseed)
 endif()
 
-target_compile_definitions(lwsf-api PRIVATE ${LWSF_COMPILE_DEFINITIONS})
+target_compile_definitions(lwsf-api PUBLIC ${LWSF_COMPILE_DEFINITIONS})
 target_include_directories(lwsf-api
   PUBLIC
     "${lwsf_SOURCE_DIR}/include"
@@ -88,6 +88,7 @@ target_link_libraries(lwsf-api
     lwsf-wire-json
     lwsf-wire-msgpack
     lwsf-wire-wrapper
+    ${Boost_FILESYSTEM_LIBRARY}
     ${Boost_THREAD_LIBRARY}
     ${sodium_LIBRARY_RELEASE}
     ${LWSF_POLYSEED_LIBRARY}

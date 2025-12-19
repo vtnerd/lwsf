@@ -33,9 +33,9 @@
 #endif
 
 #include <algorithm>
+#include <boost/filesystem.hpp>
 #include <boost/range/combine.hpp>
 #include <exception>
-#include <filesystem>
 #include <sodium/core.h>
 #include <sodium/randombytes.h>
 #include <sstream>
@@ -181,7 +181,7 @@ namespace lwsf { namespace internal
     }
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
-    bool atomic_file_write(const std::filesystem::path& filename, const std::filesystem::path& directory, epee::byte_slice contents) noexcept
+    bool atomic_file_write(const boost::filesystem::path& filename, const boost::filesystem::path& directory, epee::byte_slice contents) noexcept
     {
       const int fd =
         open(filename.c_str(), O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
@@ -387,14 +387,14 @@ namespace lwsf { namespace internal
   std::vector<std::string> wallet::find(const std::string& path)
   {
     std::vector<std::string> out;
-    std::filesystem::path work_dir(path);
-    if(!std::filesystem::is_directory(path))
+    boost::filesystem::path work_dir(path);
+    if(!boost::filesystem::is_directory(path))
       return out;
 
-    std::filesystem::recursive_directory_iterator end_itr;
-    for (std::filesystem::recursive_directory_iterator itr(path); itr != end_itr; ++itr)
+    boost::filesystem::recursive_directory_iterator end_itr;
+    for (boost::filesystem::recursive_directory_iterator itr(path); itr != end_itr; ++itr)
     {
-      if (std::filesystem::is_regular_file(itr->status()))
+      if (boost::filesystem::is_regular_file(itr->status()))
       {
         std::string filename = itr->path().filename().string();
         if (!try_load(filename, wallet_file_magic).empty())
@@ -753,13 +753,13 @@ namespace lwsf { namespace internal
 
     try
     {
-      const std::filesystem::path file = real_path;
-      const std::filesystem::path new_file = real_path + ".new";
-      const std::filesystem::path directory =
-        std::filesystem::path{real_path}.remove_filename();
+      const boost::filesystem::path file = real_path;
+      const boost::filesystem::path new_file = real_path + ".new";
+      const boost::filesystem::path directory =
+        boost::filesystem::path{real_path}.remove_filename();
 
-      if (std::filesystem::exists(new_file))
-        std::filesystem::rename(new_file, file);
+      if (boost::filesystem::exists(new_file))
+        boost::filesystem::rename(new_file, file);
 
       // blocks until file and directory contents are synced
       epee::byte_slice blob =
@@ -767,7 +767,7 @@ namespace lwsf { namespace internal
       if (!atomic_file_write(new_file, directory, std::move(blob)))
         throw std::runtime_error{"Failed to write file " + real_path};
 
-      std::filesystem::rename(new_file, file);
+      boost::filesystem::rename(new_file, file);
     }
     catch (const std::exception& e)
     {
@@ -816,7 +816,7 @@ namespace lwsf { namespace internal
       // Configure SSL certificate verification
       if (options.support != epee::net_utils::ssl_support_t::e_ssl_support_disabled)
       {
-        bool ca_file_valid = !ca_file_path_.empty() && std::filesystem::exists(ca_file_path_);
+        bool ca_file_valid = !ca_file_path_.empty() && boost::filesystem::exists(ca_file_path_);
         
         if (ca_file_valid) {
           try {

@@ -28,7 +28,7 @@
 
 #include "pending_transaction.h"
 
-#include <filesystem>
+#include <boost/filesystem/operations.hpp>
 #include <fstream>
 #include <stdexcept>
 #include "backend.h"
@@ -172,7 +172,7 @@ namespace lwsf { namespace internal
     if (filename.empty())
       return send();
 
-    if (std::filesystem::exists(filename) && !overwrite)
+    if (boost::filesystem::exists(filename) && !overwrite)
     {
       error_ = "File already exists";
       return false;

@@ -56,7 +56,7 @@ if(STATIC)
   set(Boost_USE_STATIC_LIBS ON)
   set(Boost_USE_STATIC_RUNTIME ON)
 endif()
-find_package(Boost 1.66 QUIET REQUIRED COMPONENTS program_options thread)
+find_package(Boost 1.66 QUIET REQUIRED COMPONENTS filesystem program_options thread)
 
 list(INSERT CMAKE_MODULE_PATH 0
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
