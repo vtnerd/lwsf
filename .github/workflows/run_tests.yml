@@ -69,6 +69,7 @@ jobs:
           msystem: MINGW64
           update: true
           install: >
+            coreutils
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-gcc
