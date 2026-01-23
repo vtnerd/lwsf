@@ -25,11 +25,15 @@
 // INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
+  
+#include "net/http_client.h"   // monero/contrib/epee/include
 #include "wallet.h"
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
   #include <fcntl.h>
+#elif defined(_WIN32)
+  #include <fileapi.h>
+  #include <handleapi.h>
 #endif
 
 #include <algorithm>
@@ -204,6 +208,20 @@ namespace lwsf { namespace internal
       }
 
       close(fd);
+      return rc;
+    }
+#elif defined(_WIN32)
+    bool atomic_file_write(const boost::filesystem::path& filename, const boost::filesystem::path&, epee::byte_slice contents) noexcept
+    {
+      HANDLE file = CreateFileW(filename.c_str(), (GENERIC_READ | GENERIC_WRITE), 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (file == INVALID_HANDLE_VALUE)
+        return false;
+
+      bool rc = false;
+      if (WriteFile(file, contents.data(), contents.size(), nullptr, nullptr))
+        rc = FlushFileBuffers(file);
+
+      rc &= CloseHandle(file);
       return rc;
     }
 #else
@@ -834,7 +852,7 @@ namespace lwsf { namespace internal
       }
 
       const boost::unique_lock<boost::mutex> lock{data_->sync};
-      data_->client.set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
+      data_->client->set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
       data_->passed_login = false;
       data_->client_prefix = std::move(url.uri);
     }
@@ -867,12 +885,12 @@ namespace lwsf { namespace internal
 
   bool wallet::connectToDaemon()
   {
-    const bool connected = data_->client.is_connected();
+    const bool connected = data_->client->is_connected();
     boost::unique_lock<boost::mutex> lock{data_->sync};
     if (connected && data_->passed_login)
       return true;
 
-    if (connected || data_->client.connect(config::connect_timeout))
+    if (connected || data_->client->connect(config::connect_timeout))
     {
       lock.unlock();
       return set_error(data_->login());
@@ -882,7 +900,7 @@ namespace lwsf { namespace internal
 
   Monero::Wallet::ConnectionStatus wallet::connected() const
   {
-    if (!data_->client.is_connected())
+    if (!data_->client->is_connected())
       return ConnectionStatus_Disconnected;
 
     const boost::lock_guard<boost::mutex> lock{data_->sync};
@@ -892,18 +910,18 @@ namespace lwsf { namespace internal
 
   bool wallet::setProxy(const std::string &address)
   {
-    data_->client.disconnect();
+    data_->client->disconnect();
     if (address.empty())
-      data_->client.set_connector(epee::net_utils::direct_connect{});
+      data_->client->set_connector(epee::net_utils::direct_connect{});
     else
     {
       auto endpoint = net::get_tcp_endpoint(address);
       if (!endpoint)
       {
-        data_->client.set_connector(null_connector{});
+        data_->client->set_connector(null_connector{});
         return set_error(endpoint.error());
       }
-      data_->client.set_connector(net::socks::connector{std::move(*endpoint)});
+      data_->client->set_connector(net::socks::connector{std::move(*endpoint)});
     }
     return true;
   }

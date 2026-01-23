@@ -40,8 +40,8 @@
 #include <memory>
 #include <string>
 #include <system_error>
+#include "byte_slice.h"             // monero/contrib/epee/include
 #include "crypto/crypto.h"          // monero/src
-#include "net/http_client.h"        // monero/contrib/epee/include
 #include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf

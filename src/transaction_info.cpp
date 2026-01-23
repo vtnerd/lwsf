@@ -29,6 +29,7 @@
 #include "transaction_info.h"
 
 #include <boost/container/throw_exception.hpp>
+#include <boost/thread/lock_guard.hpp>
 #include <boost/version.hpp>
 #include "hex.h"
 

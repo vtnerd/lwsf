@@ -26,6 +26,7 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "net/http_client.h"   // monero/contrib/epee/include
 #include "lws_frontend.h"
 
 #include <chrono>
@@ -38,15 +39,14 @@
 #include "common/dns_utils.h"  // monero/src
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "lwsf_config.h"
+#include "lwsf_rpc.h"
 #include "lws_frontend.h"
 #ifdef LWSF_POLYSEED_ENABLE
   #include "polyseed.h"
 #endif
-#include "net/http_client.h"   // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
 #include "net/socks_connect.h" // monero/src
 #include "QrCode.hpp"          // monero/src/external
-#include "rpc.h"
 #include "wallet.h"
 #include "wallet/api/wallet2_api.h" // monero/src
 
