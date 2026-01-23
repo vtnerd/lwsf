@@ -26,6 +26,7 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#include "net/http_client.h"   // monero/contrib/epee/include
 #include "backend.h"
 
 #include <boost/numeric/conversion/cast.hpp>
@@ -820,7 +821,7 @@ namespace lwsf { namespace internal { namespace backend
 
   wallet::wallet()
     : listener(nullptr),
-      client(),
+      client(std::make_unique<rpc::http_client>()),
       primary{},
       per_byte_fee(),
       refresh_error(),
@@ -925,7 +926,7 @@ namespace lwsf { namespace internal { namespace backend
       };
 
       lock.unlock();
-      const auto response = rpc::invoke<rpc::login_response>(client, client_prefix, login);
+      const auto response = rpc::invoke<rpc::login_response>(*client, client_prefix, login);
       if (!response)
       {
         if (response == rpc_unapproved)
@@ -956,7 +957,7 @@ namespace lwsf { namespace internal { namespace backend
       rpc::login login{primary.address, primary.view.sec};
       {
         lock.unlock();
-        const auto response = rpc::invoke<rpc::get_subaddrs>(client, client_prefix, login).value();
+        const auto response = rpc::invoke<rpc::get_subaddrs>(*client, client_prefix, login).value();
         lock.lock();
         if (update_lookaheads(*this, response.all_subaddrs))
           return new_account;
@@ -967,7 +968,7 @@ namespace lwsf { namespace internal { namespace backend
       fill_upsert(*this, request.subaddrs_);
 
       lock.unlock();
-      const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, request).value();
+      const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(*client, client_prefix, request).value();
       lock.lock();
       update_lookaheads(*this, response.all_subaddrs);
     }
@@ -1025,11 +1026,11 @@ namespace lwsf { namespace internal { namespace backend
     }
 
     expect<rpc::get_unspent_outs_response> outs_response{common_error::kInvalidArgument};
-    const auto txs_response = rpc::invoke<rpc::get_address_txs>(client, client_prefix, login);
+    const auto txs_response = rpc::invoke<rpc::get_address_txs>(*client, client_prefix, login);
     if (txs_response)
     {
       const rpc::get_unspent_outs_request request{login, rpc::uint64_string(0), 0, true}; 
-      outs_response = rpc::invoke<rpc::get_unspent_outs_response>(client, client_prefix, request);
+      outs_response = rpc::invoke<rpc::get_unspent_outs_response>(*client, client_prefix, request);
     }
     lock.lock();
 
@@ -1061,7 +1062,7 @@ namespace lwsf { namespace internal { namespace backend
       fill_upsert(*this, request.subaddrs_);
 
       lock.unlock();
-      const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, request);
+      const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(*client, client_prefix, request);
       lock.lock();
       if (response && update_lookaheads(*this, response->all_subaddrs))
         lookahead_error = {};
@@ -1083,7 +1084,7 @@ namespace lwsf { namespace internal { namespace backend
       };
 
       lock.unlock();
-      const auto upsert_response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, upsert_request);
+      const auto upsert_response = rpc::invoke<rpc::upsert_subaddrs_response>(*client, client_prefix, upsert_request);
       lock.lock();
 
       if (upsert_response)
@@ -1105,7 +1106,7 @@ namespace lwsf { namespace internal { namespace backend
           };
 
           lock.unlock();
-          const auto provision_response = rpc::invoke<rpc::provision_subaddrs_response>(client, client_prefix, provision_request);
+          const auto provision_response = rpc::invoke<rpc::provision_subaddrs_response>(*client, client_prefix, provision_request);
           lock.lock();
 
           if (provision_response)
@@ -1184,7 +1185,7 @@ namespace lwsf { namespace internal { namespace backend
     };
 
     lock.unlock();
-    const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, client_prefix, request);
+    const auto response = rpc::invoke<rpc::provision_subaddrs_response>(*client, client_prefix, request);
     lock.lock();
     if (response)
       server_lookahead = std::max(server_lookahead, needed_maj_i);
@@ -1224,7 +1225,7 @@ namespace lwsf { namespace internal { namespace backend
     };
 
     lock.unlock();
-    const auto response = rpc::invoke<rpc::provision_subaddrs_response>(client, client_prefix, request);
+    const auto response = rpc::invoke<rpc::provision_subaddrs_response>(*client, client_prefix, request);
     lock.lock();
 
     if (response)
@@ -1266,7 +1267,7 @@ namespace lwsf { namespace internal { namespace backend
     fill_upsert(*this, request.subaddrs_);
 
     lock.unlock();
-    const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(client, client_prefix, request);
+    const auto response = rpc::invoke<rpc::upsert_subaddrs_response>(*client, client_prefix, request);
     lock.lock();
     if (!response) 
       return (lookahead_error = handle_lookahead_error(response.error()));
@@ -1306,7 +1307,7 @@ namespace lwsf { namespace internal { namespace backend
     rpc::import_request login{{primary.address, primary.view.sec}, height};
 
     lock.unlock();
-    auto import = rpc::invoke<rpc::import_response>(client, client_prefix, login);
+    auto import = rpc::invoke<rpc::import_response>(*client, client_prefix, login);
     lock.lock();
 
     if (!import)
@@ -1364,7 +1365,7 @@ namespace lwsf { namespace internal { namespace backend
 
   expect<std::vector<rpc::random_outputs>> wallet::get_decoys(const rpc::get_random_outs_request& req)
   {
-    auto resp = rpc::invoke<rpc::get_random_outs_response>(client, client_prefix, req);
+    auto resp = rpc::invoke<rpc::get_random_outs_response>(*client, client_prefix, req);
     if (!resp)
       return resp.error();
     return {std::move(resp->amount_outs)};
@@ -1373,6 +1374,6 @@ namespace lwsf { namespace internal { namespace backend
   std::error_code wallet::send_tx(epee::byte_slice tx_bytes)
   {
     const rpc::submit_raw_tx_request request{std::move(tx_bytes)};
-    return rpc::invoke<rpc::submit_raw_tx_response>(client, client_prefix, request).error();
+    return rpc::invoke<rpc::submit_raw_tx_response>(*client, client_prefix, request).error();
   }
 }}} // lwsf // internal // backend

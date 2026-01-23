@@ -50,9 +50,8 @@
 #include "cryptonote_config.h" // monero/src
 #include "cryptonote_basic/account.h" // monero/src
 #include "lwsf_config.h"
-#include "net/http_client.h"   // monero/contrib/epee/include
+#include "lwsf_rpc.h"
 #include "ringct/rctTypes.h"   // monero/src
-#include "rpc.h"
 #include "wallet/api/wallet2_api.h" // monero/src
 #include "wire/fwd.h"
 
@@ -233,7 +232,7 @@ namespace lwsf { namespace internal { namespace backend
   struct wallet
   {
     Monero::WalletListener* listener;
-    rpc::http_client client;
+    const std::unique_ptr<rpc::http_client> client;
     account primary;
     std::string client_prefix;
     std::vector<std::uint64_t> per_byte_fee; //!< by priority level

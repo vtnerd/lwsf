@@ -29,6 +29,7 @@
 #include "pending_transaction.h"
 
 #include <boost/filesystem/operations.hpp>
+#include <boost/thread/lock_guard.hpp>
 #include <fstream>
 #include <stdexcept>
 #include "backend.h"

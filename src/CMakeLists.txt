@@ -33,8 +33,8 @@ set(lwsf_sources
   address_book.cpp
   backend.cpp
   error.cpp
+  lwsf_rpc.cpp
   pending_transaction.cpp
-  rpc.cpp
   subaddress_account.cpp
   subaddress_minor.cpp
   transaction_history.cpp
@@ -47,8 +47,8 @@ set(lwsf_headers
   backend.h
   error.h
   lwsf_config.h
+  lwsf_rpc.h
   pending_transaction.h
-  rpc.h
   transaction_history.h
   transaction_info.h
   utils/encrypted_file.h
@@ -80,6 +80,11 @@ target_include_directories(lwsf-api
     "."
 )
 
+set(SSP "")
+if (WIN32)
+  set(SSP "-lssp")
+endif()
+
 target_link_libraries(lwsf-api
   PUBLIC
     monero::libraries
@@ -93,14 +98,15 @@ target_link_libraries(lwsf-api
     ${sodium_LIBRARY_RELEASE}
     ${LWSF_POLYSEED_LIBRARY}
     Threads::Threads
+    ${SSP}
 )
 
-
-add_executable(lwsf-ledger ledger_main.cpp)
-target_link_libraries(lwsf-ledger
-  PRIVATE
-    lwsf-api
-    ${Boost_PROGRAM_OPTIONS_LIBRARY}
-)
-
+if (NOT WIN32)
+  add_executable(lwsf-ledger ledger_main.cpp)
+  target_link_libraries(lwsf-ledger
+    PRIVATE
+      lwsf-api
+      ${Boost_PROGRAM_OPTIONS_LIBRARY}
+  )
+endif()
 

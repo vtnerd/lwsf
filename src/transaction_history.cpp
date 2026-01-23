@@ -72,7 +72,7 @@ namespace lwsf { namespace internal
   Monero::TransactionInfo* transaction_history::transaction(const std::string &id) const
   {
     crypto::hash binary_id{};
-    if (!epee::string_tools::hex_to_pod(id, binary_id))
+    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(binary_id), id))
       return nullptr;
 
     // hold the lock during the map lookup, this is const and should be thread-safe
@@ -128,7 +128,7 @@ namespace lwsf { namespace internal
   void transaction_history::setTxNote(const std::string &txid, const std::string &note)
   { 
     crypto::hash binary_id{};
-    if (!epee::string_tools::hex_to_pod(txid, binary_id))
+    if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(binary_id), txid))
       return; 
 
     const boost::lock_guard<boost::mutex> lock{data_->sync};

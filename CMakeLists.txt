@@ -37,8 +37,9 @@ if (NOT MONERO_SOURCE_DIR)
   message(FATAL_ERROR "The argument -DMONERO_SOURCE_DIR must specify a location of a monero source tree")
 endif()
 
+cmake_path(CONVERT "${MONERO_SOURCE_DIR}" TO_CMAKE_PATH_LIST MONERO_SOURCE_DIR_CONVERTED)
 include(FetchContent)
-FetchContent_Declare(monero SOURCE_DIR ${MONERO_SOURCE_DIR} EXCLUDE_FROM_ALL)
+FetchContent_Declare(monero SOURCE_DIR ${MONERO_SOURCE_DIR_CONVERTED} EXCLUDE_FROM_ALL)
 
 if (NOT monero_POPULATED)
   FetchContent_MakeAvailable(monero)

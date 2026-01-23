@@ -26,7 +26,8 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#include "rpc.h"
+#include "net/http_client.h" // monero/contrib/epee/include
+#include "lwsf_rpc.h"
 
 #include <boost/spirit/include/qi_char.hpp>
 #include <boost/spirit/include/qi_uint.hpp>
@@ -35,7 +36,6 @@
 #include <ctime>
 #include "hex.h"             // monero/contrib/epee/include
 #include "lwsf_config.h"
-#include "net/http_client.h" // monero/contrib/epee/include
 #include "ringct/rctOps.h"   // monero/contrib/epee/include
 #include "wire.h"
 #include "wire/adapted/array.h"
@@ -46,6 +46,10 @@
 #include "wire/wrapper/array.h"
 #include "wire/wrapper/trusted_array.h"
 #include "wire/wrappers_impl.h"
+
+#ifdef _WIN32
+ #define timegm _mkgmtime
+#endif
 
 namespace lwsf { namespace internal { namespace rpc
 {
