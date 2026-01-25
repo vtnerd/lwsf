@@ -32,6 +32,7 @@
 #include <utility>
 #include "backend.h"
 #include "cryptonote_basic/cryptonote_basic_impl.h"
+#include "error.h"
 
 namespace lwsf { namespace internal {
 
@@ -66,9 +67,11 @@ namespace lwsf { namespace internal {
     error_ = Status_Ok;
   }
 
-  address_book::address_book(std::shared_ptr<backend::wallet> data)
-    : data_(std::move(data)), addresses_(), error_string_(), error_(Status_Ok)
-  {}
+  address_book::address_book(const net::wallet_io& data)
+    : data_(data), addresses_(), error_string_(), error_(Status_Ok)
+  {
+    LWSF_VERIFY(data_.wallet);
+  }
 
   address_book::~address_book()
   {
@@ -80,7 +83,7 @@ namespace lwsf { namespace internal {
     clear_status();
 
     cryptonote::address_parse_info info;
-    if(!cryptonote::get_account_address_from_str(info, data_->get_net_type(), dst_addr))
+    if(!cryptonote::get_account_address_from_str(info, data_.wallet->get_net_type(), dst_addr))
     {
       error_string_ = "Invalid destination address";
       error_ = Invalid_Address;
@@ -99,8 +102,8 @@ namespace lwsf { namespace internal {
     addresses_.push_back(row.get());
     row.release();
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    data_->primary.addressbook.push_back(
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    data_.wallet->primary.addressbook.push_back(
       backend::address_book_entry{dst_addr, payment_id, description}
     );
 
@@ -120,11 +123,11 @@ namespace lwsf { namespace internal {
     addresses_[rowId] = nullptr;
     addresses_.erase(addresses_.begin() + rowId);
     
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (data_->primary.addressbook.size() <= rowId)
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    if (data_.wallet->primary.addressbook.size() <= rowId)
       return false;
 
-    data_->primary.addressbook.erase(data_->primary.addressbook.begin() + rowId);
+    data_.wallet->primary.addressbook.erase(data_.wallet->primary.addressbook.begin() + rowId);
     force.release();
     return true;
   }
@@ -143,11 +146,11 @@ namespace lwsf { namespace internal {
       index, destroy->getAddress(), destroy->getPaymentId(), description
     };
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (data_->primary.addressbook.size() <= index)
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    if (data_.wallet->primary.addressbook.size() <= index)
       return false;
 
-    data_->primary.addressbook[index].description = description;
+    data_.wallet->primary.addressbook[index].description = description;
     force.release();
     return true;
   }
@@ -158,12 +161,12 @@ namespace lwsf { namespace internal {
     {
       clear_addresses(addresses_);
 
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      addresses_.resize(data_->primary.addressbook.size());
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      addresses_.resize(data_.wallet->primary.addressbook.size());
 
       for (std::size_t i = 0; i < addresses_.size(); ++i)
       {
-        const auto& current = data_->primary.addressbook[i];
+        const auto& current = data_.wallet->primary.addressbook[i];
         addresses_[i] = new Monero::AddressBookRow{
           i, current.address, current.payment_id, current.description
         };

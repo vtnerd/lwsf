@@ -8,35 +8,96 @@ on:
 
 env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
-  APT_INSTALL_LINUX: 'sudo apt -y install build-essential cmake libboost-all-dev miniupnpc libunbound-dev libunwind8-dev pkg-config libssl-dev libzmq3-dev libsodium-dev libhidapi-dev libnorm-dev libusb-1.0-0-dev libpgm-dev libprotobuf-dev protobuf-compiler'
+  APT_INSTALL_LINUX: 'apt -y install build-essential cmake git libboost-all-dev miniupnpc libunbound-dev libunwind8-dev pkg-config libssl-dev libzmq3-dev libsodium-dev libhidapi-dev libnorm-dev libusb-1.0-0-dev libpgm-dev libprotobuf-dev protobuf-compiler'
   APT_SET_CONF: |
         echo "Acquire::Retries \"3\";"         | sudo tee -a /etc/apt/apt.conf.d/80-custom
         echo "Acquire::http::Timeout \"120\";" | sudo tee -a /etc/apt/apt.conf.d/80-custom
         echo "Acquire::ftp::Timeout \"120\";"  | sudo tee -a /etc/apt/apt.conf.d/80-custom
   BREW_INSTALL_MAC: 'HOMEBREW_NO_AUTO_UPDATE=1 brew install boost hidapi openssl zmq libpgm miniupnpc expat libunwind-headers protobuf unbound'
-  CONFIGURE: 'cmake -B "${{github.workspace}}/lwsf/build" -DCMAKE_BUILD_TYPE=Release -DMONERO_SOURCE_DIR="${{github.workspace}}/monero" -DLWSF_MASTER_ENABLE=ON -DLWSF_BUILD_TESTS=ON "${{github.workspace}}/lwsf"'
-  BUILD: 'cmake --build "${{github.workspace}}/lwsf/build" -j$(nproc)'
-  RUN: 'ctest --test-dir "${{github.workspace}}/lwsf/build"'
+  CONFIGURE: '-B "$GITHUB_WORKSPACE/lwsf/build" -DCMAKE_BUILD_TYPE=Release -DMONERO_SOURCE_DIR="$GITHUB_WORKSPACE/monero" -DLWSF_BUILD_TESTS=ON -S "$GITHUB_WORKSPACE/lwsf"'
+  BUILD: 'cmake --build "$GITHUB_WORKSPACE/lwsf/build" -j$(nproc)'
+  RUN: 'ctest --test-dir "$GITHUB_WORKSPACE/lwsf/build" --output-on-failure'
 
 jobs:
-  unix-build-and-test:
+  sanitizer:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sanitizer: [address, thread, undefined]
+    steps:
+      - name: Install Dependencies
+        run: |
+          ${{env.APT_SET_CONF}}
+          sudo apt update
+          sudo ${{env.APT_INSTALL_LINUX}}
+      - name: Checkout Monero Source
+        uses: actions/checkout@v4
+        with:
+          repository: monero-project/monero
+          path: ${{github.workspace}}/monero
+          submodules: recursive
+      - name: Checkout LWSF Source
+        uses: actions/checkout@v4
+        with:
+          path: ${{github.workspace}}/lwsf
+          submodules: recursive
+      - name: Configure LWSF
+        run: cmake -DLWSF_SANITIZER=${{matrix.sanitizer}} -DLWSF_MASTER_ENABLE=ON ${{env.CONFIGURE}}
+      - name: Build LWSF
+        run: ${{env.BUILD}}
+      - name: Run Tests
+        run: ${{env.RUN}}
+  linux:
+    runs-on: ubuntu-latest
+    container: ${{matrix.distro}}
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [archlinux:base-devel, debian:bookworm-slim, debian:trixie-slim]
+    steps:
+      - name: Install Dependencies (Debian/apt)
+        if: matrix.distro == 'debian:bookworm-slim' || matrix.distro == 'debian:trixie-slim'
+        run: |
+          apt update
+          ${{env.APT_INSTALL_LINUX}}
+      - name: Install Dependencies (Arch/pacman)
+        if: matrix.distro == 'archlinux:base-devel'
+        run: |
+          sudo pacman --noconfirm -Syu
+          sudo pacman --noconfirm -S cmake boost boost-libs git hidapi libsodium miniupnpc openssl unbound zeromq 
+      - name: Checkout Monero Source
+        uses: actions/checkout@v4
+        with:
+          repository: monero-project/monero
+          path: ${{github.workspace}}/monero/
+          submodules: recursive 
+      - name: Checkout LWS Source
+        uses: actions/checkout@v4
+        with:
+          path: ${{github.workspace}}/lwsf
+      - name: Configure LWS
+        run: cmake -DLWSF_MASTER_ENABLE=ON ${{env.CONFIGURE}}
+      - name: Build LWS
+        run: ${{env.BUILD}}    
+      - name: Run Tests
+        run: ${{env.RUN}}
+  unix:
     runs-on: ${{matrix.os}}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        branch: [master, release-v0.18]
+        os: [macos-15, macos-26, ubuntu-22.04, ubuntu-24.04]
     steps:
-      - name: set apt conf (Debian based Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: ${{env.APT_SET_CONF}}
-      - name: update apt (Debian based Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: sudo apt update
-      - name: Install dependencies (Debian based Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: ${{env.APT_INSTALL_LINUX}}
+      - name: Install Dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-22.04' || matrix.os == 'ubuntu-24.04'
+        run: |
+          ${{env.APT_SET_CONF}}
+          sudo apt update
+          sudo ${{env.APT_INSTALL_LINUX}}
       - name: Install dependencies (MacOS)
-        if: matrix.os == 'macos-latest'
+        if: matrix.os == 'macos-15' || matrix.os == 'macos-26'
         run: ${{env.BREW_INSTALL_MAC}}
       - name: Checkout Monero Source
         uses: actions/checkout@v4
@@ -44,18 +105,23 @@ jobs:
           repository: monero-project/monero
           path: ${{github.workspace}}/monero/
           submodules: recursive
+          ref: ${{matrix.branch}}
       - name: Checkout LWSF Source
         uses: actions/checkout@v4
         with:
           path: ${{github.workspace}}/lwsf
           submodules: recursive
-      - name: Configure LWS
-        run: ${{env.CONFIGURE}}
+      - name: Configure LWS (master)
+        if: matrix.branch == 'master'
+        run: cmake -DLWSF_MASTER_ENABLE=ON ${{env.CONFIGURE}}
+      - name: Configure LWS (release)
+        if: matrix.branch == 'release-v0.18'
+        run: cmake ${{env.CONFIGURE}}
       - name: Build LWSF
         run: ${{env.BUILD}}
       - name: Run Tests
         run: ${{env.RUN}}
-  windows-build-and-test:
+  windows:
     runs-on: windows-latest
     defaults:
       run:
@@ -90,7 +156,7 @@ jobs:
           path: ${{github.workspace}}/lwsf
           submodules: recursive
       - name: Configure LWS
-        run: ${{env.CONFIGURE}}
+        run: cmake -DLWSF_MASTER_ENABLE=ON ${{env.CONFIGURE}}
       - name: Build LWSF
         run: ${{env.BUILD}}
       - name: Run Tests

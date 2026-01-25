@@ -1,4 +1,4 @@
-// Copyright (c) 2024, The Monero Project
+// Copyright (c) 2025, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -28,36 +28,74 @@
 
 #pragma once
 
+#include <boost/asio/io_context.hpp>
+#include <boost/thread/mutex.hpp>
+#include <chrono>
+#include <future>
 #include <memory>
-#include <unordered_map>
-#include <vector>
-#include "crypto/hash.h"            // monero/src
-#include "net/wallet_io.h"
-#include "wallet/api/wallet2_api.h" // monero/src
+#include <utility>
 
-namespace lwsf { namespace internal
+namespace lwsf { namespace internal { namespace net
 {
-  namespace backend { class wallet; }
-  class transaction_history final : public Monero::TransactionHistory
+  template<typename T>
+  struct to_future
   {
-    const net::wallet_io data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
+    struct inner
+    {
+      std::promise<T> promise;
+      inner()
+        : promise()
+      {}
+    };
 
-  public:
-    explicit transaction_history(const net::wallet_io& data);
+    std::shared_ptr<inner> inner_;
 
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
+    to_future()
+      : inner_(std::make_shared<inner>())
+    {}
 
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
-    virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
+    void operator()(T value)
+    { 
+      LWSF_VERIFY(inner_);
+      inner_->promise.set_value(std::move(value));
+    }
   };
-}} // lwsf // internal
+
+  struct context
+  {
+    std::weak_ptr<int> restart_;
+    boost::asio::io_context io_;
+    boost::mutex sync_;
+
+    explicit context();
+
+    //! Restart `io_` if needed, and get an object that prevents future restarts.
+    std::shared_ptr<int> restart_asio();
+
+    template<typename T, typename F>
+    T wait_for(F f)
+    {
+      to_future<T> callable{};
+      auto value = callable.inner_->promise.get_future();
+      f(std::move(callable));
+      for (;;)
+      {
+        switch (value.wait_for(std::chrono::seconds{0}))
+        {
+        case std::future_status::deferred:
+        case std::future_status::ready:
+          return value.get();
+
+        case std::future_status::timeout:
+          {
+            const auto restart_lock = restart_asio();
+            io_.run_one_for(std::chrono::milliseconds{100});
+          }
+          break;
+        };
+      }
+      throw std::logic_error{"unreachable"};
+    }
+  };
+
+}}} // lwsf // internal // net

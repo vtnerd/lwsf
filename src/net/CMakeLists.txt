@@ -26,12 +26,9 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-add_library(lwsf-unit-framework framework.test.cpp)
-target_include_directories(lwsf-unit-framework PUBLIC "${lwsf_SOURCE_DIR}/src" "${lwsf_SOURCE_DIR}/tests/unit")
-target_link_libraries(lwsf-unit-framework)
+set(lwsf-net_sources context.cpp http.cpp wallet_io.cpp)
+set(lwsf-net_headers context.h http.h wallet_io.h)
 
-add_executable(lwsf-unit main.cpp backend.test.cpp rpc.test.cpp)
+add_library(lwsf-net ${lwsf-net_sources} ${lwsf-net_headers})
+target_link_libraries(lwsf-net PRIVATE monero::libraries)
 
-add_subdirectory(net)
-target_link_libraries(lwsf-unit lwsf-api lwsf-unit-framework lwsf-unit-net monero::libraries)
-add_test(NAME lwsf-unit COMMAND lwsf-unit -v)

@@ -36,26 +36,23 @@
 #include <vector>
 #include "common/expect.h"                     // monero/src
 #include "cryptonote_basic/cryptonote_basic.h" // monero/src
+#include "net/wallet_io.h"
 #include "wallet/api/wallet2_api.h"            // moneor/src
 #include "wire/fwd.h"
 
 namespace lwsf { namespace internal
 {
-  namespace backend
-  {
-    struct transaction;
-    struct wallet;
-  }
+  namespace backend { struct transaction; }
 
   class pending_transaction final : public Monero::PendingTransaction
   {
-    const std::shared_ptr<backend::wallet> wallet_;
+    const net::wallet_io data_;
     const std::vector<std::shared_ptr<backend::transaction>> local_;
     std::string error_;
 
   public:
-    pending_transaction(std::shared_ptr<backend::wallet> wallet, std::string error, std::vector<std::shared_ptr<backend::transaction>> local = {});
-    static std::unique_ptr<pending_transaction> load_from_file(std::shared_ptr<backend::wallet> wallet, const std::string& filename);
+    pending_transaction(const net::wallet_io& data, std::string error, std::vector<std::shared_ptr<backend::transaction>> local = {});
+    static std::unique_ptr<pending_transaction> load_from_file(const net::wallet_io& data, const std::string& filename);
 
     pending_transaction(pending_transaction&&) = delete;
     pending_transaction(const pending_transaction&) = delete;

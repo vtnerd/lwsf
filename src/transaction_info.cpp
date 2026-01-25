@@ -31,6 +31,7 @@
 #include <boost/container/throw_exception.hpp>
 #include <boost/thread/lock_guard.hpp>
 #include <boost/version.hpp>
+#include "error.h"
 #include "hex.h"
 
 namespace
@@ -57,11 +58,10 @@ namespace lwsf { namespace internal
       transfers_.emplace_back(out.amount, out.address);
   }
 
-  transaction_info::transaction_info(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<const backend::transaction> data)
-    : wallet_(std::move(wallet)), data_(std::move(data)), transfers_()
+  transaction_info::transaction_info(const net::wallet_io& io, std::shared_ptr<const backend::transaction> data)
+    : io_(io), data_(std::move(data)), transfers_()
   {
-    if (!wallet_ || !data_)
-      throw std::invalid_argument{"lwsf::internal::transaction_info cannot be given nullptr"};
+    LWSF_VERIFY(io_.wallet && data_);
     update_transfers();
   }
 
@@ -70,8 +70,7 @@ namespace lwsf { namespace internal
 
   void transaction_info::update(std::shared_ptr<const backend::transaction> data)
   {
-    if (!data)
-      throw std::invalid_argument{"lwsf::internal::transaction_info::update cannot be given nullptr"};
+    LWSF_VERIFY(data);
     data_ = std::move(data);
     update_transfers();
   }
@@ -87,7 +86,7 @@ namespace lwsf { namespace internal
 
   std::string transaction_info::description() const
   {
-    const boost::lock_guard<boost::mutex> lock{wallet_->sync};
+    const boost::lock_guard<boost::mutex> lock{io_.wallet->sync};
     return data_->description; // this can change outside of refresh func
   }
 
@@ -126,10 +125,10 @@ namespace lwsf { namespace internal
   {
     const auto get_label = [this] (const rpc::address_meta& meta) -> std::string
     {
-      const boost::lock_guard<boost::mutex> lock{wallet_->sync};
-      if (meta.maj_i < wallet_->primary.subaccounts.size())
+      const boost::lock_guard<boost::mutex> lock{io_.wallet->sync};
+      if (meta.maj_i < io_.wallet->primary.subaccounts.size())
       {
-        const auto& major = wallet_->primary.subaccounts.at(meta.maj_i);
+        const auto& major = io_.wallet->primary.subaccounts.at(meta.maj_i);
         const auto minor = major.detail.find(meta.min_i);
         if (minor != major.detail.end())
           return minor->second.label;
@@ -152,8 +151,8 @@ namespace lwsf { namespace internal
   {
     if (!data_->height)
       return 0;
-    const boost::lock_guard<boost::mutex> lock{wallet_->sync};
-    return std::max(wallet_->blockchain_height, *data_->height) - *data_->height + 1;
+    const boost::lock_guard<boost::mutex> lock{io_.wallet->sync};
+    return std::max(io_.wallet->blockchain_height, *data_->height) - *data_->height + 1;
   }
 
   std::string transaction_info::hash() const

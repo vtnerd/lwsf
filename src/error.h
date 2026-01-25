@@ -28,6 +28,14 @@
 #pragma once
 
 #include <system_error>
+#include <type_traits>
+
+#define LWSF_VERIFY(x) \
+  do \
+  { \
+    if (!(x)) \
+      ::lwsf::throw_invalid_argument(__LINE__, __FILE__); \
+  } while (0)
 
 namespace lwsf
 {
@@ -46,8 +54,10 @@ namespace lwsf
     subaddr_ahead,      //!< Server limits on subaddresses affects lookahead
     subaddr_disabled,   //!< Server has subaddresses disabled
     subaddr_local,      //!< Local limits on subaddresses too small
+    subaddr_upgrade,    //!< Upgrade server for server-side limits
     unexpected_userinfo,//!< Unexpected user+pass provided
     unexpected_nullptr, //!< Expected non-nullptr
+    unknown_exception   //!< Unknown exception occured
   };
 
   //! \return Error message string.
@@ -62,6 +72,7 @@ namespace lwsf
     return std::error_code{int(value), error_category()};
   }
 
+  [[noreturn]] void throw_invalid_argument(int line, const char* file);
 } // lwsf
 
 namespace std

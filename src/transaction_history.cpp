@@ -34,9 +34,10 @@
 #include <stdexcept>
 
 #include "backend.h"
+#include "error.h"
+#include "hex.h" // monero/contrib/epee/include
 #include "transaction_info.h"
 
-#include "hex.h" // monero/contrib/epee/include
 
 namespace lwsf { namespace internal
 {
@@ -50,11 +51,10 @@ namespace lwsf { namespace internal
     }
   }
 
-  transaction_history::transaction_history(std::shared_ptr<backend::wallet> data)
-    : data_(std::move(data)), txes_(), by_id_()
+  transaction_history::transaction_history(const net::wallet_io& data)
+    : data_(data), txes_(), by_id_()
   {
-    if (!data_)
-      throw std::invalid_argument{"lwsf::internal::transaction_history cannot be given nullptr"};
+    LWSF_VERIFY(data_.wallet);
   }
 
   transaction_history::~transaction_history()
@@ -76,12 +76,12 @@ namespace lwsf { namespace internal
       return nullptr;
 
     // hold the lock during the map lookup, this is const and should be thread-safe
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
     auto& info = by_id_[binary_id];
     if (!info)
     {
-      const auto iter = data_->primary.txes.find(binary_id);
-      if (iter == data_->primary.txes.end())
+      const auto iter = data_.wallet->primary.txes.find(binary_id);
+      if (iter == data_.wallet->primary.txes.end())
         return nullptr;
       info = std::make_unique<transaction_info>(data_, iter->second);
     }
@@ -92,24 +92,24 @@ namespace lwsf { namespace internal
   {
     by_id_.clear();
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (std::numeric_limits<int>::max() < data_->primary.txes.size())
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    if (std::numeric_limits<int>::max() < data_.wallet->primary.txes.size())
       throw std::runtime_error{"lwsf::internal::transaction_history::refresh exceeds max history size"};
 
     // be careful about exceptions and memory leaks. this should be safe
 
-    for (std::size_t i = data_->primary.txes.size(); i < txes_.size(); ++i)
+    for (std::size_t i = data_.wallet->primary.txes.size(); i < txes_.size(); ++i)
     {
       const std::unique_ptr<Monero::TransactionInfo> destroy{txes_[i]};
       txes_[i] = nullptr;
     }
 
-    txes_.resize(data_->primary.txes.size());
+    txes_.resize(data_.wallet->primary.txes.size());
 
     try
     {
       std::size_t i = 0;
-      for (const auto& backend_tx : data_->primary.txes)
+      for (const auto& backend_tx : data_.wallet->primary.txes)
       {
         if (txes_[i])
           static_cast<transaction_info*>(txes_[i])->update(backend_tx.second);
@@ -131,9 +131,9 @@ namespace lwsf { namespace internal
     if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(binary_id), txid))
       return; 
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    auto iter = data_->primary.txes.find(binary_id);
-    if (iter != data_->primary.txes.end())
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    auto iter = data_.wallet->primary.txes.find(binary_id);
+    if (iter != data_.wallet->primary.txes.end())
       iter->second->description = note;
   }
 }} // lwsf // internal

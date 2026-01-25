@@ -1,4 +1,4 @@
-// Copyright (c) 2024, The Monero Project
+// Copyright (c) 2025, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -26,38 +26,30 @@
 // STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 // THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#pragma once
+#include "context.h"
+#include <boost/thread/locks.hpp>
+#include <boost/thread/thread.hpp>
 
-#include <memory>
-#include <unordered_map>
-#include <vector>
-#include "crypto/hash.h"            // monero/src
-#include "net/wallet_io.h"
-#include "wallet/api/wallet2_api.h" // monero/src
-
-namespace lwsf { namespace internal
+namespace lwsf { namespace internal { namespace net
 {
-  namespace backend { class wallet; }
-  class transaction_history final : public Monero::TransactionHistory
+  context::context()
+    : restart_(), io_(), sync_()
+  {}
+
+  std::shared_ptr<int> context::restart_asio()
   {
-    const net::wallet_io data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
-
-  public:
-    explicit transaction_history(const net::wallet_io& data);
-
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
-
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
-    virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
-  };
-}} // lwsf // internal
+    std::shared_ptr<int> out;
+    const boost::lock_guard<boost::mutex> lock{sync_};
+    out = restart_.lock();
+    if (!out || io_.stopped())
+    {
+      out.reset(); // need to restart //
+      while (restart_.lock())
+        boost::this_thread::sleep_for(boost::chrono::milliseconds{50});
+      io_.restart();
+      out = std::make_shared<int>();
+      restart_ = out;
+    }
+    return out;
+  }
+}}} // lwsf // internal // net

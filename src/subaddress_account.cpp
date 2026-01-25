@@ -33,6 +33,7 @@
 #include <utility>
 #include "backend.h"
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
+#include "error.h"
 
 namespace lwsf { namespace internal
 {
@@ -66,11 +67,10 @@ namespace lwsf { namespace internal
     }
   }
 
-  subaddress_account::subaddress_account(internal::wallet* wal, std::shared_ptr<backend::wallet> data)
-    : wal_(wal), data_(std::move(data)), rows_()
+  subaddress_account::subaddress_account(internal::wallet* wal, const net::wallet_io& data)
+    : wal_(wal), data_(data), rows_()
   {
-    if (!wal_ || !data_)
-      throw std::invalid_argument{"lwsf::internal::subaddress_account cannot be given nullptr"};
+    LWSF_VERIFY(wal_ && data_.wallet);
   }
 
   subaddress_account::~subaddress_account()
@@ -88,8 +88,8 @@ namespace lwsf { namespace internal
   void subaddress_account::setLabel(uint32_t accountIndex, const std::string &label)
   {
     {
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      data_->primary.subaccounts.at(accountIndex).detail.try_emplace(0).first->second.label = label;
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      data_.wallet->primary.subaccounts.at(accountIndex).detail.try_emplace(0).first->second.label = label;
     }
     refresh();
   }
@@ -101,11 +101,11 @@ namespace lwsf { namespace internal
       free_rows(rows_);
       std::unordered_map<std::uint32_t, balance> balances;
 
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      const Monero::NetworkType net_type = data_->primary.type;
-      const std::uint32_t chain_height = data_->blockchain_height;
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      const Monero::NetworkType net_type = data_.wallet->primary.type;
+      const std::uint32_t chain_height = data_.wallet->blockchain_height;
 
-      for (const auto& tx : data_->primary.txes)
+      for (const auto& tx : data_.wallet->primary.txes)
       {
         if (tx.second->failed)
           continue;
@@ -130,7 +130,7 @@ namespace lwsf { namespace internal
       static constexpr const std::uint32_t max_index =
         std::numeric_limits<std::uint32_t>::max();
 
-      const auto& accts = data_->primary.subaccounts;
+      const auto& accts = data_.wallet->primary.subaccounts;
       rows_.reserve(accts.size());
       for (std::size_t i = 0; i < accts.size() && i <= max_index; ++i)
       {
@@ -138,7 +138,7 @@ namespace lwsf { namespace internal
         rows_.push_back(
           new Monero::SubaddressAccountRow{
             std::uint32_t(i),
-            data_->get_spend_address({std::uint32_t(i), 0}),
+            data_.wallet->get_spend_address({std::uint32_t(i), 0}),
             std::string{accts.at(i).primary_label()},
             cryptonote::print_money(balance.total),
             cryptonote::print_money(balance.unlocked)

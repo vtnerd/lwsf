@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <boost/filesystem.hpp>
+#include <boost/numeric/conversion/cast.hpp>
 #include <boost/range/combine.hpp>
 #include <exception>
 #include <sodium/core.h>
@@ -55,10 +56,9 @@
 #include "hex.h" // monero/contrib/epee/include
 #include "lwsf_config.h"
 #include "mnemonics/electrum-words.h" // monero/src
+#include "net/http.h"
 #include "net/net_parse_helpers.h" // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
-#include "net/socks.h"         // monero/src
-#include "net/socks_connect.h" // monero/src
 #include "numeric.h"
 #include "pending_transaction.h"
 #include "subaddress_account.h"
@@ -85,12 +85,9 @@ namespace lwsf { namespace internal
 
     struct null_connector
     {
-      boost::unique_future<boost::asio::ip::tcp::socket>
-        operator()(const std::string&, const std::string&, boost::asio::steady_timer&) const
+      void operator()(std::shared_ptr<http::client_state>, std::function<http::callback_func> f) const
       {
-        return boost::make_exceptional_future<boost::asio::ip::tcp::socket>(
-          std::runtime_error{"invalid proxy value"}
-        );
+        f(boost::asio::error::connection_refused);
       }
     };
 
@@ -283,40 +280,82 @@ namespace lwsf { namespace internal
     }
   } // anonymous
 
-  bool wallet::set_error(const std::error_code error, const bool clear) const
+  wallet::frame::frame()
+    : exception_error_(),
+      error_(),
+      refresh_interval_(config::refresh_interval),
+      sync_(),
+      thread_state_(state::stop)
+  {}
+
+  bool wallet::frame::set_error(const std::error_code error, const bool clear)
   {
     if (clear || error)
     {
-      const boost::lock_guard<boost::mutex> lock{error_sync_};
+      const boost::lock_guard<boost::mutex> lock{sync_};
       error_ = error;
     }
     return !error;
   }
 
-  void wallet::set_critical(const std::exception& e) const
+  void wallet::frame::async_error::operator()(const std::error_code error) const
   {
-    const boost::lock_guard<boost::mutex> lock{error_sync_};
-    exception_error_ = e.what();
+    LWSF_VERIFY(self);
+    self->set_error(error, false);
   }
 
-  template<typename F>
-  void wallet::queue_work(F&& f)
+  bool wallet::set_error(const std::error_code error, const bool clear) const
   {
+    return status_->set_error(error, clear);
+  }
+
+  void wallet::set_critical(const std::exception& e) const
+  {
+
+    const boost::lock_guard<boost::mutex> lock{status_->sync_};
+    status_->exception_error_ = e.what();
+  }
+
+  template<typename T, typename F>
+  T wallet::wait_for(F&& f) const
+  {
+    try
     {
-      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
-      work_queue_.push_back(std::forward<F>(f));
+      return data_.context->wait_for<T>(std::forward<F>(f));
     }
-    startRefresh();
+    catch (const std::exception& e)
+    { set_critical(e); throw; }
+    catch (...)
+    { set_critical(unknown_exception{}); throw; }
+    throw std::runtime_error{"unreachable"};
+  }
+
+  void wallet::check_worker_thread()
+  {
+    const boost::lock_guard<boost::mutex> lock{thread_sync_};
+    bool run = false;
+    {
+      const boost::lock_guard<boost::mutex> lock2{status_->sync_};
+      run = (status_->thread_state_ == state::stop);
+    }
+
+    if (run)
+    {
+      data_.context->io_.stop();
+      if (thread_.joinable())
+        thread_.join();
+      thread_ = boost::thread{[this] () { this->refresh_loop(); }};
+    }
   }
 
   void wallet::stop_refresh_loop()
   {
     const boost::lock_guard<boost::mutex> lock{thread_sync_};
     {
-      const boost::lock_guard<boost::mutex> lock2{refresh_sync_};
-      thread_state_ = state::stop;
+      const boost::lock_guard<boost::mutex> lock2{status_->sync_};
+      status_->thread_state_ = state::stop;
     }
-    refresh_notify_.notify_all();
+    data_.context->io_.stop();
     if (thread_.joinable())
       thread_.join();
   }
@@ -325,63 +364,107 @@ namespace lwsf { namespace internal
   {
     struct set_stop_
     {
-      void operator()(state* val) const noexcept
+      void operator()(wallet* val) const
       {
-         if (val)
-          *val = state::stop;
+        if (!val)
+          return;
+        const boost::lock_guard<boost::mutex> lock{val->status_->sync_};
+        val->status_->thread_state_ = state::stop;
       }
     };
-    try
+
+    struct on_refresh
     {
-      std::chrono::steady_clock::time_point last_refresh;
-      boost::unique_lock<boost::mutex> lock{refresh_sync_};
-      const std::unique_ptr<state, set_stop_> set_stop{std::addressof(thread_state_)};
-      while (mandatory_refresh_ || thread_state_ != state::stop || !work_queue_.empty())
+      std::weak_ptr<boost::asio::steady_timer> timer_;
+      std::shared_ptr<frame> status_;
+      std::shared_ptr<backend::wallet> wallet_;
+
+      explicit on_refresh(std::weak_ptr<boost::asio::steady_timer> timer, std::shared_ptr<frame> in, std::shared_ptr<backend::wallet> in2)
+        : timer_(std::move(timer)), status_(std::move(in)), wallet_(std::move(in2))
+      {}
+
+      on_refresh(on_refresh&&) = default;
+      on_refresh(const on_refresh&) = default;
+
+      void operator()(const std::error_code error) const
       {
-        while (!work_queue_.empty())
+        LWSF_VERIFY(status_); 
+        status_->set_error(error, true /* clear */);
+        const auto timer = timer_.lock();
+        if (!timer)
+          return; // exiting refresh loop
+
+        std::chrono::milliseconds interval;
         {
-          const std::function<std::error_code()> work{std::move(work_queue_.front())};
-          work_queue_.pop_front();
-          lock.unlock();
-          if (work)
-            set_error(work());
-          lock.lock();
+          const boost::lock_guard<boost::mutex> lock{status_->sync_};
+          interval = status_->refresh_interval_;
         }
-
-        const bool mandatory_refresh = mandatory_refresh_;
-        mandatory_refresh_ = false;
-
-        const auto now = std::chrono::steady_clock::now();
-        if (mandatory_refresh_ || (refresh_interval_ <= now - last_refresh && thread_state_ == state::run))
-        {
-          // refresh has strong exception guarantee - never in partial state.
-          lock.unlock();
-          last_refresh = now;
-          set_error(data_->refresh(mandatory_refresh), true /*clear*/);
-          lock.lock();
-        }
-        else if (thread_state_ == state::skip_once)
-          thread_state_ = state::run;
-
-        // check while holding lock and before a wait call
-        if (thread_state_ == state::stop)
+        if (interval <= std::chrono::milliseconds{0})
           return;
 
-        const auto last_state = thread_state_;
-        refresh_notify_.wait_for(
-          lock, to_boost(refresh_interval_), [this, last_state] () {
-            return mandatory_refresh_ || thread_state_ != last_state || !work_queue_.empty();
-        });
+        timer->expires_after(interval);
+        on_refresh copy{*this};
+        timer->async_wait(
+          [copy = std::move(copy)] (const boost::system::error_code error)
+          {
+            if (error == boost::asio::error::operation_aborted)
+              return;
+
+            LWSF_VERIFY(copy.status_);
+            boost::unique_lock<boost::mutex> lock{copy.status_->sync_};
+            switch (copy.status_->thread_state_)
+            {
+            case state::stop:
+              break;
+            case state::skip_once:
+              copy.status_->thread_state_ = state::run;
+              /* fallthrough */
+            default:
+            case state::paused:
+              {
+                std::error_code dummy;
+                {
+                  const boost::lock_guard<boost::mutex> lock2{copy.wallet_->sync};
+                  dummy = copy.wallet_->refresh_error;
+                }
+                lock.unlock();
+                copy(dummy);
+              }
+              break;
+            case state::run:
+              lock.unlock();
+              backend::wallet::refresh(copy.wallet_, false /* mandatory */, copy);
+              break;
+            }
+          }
+        );
       }
+    };
+
+    const std::unique_ptr<wallet, set_stop_> set_stop{this};
+    try
+    {
+      std::shared_ptr<boost::asio::steady_timer> timer;
+      boost::unique_lock<boost::mutex> lock{status_->sync_};
+      if (status_->thread_state_ != state::stop)
+      {
+        timer = std::make_shared<boost::asio::steady_timer>(data_.context->io_);
+        backend::wallet::refresh(data_.wallet, false /* mandatory */, on_refresh{timer, status_, data_.wallet});
+      }
+      do
+      {
+        lock.unlock();
+        {
+          const std::shared_ptr<int> restart_lock = data_.context->restart_asio();
+          data_.context->io_.run();
+        }
+        lock.lock();
+      } while (status_->thread_state_ != state::stop);
     }
     catch (const std::exception& e)
-    {
-      set_critical(e);
-    }
+    { set_critical(e); }
     catch (...)
-    {
-      set_critical(unknown_exception{});
-    }
+    { set_critical(unknown_exception{}); }
   }
 
   bool wallet::is_wallet_file(const std::string& path)
@@ -423,48 +506,38 @@ namespace lwsf { namespace internal
   }
 
   wallet::wallet(error, std::string msg)
-    : data_(std::make_shared<backend::wallet>()),
+   :  data_(),
+      status_(std::make_shared<frame>()),
       addressbook_(),
       history_(),
       subaddresses_(),
       subaddress_minor_(),
       filename_(),
       password_(),
-      work_queue_(),
-      exception_error_(std::move(msg)),
-      error_(),
       thread_(),
       iterations_(1),
       mixin_(config::mixin_default),
-      refresh_interval_(config::refresh_interval),
       refresh_notify_(),
-      error_sync_(),
-      refresh_sync_(),
       thread_sync_(),
-      thread_state_(state::stop),
       mandatory_refresh_(false)
-  {}
+  {
+    status_->exception_error_ = std::move(msg);
+  }
 
   wallet::wallet(create, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
-    : data_(std::make_shared<backend::wallet>()),
+    : data_(),
+      status_(std::make_shared<frame>()),
       addressbook_(),
       history_(),
       subaddresses_(),
       subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
-      work_queue_(),
-      exception_error_(),
-      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
-      refresh_interval_(config::refresh_interval),
       refresh_notify_(),
-      error_sync_(),
-      refresh_sync_(),
       thread_sync_(),
-      thread_state_(state::stop),
       mandatory_refresh_(false)
   {
     if (sodium_init() < 0)
@@ -474,29 +547,23 @@ namespace lwsf { namespace internal
     crypto::secret_key recovery;
     randombytes_buf(std::addressof(unwrap(unwrap(recovery))), sizeof(recovery));
 
-    init_wallet(*data_, recovery, nettype, true);
+    init_wallet(*data_.wallet, recovery, nettype, true);
   }
 
   wallet::wallet(open, Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds)
-    : data_(std::make_shared<backend::wallet>()),
+    : data_(),
+      status_(std::make_shared<frame>()),
       addressbook_(),
       history_(),
       subaddresses_(),
       subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
-      work_queue_(),
-      exception_error_(),
-      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
-      refresh_interval_(config::refresh_interval),
       refresh_notify_(),
-      error_sync_(),
-      refresh_sync_(),
       thread_sync_(),
-      thread_state_(state::stop),
       mandatory_refresh_(false)
   {
     try
@@ -508,75 +575,63 @@ namespace lwsf { namespace internal
       if (file.empty())
         throw std::runtime_error{"Unable to open wallet file " + filename_};
 
-      if (std::error_code error = data_->from_bytes(decrypt(std::move(file), epee::strspan<std::uint8_t>(password_)).value()))
+      if (std::error_code error = data_.wallet->from_bytes(decrypt(std::move(file), epee::strspan<std::uint8_t>(password_)).value()))
         throw std::system_error{error};
 
       // lock not needed; data_ was created and unique to us
-      if (nettype != data_->primary.type)
+      if (nettype != data_.wallet->primary.type)
         throw std::runtime_error{"Wallet file NetworkType does not match requested"};
     }
     catch (const std::exception& e)
     {
-      exception_error_ = e.what();
+      status_->exception_error_ = e.what();
     }
   }
 
   wallet::wallet(from_mnemonic, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const std::string& mnemonic, const std::string& seed_offset)
-    : data_(std::make_shared<backend::wallet>()),
+    : data_(),
+      status_(std::make_shared<frame>()),
       addressbook_(),
       history_(),
       subaddresses_(),
       subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
-      work_queue_(),
-      exception_error_(),
-      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
-      refresh_interval_(config::refresh_interval),
       refresh_notify_(),
-      error_sync_(),
-      refresh_sync_(),
       thread_sync_(),
-      thread_state_(state::stop),
       mandatory_refresh_(false)
   {
     crypto::secret_key recovery;
     std::string language;
     if (!crypto::ElectrumWords::words_to_bytes(mnemonic, recovery, language))
     {
-      exception_error_ = "Electrum-style word list failed verification";
+      status_->exception_error_ = "Electrum-style word list failed verification";
       return;
     }
 
     if (!seed_offset.empty())
       recovery = cryptonote::decrypt_key(recovery, seed_offset);
 
-    init_wallet(*data_, recovery, nettype, false);
+    init_wallet(*data_.wallet, recovery, nettype, false);
   }
 
   wallet::wallet(from_keys, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const boost::optional<crypto::secret_key>& view_key, const boost::optional<crypto::secret_key>& spend_key)
-    : data_(std::make_shared<backend::wallet>()),
+    : data_(),
+      status_(std::make_shared<frame>()),
       addressbook_(),
       history_(),
       subaddresses_(),
       subaddress_minor_(),
       filename_(std::move(filename)),
       password_(std::move(password)),
-      work_queue_(),
-      exception_error_(),
-      error_(),
       thread_(),
       iterations_(kdf_rounds),
       mixin_(config::mixin_default),
-      refresh_interval_(config::refresh_interval),
       refresh_notify_(),
-      error_sync_(),
-      refresh_sync_(),
       thread_sync_(),
-      thread_state_(state::stop),
       mandatory_refresh_(false)
   {
     if (sodium_init() < 0)
@@ -584,34 +639,34 @@ namespace lwsf { namespace internal
 
     if (!view_key)
     {
-      exception_error_ = "view_key is invalid";
+      status_->exception_error_ = "view_key is invalid";
       return;
     }
 
     if (!spend_key)
     {
-      exception_error_ = "spend_key is invalid";
+      status_->exception_error_ = "spend_key is invalid";
       return;
     }
 
-    data_->primary.generated_locally = false;
-    data_->primary.type = nettype;
-    data_->primary.view.sec = *view_key;
-    data_->primary.spend.sec = *spend_key;
+    data_.wallet->primary.generated_locally = false;
+    data_.wallet->primary.type = nettype;
+    data_.wallet->primary.view.sec = *view_key;
+    data_.wallet->primary.spend.sec = *spend_key;
  
-    if (!crypto::secret_key_to_public_key(data_->primary.view.sec, data_->primary.view.pub))
+    if (!crypto::secret_key_to_public_key(data_.wallet->primary.view.sec, data_.wallet->primary.view.pub))
     {
-      exception_error_ = "view_pub could not be computed";
+      status_->exception_error_ = "view_pub could not be computed";
       return;
     }
 
-    if (!crypto::secret_key_to_public_key(data_->primary.spend.sec, data_->primary.spend.pub))
+    if (!crypto::secret_key_to_public_key(data_.wallet->primary.spend.sec, data_.wallet->primary.spend.pub))
     {
-      exception_error_ = "spend_pub could not be computed";
+      status_->exception_error_ = "spend_pub could not be computed";
       return;
     }
 
-    data_->primary.address = data_->get_spend_address({0, 0});
+    data_.wallet->primary.address = data_.wallet->get_spend_address({0, 0});
   }
 
   namespace
@@ -628,29 +683,32 @@ namespace lwsf { namespace internal
   wallet::wallet(from_keys, const Monero::NetworkType nettype, std::string filename, std::string password, const std::uint64_t kdf_rounds, const std::string& address_string, const std::string& view_key, const std::string& spend_key)
     : wallet(from_keys{}, nettype, std::move(filename), std::move(password), kdf_rounds, to_secret_key(view_key), to_secret_key(spend_key))
   {
-    if (data_->get_spend_address({0, 0}) != address_string)
-      exception_error_ = "view_key, spend_key, and address_string do not match";
+    if (data_.wallet->get_spend_address({0, 0}) != address_string)
+      status_->exception_error_ = "view_key, spend_key, and address_string do not match";
   }
 
   wallet::~wallet() { stop_refresh_loop(); }
 
   void wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    auto& accts = data_->primary.subaccounts;
+    std::uint32_t min_i = 0;
+    {
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      auto& accts = data_.wallet->primary.subaccounts;
 
-    if (accts.size() <= accountIndex)
-      throw std::runtime_error{"add_subaddress: account does not exist"};
+      if (accts.size() <= accountIndex)
+        throw std::runtime_error{"add_subaddress: account does not exist"};
 
-    auto& acct = accts.at(accountIndex);
-    if (std::numeric_limits<std::uint32_t>::max() <= acct.last)
-      throw std::runtime_error{"add_subaddress: exceeded minor indexes"};
+      auto& acct = accts.at(accountIndex);
+      if (std::numeric_limits<std::uint32_t>::max() <= acct.last)
+        throw std::runtime_error{"add_subaddress: exceeded minor indexes"};
 
-    const std::uint32_t min_i = ++acct.last;
-    if (!label.empty())
-      acct.detail.try_emplace(min_i).first->second.label = std::move(label);
-
-    queue_work([=] () { return data_->register_subaddress(accountIndex, min_i); });
+      min_i = ++acct.last;
+      if (!label.empty())
+        acct.detail.try_emplace(min_i).first->second.label = std::move(label);
+    }
+    backend::wallet::register_subaddress(data_.wallet, accountIndex, min_i, frame::async_error{status_});
+    check_worker_thread();
   }
 
   std::string wallet::seed(const std::string& seed_offset) const
@@ -658,9 +716,9 @@ namespace lwsf { namespace internal
     std::string language;
     crypto::secret_key key;
     {
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      language = data_->primary.language;
-      key = data_->primary.spend.sec;
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      language = data_.wallet->primary.language;
+      key = data_.wallet->primary.spend.sec;
     }
 
     if (language.empty())
@@ -680,14 +738,14 @@ namespace lwsf { namespace internal
 
   std::string wallet::getSeedLanguage() const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    return data_->primary.language;
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet->primary.language;
   }
 
   void wallet::setSeedLanguage(const std::string &arg)
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    data_->primary.language = arg;
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    data_.wallet->primary.language = arg;
   }
 
   int wallet::status() const
@@ -708,16 +766,16 @@ namespace lwsf { namespace internal
 
   void wallet::statusWithErrorString(int& status, std::string& errorString) const
   {
-    const boost::lock_guard<boost::mutex> lock{error_sync_};
-    if (!exception_error_.empty())
+    const boost::lock_guard<boost::mutex> lock{status_->sync_};
+    if (!status_->exception_error_.empty())
     {
       status = Status_Critical;
-      errorString = exception_error_;
+      errorString = status_->exception_error_;
     }
-    else if (error_)
+    else if (status_->error_)
     {
       status = Status_Error;
-      errorString = error_.message();
+      errorString = status_->error_.message();
     }
     else
     {
@@ -734,35 +792,35 @@ namespace lwsf { namespace internal
 
   std::string wallet::address(const std::uint32_t accountIndex, const std::uint32_t addressIndex) const
   {
-    return data_->get_spend_address({accountIndex, addressIndex});
+    return data_.wallet->get_spend_address({accountIndex, addressIndex});
   }
 
-  Monero::NetworkType wallet::nettype() const { return data_->primary.type; }
+  Monero::NetworkType wallet::nettype() const { return data_.wallet->primary.type; }
 
   std::string wallet::secretViewKey() const
   {
-    return epee::to_hex::string(epee::as_byte_span(unwrap(unwrap(data_->primary.view.sec))));
+    return epee::to_hex::string(epee::as_byte_span(unwrap(unwrap(data_.wallet->primary.view.sec))));
   }
 
   std::string wallet::publicViewKey() const
   {
-    return epee::to_hex::string(epee::as_byte_span(data_->primary.view.pub));
+    return epee::to_hex::string(epee::as_byte_span(data_.wallet->primary.view.pub));
   }
 
   std::string wallet::secretSpendKey() const
   {
-    return epee::to_hex::string(epee::as_byte_span(unwrap(unwrap(data_->primary.spend.sec))));
+    return epee::to_hex::string(epee::as_byte_span(unwrap(unwrap(data_.wallet->primary.spend.sec))));
   }
 
   std::string wallet::publicSpendKey() const
   {
-    return epee::to_hex::string(epee::as_byte_span(data_->primary.spend.pub));
+    return epee::to_hex::string(epee::as_byte_span(data_.wallet->primary.spend.pub));
   }
 
   void wallet::stop()
   {
-    const boost::lock_guard<boost::mutex> lock{refresh_sync_};
-    thread_state_ = state::skip_once;
+    const boost::lock_guard<boost::mutex> lock{status_->sync_};
+    status_->thread_state_ = state::skip_once;
   }
 
   bool wallet::store(const std::string& path)
@@ -781,7 +839,7 @@ namespace lwsf { namespace internal
 
       // blocks until file and directory contents are synced
       epee::byte_slice blob =
-        encrypt(wallet_file_magic, data_->to_bytes().value(), iterations_, epee::strspan<std::uint8_t>(password_)).value();
+        encrypt(wallet_file_magic, data_.wallet->to_bytes().value(), iterations_, epee::strspan<std::uint8_t>(password_)).value();
       if (!atomic_file_write(new_file, directory, std::move(blob)))
         throw std::runtime_error{"Failed to write file " + real_path};
 
@@ -807,12 +865,11 @@ namespace lwsf { namespace internal
       if (!epee::net_utils::parse_url(daemon_address, url))
         throw std::runtime_error{"Invalid LWS URL: " + daemon_address};
 
-      if (!proxy_address.empty() && !setProxy(proxy_address))
+      if (!setProxy(proxy_address))
         return false;
 
-      boost::optional<epee::net_utils::http::login> login;
       if (!daemon_username.empty() || !daemon_password.empty())
-        login.emplace(daemon_username, daemon_password);
+        throw std::runtime_error{"HTTP loging not supported"};
 
       // verify cert if `use_ssl == true`, otherwise autodetect if `https`
       // specified.
@@ -851,10 +908,9 @@ namespace lwsf { namespace internal
         }
       }
 
-      const boost::unique_lock<boost::mutex> lock{data_->sync};
-      data_->client->set_server(std::move(url.host), std::to_string(url.port), std::move(login), std::move(options));
-      data_->passed_login = false;
-      data_->client_prefix = std::move(url.uri);
+      const boost::unique_lock<boost::mutex> lock{data_.wallet->sync};
+      data_.wallet->passed_login = false;
+      data_.wallet->client.init(data_.context->io_, std::move(url.host), std::move(url.uri), boost::numeric_cast<std::uint16_t>(url.port), std::move(options));
     }
     catch (const std::exception& e)
     {
@@ -867,62 +923,71 @@ namespace lwsf { namespace internal
 
   void wallet::setRefreshFromBlockHeight(const std::uint64_t height)
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    data_->primary.requested_start = std::min(data_->primary.requested_start, height);
-    queue_work([this, height] () { return data_->restore_height(height).error(); });
+    {
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      data_.wallet->primary.requested_start = std::min(data_.wallet->primary.requested_start, height);
+    }
+    backend::wallet::restore_height(data_.wallet, height, frame::async_error{status_});
+    check_worker_thread();
   }
 
   uint64_t wallet::getRefreshFromBlockHeight() const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    return data_->primary.restore_height;
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet->primary.restore_height;
   }
 
   void wallet::setSubaddressLookahead(uint32_t major, uint32_t minor)
   {
-    queue_work([this, major, minor] () { return data_->set_lookahead(major, minor); });
+    backend::wallet::set_lookahead(data_.wallet, major, minor, frame::async_error{status_});
+    check_worker_thread();
   }
 
   bool wallet::connectToDaemon()
   {
-    const bool connected = data_->client->is_connected();
-    boost::unique_lock<boost::mutex> lock{data_->sync};
-    if (connected && data_->passed_login)
+    boost::unique_lock<boost::mutex> lock{data_.wallet->sync};
+    if (data_.wallet->passed_login && data_.wallet->client.is_connected())
       return true;
 
-    if (connected || data_->client->connect(config::connect_timeout))
+    lock.unlock();
+    try
     {
-      lock.unlock();
-      return set_error(data_->login());
+      auto data = data_.wallet;
+      const std::error_code error = wait_for<std::error_code>(
+        [data = std::move(data)] (auto&& f) { backend::wallet::login(data, std::move(f)); }
+      );
+      if (error)
+        return false;
     }
-    return set_error(rpc::error::no_response);
+    catch (...)
+    { return false; }
+
+    lock.lock();
+    return data_.wallet->passed_login && data_.wallet->client.is_connected();
   }
 
   Monero::Wallet::ConnectionStatus wallet::connected() const
   {
-    if (!data_->client->is_connected())
-      return ConnectionStatus_Disconnected;
-
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    return data_->passed_login ?
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet->passed_login && data_.wallet->client.is_connected() ?
       ConnectionStatus_Connected : ConnectionStatus_Disconnected;
   }
 
   bool wallet::setProxy(const std::string &address)
   {
-    data_->client->disconnect();
     if (address.empty())
-      data_->client->set_connector(epee::net_utils::direct_connect{});
-    else
     {
-      auto endpoint = net::get_tcp_endpoint(address);
-      if (!endpoint)
-      {
-        data_->client->set_connector(null_connector{});
-        return set_error(endpoint.error());
-      }
-      data_->client->set_connector(net::socks::connector{std::move(*endpoint)});
+      data_.wallet->client.set_proxy(http::client::direct{});
+      return true;
     }
+
+    auto endpoint = ::net::get_tcp_endpoint(address);
+    if (!endpoint)
+    {
+      data_.wallet->client.set_proxy(null_connector{});
+      return set_error(endpoint.error());
+    }
+    data_.wallet->client.set_proxy(http::client::socks{*endpoint});
     return true;
   }
 
@@ -933,10 +998,10 @@ namespace lwsf { namespace internal
 
   uint64_t wallet::balance(const uint32_t accountIndex) const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
 
     std::uint64_t balance = 0;
-    for (const auto& tx : data_->primary.txes)
+    for (const auto& tx : data_.wallet->primary.txes)
     {
       if (tx.second->failed)
         continue;
@@ -959,12 +1024,12 @@ namespace lwsf { namespace internal
 
   uint64_t wallet::unlockedBalance(const uint32_t accountIndex) const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    const Monero::NetworkType net_type = data_->primary.type;
-    const std::uint32_t chain_height = data_->blockchain_height;
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    const Monero::NetworkType net_type = data_.wallet->primary.type;
+    const std::uint32_t chain_height = data_.wallet->blockchain_height;
 
     std::uint64_t balance = 0;
-    for (const auto& tx : data_->primary.txes)
+    for (const auto& tx : data_.wallet->primary.txes)
     {
       if (tx.second->failed)
         continue;
@@ -988,14 +1053,14 @@ namespace lwsf { namespace internal
 
   uint64_t wallet::blockChainHeight() const
   {
-    const boost::unique_lock<boost::mutex> lock{data_->sync};
-    return data_->primary.scan_height;
+    const boost::unique_lock<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet->primary.scan_height;
   }
 
   uint64_t wallet::daemonBlockChainHeight() const
   {
-    const boost::unique_lock<boost::mutex> lock{data_->sync};
-    return data_->blockchain_height;
+    const boost::unique_lock<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet->blockchain_height;
   }
 
   uint64_t wallet::daemonBlockChainTargetHeight() const
@@ -1003,15 +1068,15 @@ namespace lwsf { namespace internal
 
   bool wallet::synchronized() const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    return data_->blockchain_height == data_->primary.scan_height;
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet->blockchain_height == data_.wallet->primary.scan_height;
   }
 
 #ifdef LWSF_POLYSEED_ENABLE
   void wallet::setPolyseed(epee::byte_slice seed, std::string passphrase)
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    data_->primary.poly = backend::account::polyseed{std::move(seed), std::move(passphrase)};
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    data_.wallet->primary.poly = backend::account::polyseed{std::move(seed), std::move(passphrase)};
   }
 
   bool wallet::getPolyseed(std::string &seed, std::string &passphrase) const
@@ -1029,14 +1094,14 @@ namespace lwsf { namespace internal
     seed.clear();
     passphrase.clear();
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (!data_->primary.poly)
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    if (!data_.wallet->primary.poly)
       return false;
-    if (data_->primary.poly->seed.size() != sizeof(polyseed_storage))
+    if (data_.wallet->primary.poly->seed.size() != sizeof(polyseed_storage))
       return false;
    
     polyseed_data* temp = nullptr;
-    if (polyseed_load(data_->primary.poly->seed.data(), &temp) != POLYSEED_OK)
+    if (polyseed_load(data_.wallet->primary.poly->seed.data(), &temp) != POLYSEED_OK)
       return false;
     cleanup.reset(temp);
 
@@ -1045,7 +1110,7 @@ namespace lwsf { namespace internal
     for (int i = 0; i < langs; ++i)
     {
       lang = polyseed_get_lang(i);
-      if (lang && polyseed_get_lang_name(lang) == data_->primary.language)
+      if (lang && polyseed_get_lang_name(lang) == data_.wallet->primary.language)
 	break;
     }
 
@@ -1054,7 +1119,7 @@ namespace lwsf { namespace internal
 
     seed.resize(POLYSEED_STR_SIZE);
     seed.resize(polyseed_encode(temp, lang, POLYSEED_MONERO, &seed[0]));
-    passphrase = data_->primary.poly->passphrase;
+    passphrase = data_.wallet->primary.poly->passphrase;
     return true;
   }
 #endif // LWSF_POLYSEED_ENABLE
@@ -1062,25 +1127,19 @@ namespace lwsf { namespace internal
   void wallet::startRefresh()
   {
     const boost::lock_guard<boost::mutex> lock{thread_sync_};
-    state old_state = state::stop;
+    bool run = false;
     {
-      const boost::lock_guard<boost::mutex> lock2{refresh_sync_};
-      old_state = thread_state_;
-      const bool no_refresh =
-        refresh_interval_ <= std::chrono::milliseconds{0};
-      if (no_refresh)
+      const boost::lock_guard<boost::mutex> lock2{status_->sync_};
+      if (status_->thread_state_ == state::stop)
       {
-        thread_state_ = state::stop;
-        if (!mandatory_refresh_ && work_queue_.empty())
-          return;
+        status_->thread_state_ = state::run;
+        run = true;
       }
-      else
-        thread_state_ = state::run;
     }
-    refresh_notify_.notify_all();
 
-    if (old_state == state::stop)
+    if (run)
     {
+      data_.context->io_.stop();
       if (thread_.joinable())
         thread_.join();
       thread_ = boost::thread{[this] () { this->refresh_loop(); }};
@@ -1089,25 +1148,28 @@ namespace lwsf { namespace internal
 
   void wallet::pauseRefresh()
   {
-    const boost::lock_guard<boost::mutex> lock{refresh_sync_};
-    if (thread_state_ != state::stop)
-      thread_state_ = state::paused;
+    const boost::lock_guard<boost::mutex> lock{status_->sync_};
+    if (status_->thread_state_ != state::stop)
+      status_->thread_state_ = state::paused;
   }
 
   bool wallet::refresh()
   {
-    try { return set_error(data_->refresh(true), true /* clear */); }
-    catch (const std::exception& e) { set_critical(e); }
+    try
+    {
+      const auto refresh = [this] (auto&& f)
+      { backend::wallet::refresh(this->data_.wallet, true, std::move(f)); };
+
+      return set_error(wait_for<std::error_code>(refresh), true /* clear */); 
+    }
+    catch (...) {}
     return false;
   }
 
   void wallet::refreshAsync()
   {
-    {
-      const boost::lock_guard<boost::mutex> lock{refresh_sync_};
-      mandatory_refresh_ = true;
-    }
-    startRefresh();
+    backend::wallet::refresh(data_.wallet, true /* mandatory */, frame::async_error{status_});
+    check_worker_thread();
   }
 
   void wallet::setAutoRefreshInterval(int millis)
@@ -1115,11 +1177,11 @@ namespace lwsf { namespace internal
     using rep_type = std::chrono::milliseconds::rep;
     static_assert(std::numeric_limits<int>::max() <= std::numeric_limits<rep_type>::max());
 
-    boost::unique_lock<boost::mutex> lock{refresh_sync_};
-    refresh_interval_ = std::chrono::milliseconds{millis};
+    boost::unique_lock<boost::mutex> lock{status_->sync_};
+    status_->refresh_interval_ = std::chrono::milliseconds{millis};
     if (millis <= 0)
     {
-      thread_state_ = state::stop;
+      status_->thread_state_ = state::stop;
       lock.unlock();
       stop_refresh_loop();
     }
@@ -1127,34 +1189,38 @@ namespace lwsf { namespace internal
 
   int wallet::autoRefreshInterval() const
   {
-    return refresh_interval_.count();
+    return status_->refresh_interval_.count();
   }
 
   void wallet::addSubaddressAccount(const std::string& label)
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    auto& accts = data_->primary.subaccounts;
+    std::size_t index = 0;
+    {
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      auto& accts = data_.wallet->primary.subaccounts;
 
-    const std::size_t index = accts.size();
-    if (std::numeric_limits<std::uint32_t>::max() < index)
-      throw std::runtime_error{"addSubddressAccount exceeded subaddress indexes"};
+      index = accts.size();
+      if (std::numeric_limits<std::uint32_t>::max() < index)
+        throw std::runtime_error{"addSubddressAccount exceeded subaddress indexes"};
 
-    accts.emplace_back().detail.try_emplace(0).first->second.label = label;
-    queue_work([this, index] () { return data_->register_subaccount(index); });
+      accts.emplace_back().detail.try_emplace(0).first->second.label = label;
+    }
+    backend::wallet::register_subaccount(data_.wallet, index, frame::async_error{status_});
+    check_worker_thread();
   }
 
   std::size_t wallet::numSubaddressAccounts() const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    return data_->primary.subaccounts.size();
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet->primary.subaccounts.size();
   }
 
   std::size_t wallet::numSubaddresses(const std::uint32_t accountIndex) const
   {
     static_assert(std::numeric_limits<std::uint32_t>::max() <= std::numeric_limits<std::size_t>::max());
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (accountIndex < data_->primary.subaccounts.size())
-      return std::size_t(data_->primary.subaccounts.at(accountIndex).last) + 1;
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    if (accountIndex < data_.wallet->primary.subaccounts.size())
+      return std::size_t(data_.wallet->primary.subaccounts.at(accountIndex).last) + 1;
     set_critical(std::runtime_error{"numSubaddresses failed, " + std::to_string(accountIndex) + " does not exist"});
     return 0;
   }
@@ -1162,9 +1228,9 @@ namespace lwsf { namespace internal
   std::string wallet::getSubaddressLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex) const
   {
     static_assert(std::numeric_limits<std::uint32_t>::max() <= std::numeric_limits<std::size_t>::max());
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (accountIndex < data_->primary.subaccounts.size())
-      return std::string{data_->primary.subaccounts.at(accountIndex).sub_label(addressIndex)};
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    if (accountIndex < data_.wallet->primary.subaccounts.size())
+      return std::string{data_.wallet->primary.subaccounts.at(accountIndex).sub_label(addressIndex)};
     set_critical(std::runtime_error{"getSubaddressLabel failed, " + std::to_string(accountIndex) + "," + std::to_string(addressIndex) + " does not exist"});
     return {};
   }
@@ -1172,10 +1238,10 @@ namespace lwsf { namespace internal
   void wallet::setSubaddressLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex, const std::string &label)
   {
     static_assert(std::numeric_limits<std::uint32_t>::max() <= std::numeric_limits<std::size_t>::max());
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    if (accountIndex < data_->primary.subaccounts.size())
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    if (accountIndex < data_.wallet->primary.subaccounts.size())
     {
-      auto& acct = data_->primary.subaccounts[accountIndex];
+      auto& acct = data_.wallet->primary.subaccounts[accountIndex];
       if (addressIndex <= acct.last)
       {
         if (!addressIndex || !label.empty())
@@ -1241,34 +1307,36 @@ namespace lwsf { namespace internal
           cryptonote::account_public_address change_account{};
           unspent_map unspent{};
           {
-            data_->refresh(); // get latest outputs, block height, and fee info
+            wait_for<std::error_code>(
+              [this] (auto&& callable) { backend::wallet::refresh(this->data_.wallet, false, std::move(callable)); }
+            );
+            
+            const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+            fee_mask = data_.wallet->fee_mask;
 
-            const boost::lock_guard<boost::mutex> lock{data_->sync};
-            fee_mask = data_->fee_mask;
+            if (data_.wallet->per_byte_fee.empty() || !fee_mask || !data_.wallet->passed_login)
+              throw std::system_error{data_.wallet->refresh_error, "Tx construction"};
 
-            if (data_->per_byte_fee.empty() || !fee_mask || !data_->passed_login)
-              throw std::system_error{data_->refresh_error, "Tx construction"};
-
-            if (data_->per_byte_fee.size() <= priority_int)
-              per_byte_fee = data_->per_byte_fee.back();
+            if (data_.wallet->per_byte_fee.size() <= priority_int)
+              per_byte_fee = data_.wallet->per_byte_fee.back();
             else
-              per_byte_fee = data_->per_byte_fee[priority_int];
+              per_byte_fee = data_.wallet->per_byte_fee[priority_int];
 
-            mtype = data_->primary.type;
-            ctype = data_->get_net_type();
-            change_address = data_->get_spend_address({subaddr_account, 0});
-            keys = data_->get_primary_keys();
-            change_account = data_->get_spend_account({subaddr_account, 0});
-            const std::uint64_t height = data_->blockchain_height;
+            mtype = data_.wallet->primary.type;
+            ctype = data_.wallet->get_net_type();
+            change_address = data_.wallet->get_spend_address({subaddr_account, 0});
+            keys = data_.wallet->get_primary_keys();
+            change_account = data_.wallet->get_spend_account({subaddr_account, 0});
+            const std::uint64_t height = data_.wallet->blockchain_height;
 
             if (!amount && subaddr_indices.empty())
             {
-              const std::uint32_t max = data_->primary.subaccounts.at(subaddr_account).last;
+              const std::uint32_t max = data_.wallet->primary.subaccounts.at(subaddr_account).last;
               for (std::uint64_t index = 0; index <= max; ++index)
                 subaddr_indices.insert(std::uint32_t(index));
             }
 
-            for (const auto& tx : data_->primary.txes)
+            for (const auto& tx : data_.wallet->primary.txes)
             {
               if (!tx.second->is_unlocked(height, mtype))
                 continue; // ignore locked amounts
@@ -1287,7 +1355,7 @@ namespace lwsf { namespace internal
               }
             }
 
-            for (const auto& tx : data_->primary.txes)
+            for (const auto& tx : data_.wallet->primary.txes)
             {
               for (const auto& spend : tx.second->spends)
                 unspent.erase(spend.second.output_pub);
@@ -1438,7 +1506,10 @@ namespace lwsf { namespace internal
               for (const auto& spend : spending)
                 req.amounts.push_back(rpc::uint64_string(rct_amount(spend.second->receives.at(spend.first))));
 
-              auto resp = data_->get_decoys(req);
+              const auto resp = wait_for<expect<decltype(decoys)>>(
+                [this, &req] (auto&& callable)
+                { backend::wallet::get_decoys(this->data_.wallet, std::move(req), std::move(callable)); }
+              );
               if (!resp)
                 throw std::system_error{resp.error()};
               decoys = std::move(*resp);
@@ -1463,8 +1534,8 @@ namespace lwsf { namespace internal
             {
               const auto& source = spend.second->receives.at(spend.first);
               {
-                const boost::lock_guard<boost::mutex> lock{data_->sync};
-                subs.insert({data_->get_spend_public(source.recipient), {source.recipient.maj_i, source.recipient.min_i}});
+                const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+                subs.insert({data_.wallet->get_spend_public(source.recipient), {source.recipient.maj_i, source.recipient.min_i}});
               }
 
               auto& entry = sources.emplace_back();
@@ -1957,8 +2028,8 @@ namespace lwsf { namespace internal
   void wallet::setListener(Monero::WalletListener* listener)
   {
     {
-      const boost::lock_guard<boost::mutex> lock{data_->sync_listener};
-      data_->listener = listener;
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync_listener};
+      data_.wallet->listener = listener;
     }
     if (listener)
       listener->onSetWallet(this);
@@ -1976,16 +2047,16 @@ namespace lwsf { namespace internal
 
   bool wallet::setCacheAttribute(const std::string &key, const std::string &val)
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    data_->primary.attributes.try_emplace(key).first->second = val;
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    data_.wallet->primary.attributes.try_emplace(key).first->second = val;
     return true;
   }
 
   std::string wallet::getCacheAttribute(const std::string &key) const
   {
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    const auto attribute = data_->primary.attributes.find(key);
-    if (attribute != data_->primary.attributes.end())
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    const auto attribute = data_.wallet->primary.attributes.find(key);
+    if (attribute != data_.wallet->primary.attributes.end())
       return attribute->second;
     return {};
   }
@@ -1996,9 +2067,9 @@ namespace lwsf { namespace internal
     if (!epee::string_tools::hex_to_pod(txid, binary_id))
       return false;
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    auto iter = data_->primary.txes.find(binary_id);
-    if (iter == data_->primary.txes.end())
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    auto iter = data_.wallet->primary.txes.find(binary_id);
+    if (iter == data_.wallet->primary.txes.end())
       return false;
 
     iter->second->description = note;
@@ -2014,9 +2085,9 @@ namespace lwsf { namespace internal
       return {};
     }
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    auto iter = data_->primary.txes.find(binary_id);
-    if (iter == data_->primary.txes.end())
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    auto iter = data_.wallet->primary.txes.find(binary_id);
+    if (iter == data_.wallet->primary.txes.end())
       return {};
     return iter->second->description;
   }
@@ -2030,9 +2101,9 @@ namespace lwsf { namespace internal
       return {};
     }
 
-    const boost::lock_guard<boost::mutex> lock{data_->sync};
-    auto iter = data_->primary.txes.find(binary_id);
-    if (iter == data_->primary.txes.end())
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    auto iter = data_.wallet->primary.txes.find(binary_id);
+    if (iter == data_.wallet->primary.txes.end())
     {
       set_critical(std::runtime_error{"getTxKey tx not found"});
       return {};
@@ -2050,12 +2121,15 @@ namespace lwsf { namespace internal
   {
     isNewWallet = false;
     {
-      const boost::lock_guard lock{data_->sync};
-      if (data_->passed_login)
+      const boost::lock_guard lock{data_.wallet->sync};
+      if (data_.wallet->passed_login)
         return true;
     }
 
-    const expect<bool> is_new = data_->login_is_new();
+    const expect<bool> is_new = wait_for<expect<bool>>(
+      [this] (auto&& f) { backend::wallet::login_is_new(this->data_.wallet, std::move(f)); }
+    );
+
     if (!is_new)
       return false;
     isNewWallet = *is_new;
@@ -2064,7 +2138,15 @@ namespace lwsf { namespace internal
 
   bool wallet::lightWalletImportWalletRequest(std::string &payment_id, uint64_t &fee, bool &new_request, bool &request_fulfilled, std::string &payment_address, std::string &status)
   {
-    expect<rpc::import_response> import = data_->restore_height(0);
+    std::uint64_t height = 0;
+    {
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      height = data_.wallet->primary.requested_start;
+    }
+    const auto import = wait_for<expect<rpc::import_response>>(
+      [this, height] (auto&& f) { backend::wallet::restore_height_raw(this->data_.wallet, height, std::move(f)); }
+    );
+
     if (!import)
       return false;
     fee = std::uint64_t(import->import_fee.value_or(rpc::uint64_string(0)));
@@ -2075,5 +2157,5 @@ namespace lwsf { namespace internal
     return true;
   }
 #endif // LWSF_MASTER_ENABLE
-
+ 
 }} // lwsf // internal

@@ -27,6 +27,7 @@
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 include_directories(.)
+add_subdirectory(net)
 add_subdirectory(wire)
 
 set(lwsf_sources
@@ -89,6 +90,7 @@ target_link_libraries(lwsf-api
   PUBLIC
     monero::libraries
   PRIVATE
+    lwsf-net
     lwsf-wire
     lwsf-wire-json
     lwsf-wire-msgpack
