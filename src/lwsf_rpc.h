@@ -30,7 +30,9 @@
 
 #include <boost/container/flat_map.hpp>
 #include <boost/container/flat_set.hpp>
+#include <boost/core/demangle.hpp>
 #include <boost/optional/optional.hpp>
+#include <boost/thread/locks.hpp>
 #include <boost/variant.hpp>
 #include <ctime>
 #include <system_error>
@@ -40,57 +42,54 @@
 #include "byte_stream.h" // moneor/contrib/epee/include
 #include "common/expect.h"   // monero/src
 #include "crypto/crypto.h"   // monero/src
+#include "error.h"
 #include "lwsf_config.h"
+#include "net/http.h"
 #include "ringct/rctTypes.h" // monero/src
 #include "wire/basic_value.h"
 #include "wire/fwd.h"
 #include "wire/json.h"
 #include "wire/traits.h"
 
-namespace epee { namespace net_utils
-{
-  class blocked_mode_client;
-  namespace http { template<typename> class http_simple_client_template; }
-}}
-
 namespace lwsf { namespace internal { namespace rpc
 {
   using max_subaddrs = wire::max_element_count<16384>;
-  using http_client = epee::net_utils::http::http_simple_client_template<
-    epee::net_utils::blocked_mode_client
-  >;
+  struct daemon_status;
 
-  enum class error : int
+  template<typename T, typename F>
+  struct unpacker
   {
-    none = 0, no_response = -1, invalid_code = -2 /* Otherwise HTTP error code */
+    T* out;
+    F f;
+
+    void operator()(std::error_code error, epee::byte_slice response)
+    {
+      LWSF_VERIFY(out);
+      if (!error)
+      {
+        error = wire::json::from_bytes({reinterpret_cast<const char*>(response.data()), response.size()}, *out);
+        if (error)
+          MERROR("Failed to unpack " << boost::core::demangle(typeid(T).name()) << ": " << error.message());
+      }
+      f(error);
+    }
   };
+  
 
-  const std::error_category& error_category() noexcept;
-  inline std::error_code make_error_code(const error value) noexcept
+  template<typename T, typename U, typename F>
+  void invoke_async(const http::client& client, const T& in, U* out, F f)
   {
-    return std::error_code{int(value), error_category()};
-  }
-
-  //! Send `payload` to `client` at uri `endpoint`, and \return payload response
-  expect<std::string> invoke_payload(http_client& client, boost::string_ref prefix, boost::string_ref endpoint, epee::byte_slice payload);
-
-  template<typename F, typename G>
-  expect<F> invoke(http_client& client, boost::string_ref prefix, const G& in)
-  {
-    epee::byte_stream sink{};
-    std::error_code error = wire::json::to_bytes(sink, in);
-    if (error)
-      return error;
-
-    expect<std::string> result = invoke_payload(client, prefix, F::endpoint(), epee::byte_slice{std::move(sink)});
-    if (!result)
-      return result.error();
-    
-    F out{};
-    error = wire::json::from_bytes(epee::to_span(*result), out);
-    if (error)
-      return error;
-    return out;
+    // /daemon_status historically needed to be a post
+    if constexpr (!std::is_empty<T>{} || std::is_same<U, daemon_status>{})
+    {
+      epee::byte_stream sink{};
+      std::error_code error = wire::json::to_bytes(sink, in);
+      if (error)
+        return f(error);
+      client.post_async(U::endpoint(), epee::byte_slice{std::move(sink)}, unpacker<U, F>{out, std::move(f)});
+    }
+    else
+      client.get_async(U::endpoint(), unpacker<U, F>{out, std::move(f)});
   }
 
   struct empty {};
@@ -409,6 +408,8 @@ namespace lwsf { namespace internal { namespace rpc
     import_response() = delete;
     import_response(import_response&&) = default;
     import_response(const import_response&) = delete;
+    import_response& operator=(import_response&&) = default;
+    import_response& operator=(const import_response&) = delete;
     static constexpr const char* endpoint() noexcept { return "/import_wallet_request"; }
 
     boost::optional<std::string> payment_address;
@@ -482,10 +483,3 @@ namespace lwsf { namespace internal { namespace rpc
 
 WIRE_DECLARE_BLOB(lwsf::internal::rpc::ringct);
 
-namespace std
-{
-  template<>
-  struct is_error_code_enum<lwsf::internal::rpc::error>
-    : true_type
-  {};
-}

@@ -33,14 +33,14 @@
 #include <string>
 #include <vector>
 #include "lws_frontend.h"
+#include "net/wallet_io.h"
 #include "wallet/api/wallet2_api.h" // monero/src
 
-namespace lwsf { namespace internal {
-  namespace backend { struct wallet; }
-
+namespace lwsf { namespace internal
+{
   class address_book final : public ::Monero::AddressBook
   {
-    const std::shared_ptr<backend::wallet> data_;
+    const net::wallet_io data_;
     std::vector<Monero::AddressBookRow*> addresses_;
     std::string error_string_;
     ErrorCode error_;
@@ -49,7 +49,7 @@ namespace lwsf { namespace internal {
 
   public:
 
-    explicit address_book(std::shared_ptr<backend::wallet> data);
+    explicit address_book(const net::wallet_io& data);
 
     address_book(const address_book&) = delete;
     address_book(address_book&&) = delete;

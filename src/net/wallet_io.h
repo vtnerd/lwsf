@@ -1,4 +1,4 @@
-// Copyright (c) 2024, The Monero Project
+// Copyright (c) 2025, The Monero Project
 // 
 // All rights reserved.
 // 
@@ -29,35 +29,28 @@
 #pragma once
 
 #include <memory>
-#include <unordered_map>
-#include <vector>
-#include "crypto/hash.h"            // monero/src
-#include "net/wallet_io.h"
-#include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf { namespace internal
 {
-  namespace backend { class wallet; }
-  class transaction_history final : public Monero::TransactionHistory
-  {
-    const net::wallet_io data_;
-    std::vector<Monero::TransactionInfo*> txes_;
-    mutable std::unordered_map<crypto::hash, std::unique_ptr<Monero::TransactionInfo>> by_id_;
+  namespace backend { struct wallet; }
+  namespace net
+  { 
+    struct context;
 
-  public:
-    explicit transaction_history(const net::wallet_io& data);
+    /*! \brief Pass together because `wallet` has references to `context`.
+  
+    ASIO routines only take the `wallet` object, otherwise cyclic references
+    can occur during destruction (when I/O is pending at time of destruction).
+    Additionally, `context` must remain active until `wallet` is destructed, or
+    ASIO functions have a dangling reference. Pass this object when `wallet` is
+    needed, and provide `wallet` to the `static` methods of `backend::wallet`
+    that perform ASIO routines. */
+    struct wallet_io
+    {
+      std::shared_ptr<net::context> context; //<! Must be first (destruct last)
+      std::shared_ptr<backend::wallet> wallet; //!< Has references to `context`
 
-    transaction_history(const transaction_history&) = delete;
-    transaction_history(transaction_history&&) = delete;
-    virtual ~transaction_history() override;
-    transaction_history& operator=(const transaction_history&) = delete;
-    transaction_history& operator=(transaction_history&&) = delete;
-
-    virtual int count() const override { return txes_.size(); }
-    virtual Monero::TransactionInfo* transaction(int index)  const override;
-    virtual Monero::TransactionInfo* transaction(const std::string &id) const override;
-    virtual std::vector<Monero::TransactionInfo*> getAll() const override { return txes_; }
-    virtual void refresh() override;
-    virtual void setTxNote(const std::string &txid, const std::string &note) override;
-  };
-}} // lwsf // internal
+      wallet_io();
+    };
+  } // net
+}} // lwsf // intenral

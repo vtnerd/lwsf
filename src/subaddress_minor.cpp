@@ -33,6 +33,7 @@
 #include <utility>
 #include "backend.h"
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
+#include "error.h"
 
 namespace lwsf { namespace internal
 {
@@ -46,11 +47,10 @@ namespace lwsf { namespace internal
     }
   }
 
-  subaddress_minor::subaddress_minor(internal::wallet* wal, std::shared_ptr<backend::wallet> data)
-    : wal_(wal), data_(std::move(data)), rows_()
+  subaddress_minor::subaddress_minor(internal::wallet* wal, const net::wallet_io& data)
+    : wal_(wal), data_(data), rows_()
   {
-    if (!wal_ || !data_)
-      throw std::invalid_argument{"lwsf::internal::subaddress_minor cannot be given nullptr"};
+    LWSF_VERIFY(wal_ && data_.wallet);
   }
 
   subaddress_minor::~subaddress_minor()
@@ -64,11 +64,11 @@ namespace lwsf { namespace internal
     {
       free_rows(rows_);
       
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      if (data_->primary.subaccounts.size() <= accountIndex)
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      if (data_.wallet->primary.subaccounts.size() <= accountIndex)
         return;
 
-      const auto& acct = data_->primary.subaccounts[accountIndex];
+      const auto& acct = data_.wallet->primary.subaccounts[accountIndex];
       static_assert(std::is_same<std::uint32_t, decltype(acct.last)>());
       rows_.reserve(std::size_t(acct.last) + 1);
       for (std::uint64_t i = 0; i <= acct.last; ++i)
@@ -76,7 +76,7 @@ namespace lwsf { namespace internal
         rows_.push_back(
           new Monero::SubaddressRow{
             std::uint32_t(i),
-            data_->get_spend_address({accountIndex, std::uint32_t(i)}),
+            data_.wallet->get_spend_address({accountIndex, std::uint32_t(i)}),
             std::string{acct.sub_label(i)}
           }
         );
@@ -99,8 +99,8 @@ namespace lwsf { namespace internal
   void subaddress_minor::setLabel(const std::uint32_t accountIndex, const std::uint32_t addressIndex, const std::string &label)
   {
     {
-      const boost::lock_guard<boost::mutex> lock{data_->sync};
-      auto& acct = data_->primary.subaccounts.at(accountIndex);
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      auto& acct = data_.wallet->primary.subaccounts.at(accountIndex);
       if (!addressIndex || !label.empty())
         acct.detail.try_emplace(addressIndex).first->second.label = label;
       else

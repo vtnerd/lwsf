@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "backend.h"
+#include "net/wallet_io.h"
 #include "wallet/api/wallet2_api.h" // monero/src
 
 namespace lwsf { namespace internal
@@ -40,7 +41,7 @@ namespace lwsf { namespace internal
   //! \todo isFailed, subaddressIndex, and subaddrAccount
   class transaction_info final : public Monero::TransactionInfo
   {
-    const std::shared_ptr<backend::wallet> wallet_;
+    const net::wallet_io io_;
     std::shared_ptr<const backend::transaction> data_;
     std::vector<Transfer> transfers_;
 
@@ -48,7 +49,7 @@ namespace lwsf { namespace internal
 
   public:
 
-    explicit transaction_info(std::shared_ptr<backend::wallet> wallet, std::shared_ptr<const backend::transaction> data);
+    explicit transaction_info(const net::wallet_io& io, std::shared_ptr<const backend::transaction> data);
 
     transaction_info(const transaction_info&) = delete;
     transaction_info(transaction_info&&) = delete;

@@ -27,6 +27,9 @@
 
 #include "error.h"
 
+#include <cstring>
+#include "common/error.h" // monero/src
+
 namespace lwsf
 {
   const char* get_string(const error value) noexcept
@@ -57,10 +60,14 @@ namespace lwsf
       return "server has subaddresses disabled";
     case error::subaddr_local:
       return "lwsf (local) limits on subaddresses too small";
+    case error::subaddr_upgrade:
+      return "server does not support newer subaddr commands";
     case error::unexpected_userinfo:
       return "Unexpected user+pass field in URL";
     case error::unexpected_nullptr:
       return "Unexpected nullptr";
+    case error::unknown_exception:
+      return "Unknown exception";
 
     default:
       break;
@@ -74,7 +81,7 @@ namespace lwsf
     {
       virtual const char* name() const noexcept override final
         {
-          return "lws::error_category()";
+          return "lwsf::error_category()";
         }
 
         virtual std::string message(int value) const override final
@@ -84,5 +91,15 @@ namespace lwsf
     };
     static const category instance{};
     return instance;
+  }
+
+  void throw_invalid_argument(const int line, const char* file)
+  {
+    if (!file)
+      file = "";
+    char const* const end = std::strrchr(file, '/');
+    if (end)
+      file = end + 1;
+    throw std::invalid_argument{"Failed pre-condition at " + std::string{file} + ":" + std::to_string(line)};
   }
 } // lwsf

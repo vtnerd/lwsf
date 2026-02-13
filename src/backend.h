@@ -29,6 +29,8 @@
 #pragma once
 
 #include <atomic>
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/strand.hpp>
 #include <boost/container/flat_map.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/thread/mutex.hpp>
@@ -36,6 +38,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <unordered_map>
@@ -51,6 +54,7 @@
 #include "cryptonote_basic/account.h" // monero/src
 #include "lwsf_config.h"
 #include "lwsf_rpc.h"
+#include "net/context.h"
 #include "ringct/rctTypes.h"   // monero/src
 #include "wallet/api/wallet2_api.h" // monero/src
 #include "wire/fwd.h"
@@ -233,11 +237,16 @@ namespace lwsf { namespace internal { namespace backend
   //! All functions should provide the strong-exception guarantee
   struct wallet
   {
-    Monero::WalletListener* listener;
-    const std::unique_ptr<rpc::http_client> client;
+    // Everything uses `sync` for synchronization unless noted
+
+    Monero::WalletListener* listener; //!< Use `sync_listener`
+    boost::asio::io_context::strand strand; //<! useful in preventing contention on `sync` 
+    http::client client;
     account primary;
     std::string client_prefix;
     std::vector<std::uint64_t> per_byte_fee; //!< by priority level
+    std::vector<std::function<void(expect<bool>)>> login_queue; //!< use `sync_queue`
+    std::vector<std::function<void(std::error_code)>> refresh_queue; //!< use `sync_queue`
     std::error_code refresh_error; //!< Cached because `refresh(...)` is rate limited
     std::error_code subaddress_error; //!< Errors with subaddresses (not via lookahead)
     std::error_code lookahead_error; //!< warnings/errors of `server_lookahead` value
@@ -248,11 +257,35 @@ namespace lwsf { namespace internal { namespace backend
     config::lookahead server_lookahead; //!< Status of lookahead server-side
     mutable boost::mutex sync;
     boost::mutex sync_listener;
-    boost::mutex sync_refresh;
+    boost::mutex sync_queue;
     bool passed_login;
     bool probed_lookahead; //!< True iff queries were done to determine lookahead re-sync
 
-    wallet();
+    wallet(boost::asio::io_context& io);
+
+    //! Push `f` to `dest` with thread synchronization
+    template<typename T, typename F>
+    bool push(std::vector<std::function<T>>& dest, F&& f)
+    {
+      const boost::lock_guard<boost::mutex> lock{sync_queue};
+      const bool rc = dest.empty();
+      dest.push_back(std::forward<F>(f));
+      return rc;
+    }
+
+    //! Call all functions in `waiting` with thread synchronization
+    template<typename T, typename... U>
+    void run(std::vector<std::function<T>>& waiting, const U&... args)
+    {
+      std::vector<std::function<T>> ready;
+      {
+        const boost::lock_guard<boost::mutex> lock{sync_queue};
+        ready.swap(waiting);
+      }
+      for (const auto& f : ready)
+        f(args...);
+    }
+
 
     // `sync` mutex is NOT acquired for this group
 
@@ -265,7 +298,7 @@ namespace lwsf { namespace internal { namespace backend
 
     // End GROUP
 
-    // `sync` mutex IS acquired for this group (until end). Do not hold this mutex
+    // `sync` mutex IS acquired for this group Do not hold this mutex
 
     //! Serialize `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
@@ -273,29 +306,45 @@ namespace lwsf { namespace internal { namespace backend
     //! De-serialize `this` from msgpack. Locks+replaces contents.
     std::error_code from_bytes(epee::byte_slice source);
 
+    // End GROUP
+
+    // `sync` is acquired in a `asio::post` function - thread-safe and non-blocking until end
+
     /*! Attempt login and check lookahead status. Updates `lookahead_error`.
       \return No errors if login succeeded, and true if new account */
-    expect<bool> login_is_new();
+    static void login_is_new(std::shared_ptr<wallet> self, std::function<void(expect<bool>)>);
 
     /*! Attempt login and check lookahead status. Updates `lookahead_error`.
       \return No errors if login succeeded. */
-    std::error_code login() { return login_is_new().error(); }
+    template<typename F>
+    static void login(std::shared_ptr<wallet> self, F f)
+    { 
+      login_is_new(std::move(self), [f = std::move(f)] (expect<bool> r) mutable { f(r.error()); });
+    }
 
     //! Refreshes txes information. Strong exception guarantee.
-    std::error_code refresh(bool mandatory = false);
+    static void refresh(std::shared_ptr<wallet> self, bool mandatory, std::function<void(std::error_code)>);
 
     //! Notify server that new major accounts need to be watched.
-    std::error_code register_subaccount(std::uint32_t maj_i);
+    static void register_subaccount(std::shared_ptr<wallet> self, std::uint32_t maj_i, std::function<void(std::error_code)> f);
 
-    //! Notify server that new minor accounts need to be watched.
-    std::error_code register_subaddress(std::uint32_t maj_i, std::uint32_t min_i);
+    //! Notify server that new minor accounts need to be watched. Do not hold `self->sync`.
+    static void register_subaddress(std::shared_ptr<wallet> self, std::uint32_t maj_i, std::uint32_t min_i, std::function<void(std::error_code)>);
 
-    //! Modify local and possibly server lookahead
-    std::error_code set_lookahead(std::uint32_t major, std::uint32_t minor);
+    //! Modify local and possibly server lookahead. Do not hold `self->sync`.
+    static void set_lookahead(std::shared_ptr<wallet> self, std::uint32_t major, std::uint32_t minor, std::function<void(std::error_code)>);
 
-    expect<rpc::import_response> restore_height(const std::uint64_t height);
+    static void restore_height_raw(std::shared_ptr<wallet> self, const std::uint64_t height, std::function<void(expect<rpc::import_response>)>);
 
-    expect<std::vector<rpc::random_outputs>> get_decoys(const rpc::get_random_outs_request& req);
-    std::error_code send_tx(epee::byte_slice tx_bytes);
+    template<typename F>
+    static void restore_height(std::shared_ptr<wallet> self, const std::uint64_t height, F f)
+    {
+      restore_height_raw(std::move(self), height, [f = std::move(f)] (auto r) mutable { f(r.error()); });
+    }
+
+    using decoys_callable = void(expect<std::vector<rpc::random_outputs>>);
+    static void get_decoys(std::shared_ptr<wallet> self, rpc::get_random_outs_request&& req, std::function<decoys_callable> f);
+
+    static void send_tx(std::shared_ptr<wallet> slef, epee::byte_slice tx_bytes, std::function<void(std::error_code)> f);
   };
 }}} // lwsf // internal // backend

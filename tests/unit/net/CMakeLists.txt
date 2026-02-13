@@ -26,12 +26,6 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-add_library(lwsf-unit-framework framework.test.cpp)
-target_include_directories(lwsf-unit-framework PUBLIC "${lwsf_SOURCE_DIR}/src" "${lwsf_SOURCE_DIR}/tests/unit")
-target_link_libraries(lwsf-unit-framework)
-
-add_executable(lwsf-unit main.cpp backend.test.cpp rpc.test.cpp)
-
-add_subdirectory(net)
-target_link_libraries(lwsf-unit lwsf-api lwsf-unit-framework lwsf-unit-net monero::libraries)
-add_test(NAME lwsf-unit COMMAND lwsf-unit -v)
+add_library(lwsf-unit-net OBJECT http.test.cpp)
+#target_include_directories(lwsf-unit-net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} "${CMAKE_SOURCE_DIR}/src")
+target_link_libraries(lwsf-unit-net PRIVATE lwsf-unit-framework lwsf-net monero::libraries)
