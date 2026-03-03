@@ -92,6 +92,8 @@ namespace lwsf { namespace internal { namespace http
     client& operator=(client&&) = delete; 
     client& operator=(const client&) = delete;
 
+    void shutdown(); // break accidental memory cycles
+
     //! thread-safe
     bool is_connected() const noexcept;
 

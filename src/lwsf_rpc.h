@@ -76,6 +76,8 @@ namespace lwsf { namespace internal { namespace rpc
   };
   
 
+  /*! `f` may be buffered in `client` (i.e. NOT in ASIO _yet_), and therefore
+   callers need to ensure `f` only has `weak_ptr` to object owning `client`. */
   template<typename T, typename U, typename F>
   void invoke_async(const http::client& client, const T& in, U* out, F f)
   {

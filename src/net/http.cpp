@@ -658,6 +658,12 @@ namespace lwsf { namespace internal { namespace http
   client::~client()
   {}
 
+  void client::shutdown()
+  {
+    const boost::lock_guard<boost::mutex> lock{sync_};
+    state_ = nullptr;
+  }
+
   bool client::is_connected() const noexcept
   {
     const boost::lock_guard<boost::mutex> lock{sync_};

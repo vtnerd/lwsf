@@ -262,6 +262,10 @@ namespace lwsf { namespace internal { namespace backend
     bool probed_lookahead; //!< True iff queries were done to determine lookahead re-sync
 
     wallet(boost::asio::io_context& io);
+    ~wallet() noexcept;
+
+    //! Extra guard against memory cycles
+    void shutdown();
 
     //! Push `f` to `dest` with thread synchronization
     template<typename T, typename F>
