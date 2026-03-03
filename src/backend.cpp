@@ -651,7 +651,7 @@ namespace lwsf { namespace internal { namespace backend
     { 
       struct frame
       {
-        const std::shared_ptr<wallet> self;
+        const std::weak_ptr<wallet> self;
         F f;
         rpc::upsert_subaddrs_request request;
         rpc::upsert_subaddrs_response response;
@@ -671,8 +671,10 @@ namespace lwsf { namespace internal { namespace backend
 
         void operator()(const std::error_code error = {})
         {
-          LWSF_VERIFY(frame_ && frame_->self);
-          wallet& self = *frame_->self;
+          LWSF_VERIFY(frame_);
+          const auto self_ptr = frame_->self.lock();
+          LWSF_VERIFY(self_ptr);
+          wallet& self = *self_ptr;
           BOOST_ASIO_CORO_REENTER(*this)
           {
             BOOST_ASIO_CORO_YIELD rpc::invoke_async(
@@ -717,7 +719,7 @@ namespace lwsf { namespace internal { namespace backend
 
       template<std::size_t... I>
       void run(std::index_sequence<I...>)
-      { f(std::move(std::get<I>(args)...)); }
+      { f(std::move(std::get<I>(args))...); }
 
       void operator()()
       { run(std::make_index_sequence<sizeof...(T)>{}); }
@@ -727,17 +729,18 @@ namespace lwsf { namespace internal { namespace backend
     template<typename F>
     struct callback_on_strand
     {
-      std::shared_ptr<wallet> self;
-      F f;
+      std::weak_ptr<wallet> self_;
+      F f_;
 
       template<typename... T>
       void operator()(T... args)
       {
         // Use `post` instead of `dispatch` due to locking in handlers
+        const auto self = self_.lock();
         LWSF_VERIFY(self);
         boost::asio::post(
           self->strand,
-          binder<F, T...>{self, std::move(f), std::tuple<T...>(std::move(args)...)}
+          binder<F, T...>{self, std::move(f_), std::tuple<T...>(std::move(args)...)}
         );
       }
     };
@@ -757,9 +760,17 @@ namespace lwsf { namespace internal { namespace backend
     `backend::wallet::get_decoys` and `backend::wallet::send_tx` super fast
     and never blocking on anything (except briefly when queueing http stuff). */
     template<typename F>
-    callback_on_strand<F> post_on_strand(std::shared_ptr<wallet> self, F f)
+    callback_on_strand<F> wrap(std::shared_ptr<wallet> self, F f)
     {
        return {std::move(self), std::move(f)};
+    }
+
+    //! Every "frame" has a `weak_ptr` to `backend::wallet`; this safely posts.
+    template<typename F>
+    void post(std::shared_ptr<wallet> self, F f)
+    {
+      LWSF_VERIFY(self);
+      boost::asio::post(self->strand, binder<F>{self, std::move(f)});
     }
   } // anonymous
 
@@ -946,6 +957,17 @@ namespace lwsf { namespace internal { namespace backend
     prep_primary_account(primary.subaccounts.emplace_back());
   }
 
+  wallet::~wallet() noexcept {}
+
+  void wallet::shutdown()
+  {
+    client.shutdown();
+
+    const boost::lock_guard<boost::mutex> lock{sync_queue};
+    login_queue.clear();
+    refresh_queue.clear(); 
+  }
+
   cryptonote::network_type wallet::get_net_type() const
   { return convert_net_type(primary.type); }
 
@@ -1027,7 +1049,7 @@ namespace lwsf { namespace internal { namespace backend
   {
     struct frame
     {
-      const std::shared_ptr<wallet> self;
+      const std::weak_ptr<wallet> self;
       rpc::login_request login;
       rpc::login_response response;
       unsigned i;
@@ -1050,13 +1072,15 @@ namespace lwsf { namespace internal { namespace backend
 
       void operator()(std::error_code error = {})
       {
-        LWSF_VERIFY(frame_ && frame_->self);
-
-        // Remember that this function provides the strong exception guarantee.
-        wallet& self = *frame_->self;
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
+        wallet& self = *self_ptr;
         assert(self.strand.running_in_this_thread());
         boost::optional<rpc::address_meta> force_lookahead;
         const boost::lock_guard<boost::mutex> lock{self.sync};
+
+        // Remember that this function provides the strong exception guarantee.
         BOOST_ASIO_CORO_REENTER(*this)
         {
           if (self.passed_login)
@@ -1079,7 +1103,7 @@ namespace lwsf { namespace internal { namespace backend
           for ( ; frame_->i < 2; ++frame_->i)
           { 
             BOOST_ASIO_CORO_YIELD rpc::invoke_async(
-              self.client, frame_->login, std::addressof(frame_->response), post_on_strand(frame_->self, *this)
+              self.client, frame_->login, &frame_->response, wrap(self_ptr, *this)
             );
 
             if (error)
@@ -1118,7 +1142,7 @@ namespace lwsf { namespace internal { namespace backend
                   differ from lookahead because API allows arbitrary major,minor
                   requests to be performed. */
                 BOOST_ASIO_CORO_YIELD prep_subs(
-                  frame_->self, {frame_->login.address, frame_->login.view_key}, force_lookahead, post_on_strand(frame_->self, *this)
+                  self_ptr, {frame_->login.address, frame_->login.view_key}, force_lookahead, wrap(self_ptr, *this)
                 );
 
                 if (error && !self.subaddress_error)
@@ -1139,7 +1163,7 @@ namespace lwsf { namespace internal { namespace backend
     // Post in case of nested callback
     LWSF_VERIFY(self);
     if (self->push(self->login_queue, std::move(f)))
-      boost::asio::post(self->strand, handler{std::make_shared<frame>(self)});
+      post(self, handler{std::make_shared<frame>(self)});
   }
  
   void wallet::refresh(std::shared_ptr<wallet> self, const bool mandatory, std::function<void(std::error_code)> f)
@@ -1147,7 +1171,7 @@ namespace lwsf { namespace internal { namespace backend
     // everything used across async calls
     struct frame
     {
-      std::shared_ptr<wallet> self;
+      std::weak_ptr<wallet> self;
       rpc::login login;
       rpc::get_address_txs txs_response;
       rpc::get_unspent_outs_response outs_response;
@@ -1171,11 +1195,12 @@ namespace lwsf { namespace internal { namespace backend
 
       ~frame()
       {
-        if (self)
+        const auto self_ptr = self.lock();
+        if (self_ptr)
         {
-          const boost::lock_guard<boost::mutex> lock{self->sync_listener};
-          if (self->listener)
-            self->listener->refreshed();
+          const boost::lock_guard<boost::mutex> lock{self_ptr->sync_listener};
+          if (self_ptr->listener)
+            self_ptr->listener->refreshed();
         }
       }
     }; 
@@ -1190,12 +1215,14 @@ namespace lwsf { namespace internal { namespace backend
 
       void operator()(std::error_code error = {})
       {
-        LWSF_VERIFY(frame_ && frame_->self);
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
 
         bool import_called = false;
         std::uint64_t from_height = 0;
 
-        wallet& self = *frame_->self;
+        wallet& self = *self_ptr;
         assert(self.strand.running_in_this_thread());
         boost::unique_lock<boost::mutex> lock{self.sync};
         BOOST_ASIO_CORO_REENTER(*this)
@@ -1212,7 +1239,7 @@ namespace lwsf { namespace internal { namespace backend
 
           if (!self.passed_login)
           {
-            BOOST_ASIO_CORO_YIELD login(frame_->self, post_on_strand(frame_->self, *this));
+            BOOST_ASIO_CORO_YIELD login(self_ptr, wrap(self_ptr, *this));
             if (error)
               return self.run(self.refresh_queue, self.refresh_error = error);
           }
@@ -1220,7 +1247,7 @@ namespace lwsf { namespace internal { namespace backend
           frame_->orig_scan_height = self.primary.scan_height;
           frame_->login = rpc::login{self.primary.address, self.primary.view.sec};
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(
-            self.client, frame_->login, std::addressof(frame_->txs_response), post_on_strand(frame_->self, *this)
+            self.client, frame_->login, std::addressof(frame_->txs_response), wrap(self_ptr, *this)
           );
 
           if (error)
@@ -1235,7 +1262,7 @@ namespace lwsf { namespace internal { namespace backend
             self.client,
             rpc::get_unspent_outs_request{frame_->login, rpc::uint64_string(0), 0, true},
             std::addressof(frame_->outs_response),
-            post_on_strand(frame_->self, *this)
+            wrap(self_ptr, *this)
           );
 
           if (error)
@@ -1250,7 +1277,7 @@ namespace lwsf { namespace internal { namespace backend
           if (!self.import_error && self.primary.requested_start < self.primary.restore_height)
           {
             BOOST_ASIO_CORO_YIELD restore_height(
-              frame_->self, self.primary.requested_start, post_on_strand(frame_->self, *this)
+              self_ptr, self.primary.requested_start, wrap(self_ptr, *this)
             );
             import_called = true;
           }
@@ -1263,7 +1290,7 @@ namespace lwsf { namespace internal { namespace backend
             {
               self.probed_lookahead = true; // block re-attempts temporarily
               BOOST_ASIO_CORO_YIELD rpc::invoke_async(
-                self.client, rpc::empty{}, std::addressof(frame_->info), post_on_strand(frame_->self, *this)
+                self.client, rpc::empty{}, std::addressof(frame_->info), wrap(self_ptr, *this)
               );
 
               if (error == http::error(404))
@@ -1272,14 +1299,13 @@ namespace lwsf { namespace internal { namespace backend
               if (!error)
               {
                 BOOST_ASIO_CORO_YIELD rpc::invoke_async(
-                  self.client, frame_->login, std::addressof(frame_->subaddrs), post_on_strand(frame_->self, *this)
+                  self.client, frame_->login, std::addressof(frame_->subaddrs), wrap(self_ptr, *this)
                 );
 
                 if (!error && should_attempt_rescan(self.primary, std::move(frame_->subaddrs.all_subaddrs), frame_->info.max_subaddresses))
                 {
                   from_height = frame_->merged.lookahead_fail.value_or(self.primary.requested_start);
-                  BOOST_ASIO_CORO_YIELD
-                    restore_height(frame_->self, from_height, post_on_strand(frame_->self, *this));
+                  BOOST_ASIO_CORO_YIELD restore_height(self_ptr, from_height, wrap(self_ptr, *this));
                   if (!error && self.lookahead_good())
                     self.probed_lookahead = false; // run again if/when restore_height fails during scanning
                   error = {}; // restore_height` updated `import_error`
@@ -1301,7 +1327,6 @@ namespace lwsf { namespace internal { namespace backend
 
 
           // return error if subaddresses enabled, and recovered wallet
-          const std::shared_ptr<wallet> strong_count = frame_->self;
           frame_->self.reset(); // release before acquiring `sync_listener`.
           const std::error_code rc = self.refresh_error =
             self.import_error ? 
@@ -1346,14 +1371,14 @@ namespace lwsf { namespace internal { namespace backend
 
     LWSF_VERIFY(self);
     if (self->push(self->refresh_queue, std::move(f)))
-      boost::asio::post(self->strand, handler{std::make_shared<frame>(self, mandatory)});
+      post(self, handler{std::make_shared<frame>(self, mandatory)});
   }
 
   void wallet::register_subaccount(std::shared_ptr<wallet> self, const std::uint32_t maj_i, std::function<void(std::error_code)> f)
   {
     struct frame
     {
-      const std::shared_ptr<wallet> self;
+      const std::weak_ptr<wallet> self;
       const std::function<void(std::error_code)> f;
       rpc::provision_subaddrs_response response;
       const std::uint32_t maj_i;
@@ -1382,9 +1407,11 @@ namespace lwsf { namespace internal { namespace backend
 
       void operator()(const std::error_code error = {})
       {
-        LWSF_VERIFY(frame_ && frame_->self && frame_->f);
+        LWSF_VERIFY(frame_ && frame_->f);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
 
-        wallet& self = *frame_->self;
+        wallet& self = *self_ptr;
         assert(self.strand.running_in_this_thread());
         const boost::lock_guard<boost::mutex> lock{self.sync};
         BOOST_ASIO_CORO_REENTER(*this)
@@ -1393,16 +1420,13 @@ namespace lwsf { namespace internal { namespace backend
        
           if (!self.passed_login)
           {
-            BOOST_ASIO_CORO_YIELD login(frame_->self, post_on_strand(frame_->self, *this));
+            BOOST_ASIO_CORO_YIELD login(self_ptr, wrap(self_ptr, *this));
             if (error)
               return frame_->f(error);
           }
 
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(
-            self.client,
-            get_request(self, frame_->maj_i),
-            std::addressof(frame_->response),
-            post_on_strand(frame_->self, *this)
+            self.client, get_request(self, frame_->maj_i), &frame_->response, wrap(self_ptr, *this)
           );
 
           if (error && !self.subaddress_error)
@@ -1414,14 +1438,14 @@ namespace lwsf { namespace internal { namespace backend
 
     LWSF_VERIFY(config::use_subaddresses);
     LWSF_VERIFY(self);
-    boost::asio::post(self->strand, handler{std::make_shared<frame>(self, std::move(f), maj_i)});
+    post(self, handler{std::make_shared<frame>(self, std::move(f), maj_i)});
   }
 
   void wallet::register_subaddress(std::shared_ptr<wallet> self, const std::uint32_t maj_i, const std::uint32_t min_i, std::function<void(std::error_code)> f)
   {
     struct frame
     {
-      const std::shared_ptr<wallet> self;
+      const std::weak_ptr<wallet> self;
       const std::function<void(std::error_code)> f;
       rpc::provision_subaddrs_response response;
       const std::uint32_t maj_i;
@@ -1452,21 +1476,23 @@ namespace lwsf { namespace internal { namespace backend
 
       void operator()(const std::error_code error = {})
       {
-        LWSF_VERIFY(frame_ && frame_->self);
-        wallet& self = *frame_->self;
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
+        wallet& self = *self_ptr;
         assert(self.strand.running_in_this_thread());
         const boost::lock_guard<boost::mutex> lock{self.sync};
         BOOST_ASIO_CORO_REENTER(*this)
         { 
           if (!self.passed_login)
           {
-            BOOST_ASIO_CORO_YIELD login(frame_->self, post_on_strand(frame_->self, *this));
+            BOOST_ASIO_CORO_YIELD login(self_ptr, wrap(self_ptr, *this));
             if (error)
               return frame_->f(error);
           }
 
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(
-            self.client, frame_->get_request(self), std::addressof(frame_->response), post_on_strand(frame_->self, *this)
+            self.client, frame_->get_request(self), &frame_->response, wrap(self_ptr, *this)
           );
  
           if (error && !self.subaddress_error)
@@ -1481,7 +1507,7 @@ namespace lwsf { namespace internal { namespace backend
     const boost::lock_guard<boost::mutex> lock{self->sync};
     LWSF_VERIFY(maj_i < self->primary.subaccounts.size());
     LWSF_VERIFY(min_i <= self->primary.subaccounts[maj_i].last);
-    boost::asio::post(self->strand, handler{std::make_shared<frame>(self, maj_i, min_i, std::move(f))});
+    post(self, handler{std::make_shared<frame>(self, maj_i, min_i, std::move(f))});
   }
 
   void wallet::set_lookahead(std::shared_ptr<wallet> self, std::uint32_t major, std::uint32_t minor, std::function<void(std::error_code)> f)
@@ -1500,7 +1526,7 @@ namespace lwsf { namespace internal { namespace backend
   {
     struct frame
     {
-      const std::shared_ptr<wallet> self;
+      const std::weak_ptr<wallet> self;
       const std::function<void(expect<rpc::import_response>)> f;
       rpc::import_response response;
       const std::uint64_t height;
@@ -1509,27 +1535,27 @@ namespace lwsf { namespace internal { namespace backend
         : self(std::move(self)), f(std::move(f)), response{}, height(height)
       {}
 
-      void done(expect<rpc::import_response> result)
+      void done(wallet& self_ref, expect<rpc::import_response> result)
       {
-        LWSF_VERIFY(self && f);
+        LWSF_VERIFY(f);
         if (result)
         {
-          self->primary.restore_height = std::min(height, self->primary.restore_height);
-          self->import_error = {};
+          self_ref.primary.restore_height = std::min(height, self_ref.primary.restore_height);
+          self_ref.import_error = {};
           if (result->lookahead)
           {
-            self->server_lookahead = {result->lookahead->maj_i, result->lookahead->min_i};
-            self->lookahead_error = {};
+            self_ref.server_lookahead = {result->lookahead->maj_i, result->lookahead->min_i};
+            self_ref.lookahead_error = {};
           }
           else
-            self->lookahead_error = {error::subaddr_upgrade};
+            self_ref.lookahead_error = {error::subaddr_upgrade};
         }
         else
         {
           if (result == rpc_max_subaddresses)
-            self->import_error = {error::subaddr_ahead};
+            self_ref.import_error = {error::subaddr_ahead};
           else
-            self->import_error = result.error();
+            self_ref.import_error = result.error();
         }
         f(std::move(result));
       }
@@ -1545,33 +1571,35 @@ namespace lwsf { namespace internal { namespace backend
 
       void operator()(const std::error_code error = {})
       {
-        LWSF_VERIFY(frame_ && frame_->self);
-        wallet& self = *frame_->self; 
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
+        wallet& self = *self_ptr; 
         assert(self.strand.running_in_this_thread());
         const boost::lock_guard<boost::mutex> lock{self.sync};
         BOOST_ASIO_CORO_REENTER(*this)
         {
           if (!self.passed_login)
           {
-            BOOST_ASIO_CORO_YIELD login(frame_->self, post_on_strand(frame_->self, *this));
+            BOOST_ASIO_CORO_YIELD login(self_ptr, wrap(self_ptr, *this));
             if (error)
-              return frame_->done(error);
+              return frame_->done(self, error);
           }
 
           if (self.primary.restore_height <= frame_->height && self.lookahead_good() && !self.lookahead_error)
-            return frame_->done(rpc::import_response{.lookahead = rpc::address_meta{self.server_lookahead}});
+            return frame_->done(self, rpc::import_response{.lookahead = rpc::address_meta{self.server_lookahead}});
   
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(
             self.client,
             rpc::import_request{{self.primary.address, self.primary.view.sec}, frame_->height, self.primary.lookahead},
             std::addressof(frame_->response),
-            post_on_strand(frame_->self, *this)
+            wrap(self_ptr, *this)
           );
 
           if (error)
-            return frame_->done(error);
+            return frame_->done(self, error);
           else if (frame_->response.request_fulfilled)
-            return frame_->done(std::move(frame_->response));
+            return frame_->done(self, std::move(frame_->response));
 
           const unsigned total =
             unsigned(bool(frame_->response.import_fee)) + bool(frame_->response.payment_address);
@@ -1579,22 +1607,22 @@ namespace lwsf { namespace internal { namespace backend
           {
             default:
             case 0:
-              return frame_->done({error::import_pending});
+              return frame_->done(self, {error::import_pending});
             case 1:
               if (frame_->response.import_fee.value_or(rpc::uint64_string(0)) == rpc::uint64_string(0))
-                return frame_->done({error::import_pending});
-              return frame_->done({error::import_invalid});
+                return frame_->done(self, {error::import_pending});
+              return frame_->done(self, {error::import_invalid});
             case 2:
               break;
           }
 
           cryptonote::address_parse_info info{};
           if (!cryptonote::get_account_address_from_str(info, convert_net_type(self.primary.type), *frame_->response.payment_address))
-            return frame_->done({error::import_invalid});
+            return frame_->done(self, {error::import_invalid});
           if (info.has_payment_id && frame_->response.payment_id)
-            return frame_->done({error::import_invalid});
+            return frame_->done(self, {error::import_invalid});
           if (frame_->response.payment_id && (frame_->response.payment_id->empty() || (frame_->response.payment_id->size() != sizeof(crypto::hash8) && frame_->response.payment_id->size() != sizeof(crypto::hash))))
-            return frame_->done({error::import_invalid});
+            return frame_->done(self, {error::import_invalid});
 
       #ifdef LWSF_MASTER_ENABLE
           std::string payment_id;
@@ -1617,20 +1645,20 @@ namespace lwsf { namespace internal { namespace backend
           else
             self.primary.addressbook[i] = address_book_entry{std::move(*frame_->response.payment_address), std::move(payment_id), std::move(description)};
       #endif
-          frame_->done({error::import_pending});
+          frame_->done(self, {error::import_pending});
         }
       }
     };
 
     LWSF_VERIFY(self);
-    boost::asio::post(self->strand, handler{std::make_shared<frame>(self, height, std::move(f))});
+    post(self, handler{std::make_shared<frame>(self, height, std::move(f))});
   }
 
   void wallet::get_decoys(std::shared_ptr<wallet> self, rpc::get_random_outs_request&& req, std::function<decoys_callable> f)
   {
     struct frame
     {
-      const std::shared_ptr<wallet> self;
+      const std::weak_ptr<wallet> self;
       const std::function<decoys_callable> f;
       rpc::get_random_outs_request request;
       rpc::get_random_outs_response response;
@@ -1650,9 +1678,11 @@ namespace lwsf { namespace internal { namespace backend
 
       void operator()(const std::error_code error = {})
       {
-        LWSF_VERIFY(frame_ && frame_->self);
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
 
-        wallet& self = *frame_->self;
+        wallet& self = *self_ptr;
         BOOST_ASIO_CORO_REENTER(*this)
         {
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(
@@ -1674,7 +1704,7 @@ namespace lwsf { namespace internal { namespace backend
   {
     struct frame
     {
-      const std::shared_ptr<wallet> self;
+      const std::weak_ptr<wallet> self;
       const std::function<void(std::error_code)> f;
       epee::byte_slice tx_bytes;
       rpc::submit_raw_tx_response response;
@@ -1694,8 +1724,10 @@ namespace lwsf { namespace internal { namespace backend
 
       void operator()(const std::error_code error = {})
       {
-        LWSF_VERIFY(frame_ && frame_->self);
-        wallet& self = *frame_->self;
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
+        wallet& self = *self_ptr;
         BOOST_ASIO_CORO_REENTER(*this)
         {
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(

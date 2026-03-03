@@ -377,7 +377,7 @@ namespace lwsf { namespace internal
     {
       std::weak_ptr<boost::asio::steady_timer> timer_;
       std::shared_ptr<frame> status_;
-      std::shared_ptr<backend::wallet> wallet_;
+      std::weak_ptr<backend::wallet> wallet_;
 
       explicit on_refresh(std::weak_ptr<boost::asio::steady_timer> timer, std::shared_ptr<frame> in, std::shared_ptr<backend::wallet> in2)
         : timer_(std::move(timer)), status_(std::move(in)), wallet_(std::move(in2))
@@ -410,7 +410,8 @@ namespace lwsf { namespace internal
             if (error == boost::asio::error::operation_aborted)
               return;
 
-            LWSF_VERIFY(copy.status_);
+            const auto wallet = copy.wallet_.lock();
+            LWSF_VERIFY(copy.status_ && wallet);
             boost::unique_lock<boost::mutex> lock{copy.status_->sync_};
             switch (copy.status_->thread_state_)
             {
@@ -424,8 +425,8 @@ namespace lwsf { namespace internal
               {
                 std::error_code dummy;
                 {
-                  const boost::lock_guard<boost::mutex> lock2{copy.wallet_->sync};
-                  dummy = copy.wallet_->refresh_error;
+                  const boost::lock_guard<boost::mutex> lock2{wallet->sync};
+                  dummy = wallet->refresh_error;
                 }
                 lock.unlock();
                 copy(dummy);
@@ -433,7 +434,7 @@ namespace lwsf { namespace internal
               break;
             case state::run:
               lock.unlock();
-              backend::wallet::refresh(copy.wallet_, false /* mandatory */, copy);
+              backend::wallet::refresh(wallet, false /* mandatory */, copy);
               break;
             }
           }
