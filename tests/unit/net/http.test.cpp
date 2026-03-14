@@ -200,7 +200,7 @@ LWS_CASE("net::http")
         io.run_one();
       }
 
-      EXPECT(actual == lwsf::internal::http::error::timeout);
+      EXPECT(actual == boost::system::error_code{boost::asio::error::host_not_found});
     }
 
     SECTION("connect timeout")
@@ -215,7 +215,7 @@ LWS_CASE("net::http")
       io.restart();
       io.run();
 
-      EXPECT(actual == lwsf::internal::http::error::timeout);
+      EXPECT(actual == boost::system::error_code{boost::asio::error::operation_aborted});
     }
 
     SECTION("response timeout")
@@ -226,7 +226,7 @@ LWS_CASE("net::http")
       io.restart();
       io.run();
 
-      EXPECT(actual == lwsf::internal::http::error::timeout);
+      EXPECT(actual == boost::system::error_code{boost::asio::error::operation_aborted});
     }
   } // SETUP
 }
