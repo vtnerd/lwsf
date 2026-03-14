@@ -44,7 +44,7 @@ namespace lwsf { namespace internal { namespace http
 {
   enum class error : int
   {
-    none = 0, timeout = -1, invalid_code = -2 /* Otherwise HTTP error code */
+    none = 0, invalid_code = -1 /* Otherwise HTTP error code */
   };
 
   const std::error_category& error_category() noexcept;

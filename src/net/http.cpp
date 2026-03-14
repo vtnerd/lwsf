@@ -73,8 +73,6 @@ namespace lwsf { namespace internal { namespace http
 
       case error::none:
         return "No rpc errors";
-      case error::timeout:
-        return "No response from HTTP server";
       case error::invalid_code:
         return "Invalid status code from HTTP server";
       }
@@ -229,6 +227,7 @@ namespace lwsf { namespace internal { namespace http
     const std::uint16_t port;
     std::atomic<bool> is_connected;
     epee::net_utils::ssl_support_t ssl_status;
+    bool retry; //! in case of connection timeouts, etc
 
     client_state(boost::asio::io_context& io, std::string host, std::string prefix, const std::uint16_t port, epee::net_utils::ssl_options_t in, std::function<connect_func> connect)
       : buffer{},
@@ -247,7 +246,8 @@ namespace lwsf { namespace internal { namespace http
         iteration(0),
         port(port),
         is_connected(false),
-        ssl_status(ssl.support)
+        ssl_status(ssl.support),
+        retry(true)
     {}
 
     template<typename F>
@@ -262,7 +262,7 @@ namespace lwsf { namespace internal { namespace http
         outgoing.front().verb,
         outgoing.front().target,
         config::http_version,
-        std::move(outgoing.front().body)
+        outgoing.front().body.clone()
       };
       request.set(boost::beast::http::field::user_agent, BOOST_BEAST_VERSION_STRING);
       if (!no_body)
@@ -312,12 +312,12 @@ namespace lwsf { namespace internal { namespace http
       sock.next_layer().close(ignore);
     }
 
-    void notify_connection_error()
+    void notify_connection_error(const boost::system::error_code error)
     {
       for (auto& elem : outgoing)
       {
         if (elem.notifier)
-          elem.notifier(error::timeout, {});
+          elem.notifier(error, {});
       }
 
       outgoing.clear();
@@ -429,7 +429,7 @@ namespace lwsf { namespace internal { namespace http
           }
 
           if (error)
-            return self.notify_connection_error();
+            return self.notify_connection_error(error);
 
           ++self.iteration;
           self.is_connected = true;
@@ -439,7 +439,7 @@ namespace lwsf { namespace internal { namespace http
 
             MDEBUG("Sending " << self.outgoing.front().body.size() << " bytes in HTTP " << (self.outgoing.front().is_get() ? "GET" : "POST") << " to " << self.outgoing.front());
             BOOST_ASIO_CORO_YIELD self.async_write(std::move(*this));
-                  
+
             if (!error)
             {
               MDEBUG("Starting read from " << self.outgoing.front() << " to previous HTTP message");
@@ -468,10 +468,17 @@ namespace lwsf { namespace internal { namespace http
 
             // if write, read, or parse errors
             if (error)
-              return self.notify_connection_error();
+            {
+              if (!self.retry)
+                return self.notify_connection_error(error);
+              self.retry = false;
+              self.close();
+              return client_loop{self_}(); // possible timeout; connect retry
+            }
 
             self.outgoing.pop_front();
             ++self.iteration;
+            self.retry = true;
 
             if (!self.parser->get().keep_alive())
             {
@@ -569,7 +576,6 @@ namespace lwsf { namespace internal { namespace http
 
               frame_->resolver.cancel();
               self_->close();
-              frame_->f(boost::asio::error::operation_aborted);
             }
           };
 
