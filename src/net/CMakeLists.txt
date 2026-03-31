@@ -26,8 +26,8 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-set(lwsf-net_sources context.cpp http.cpp wallet_io.cpp)
-set(lwsf-net_headers context.h http.h wallet_io.h)
+set(lwsf-net_sources context.cpp http.cpp wallet_io.cpp websocket.cpp)
+set(lwsf-net_headers context.h http.h wallet_io.h websocket.h)
 
 add_library(lwsf-net ${lwsf-net_sources} ${lwsf-net_headers})
 target_link_libraries(lwsf-net PRIVATE monero::libraries)

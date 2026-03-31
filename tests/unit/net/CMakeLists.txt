@@ -26,6 +26,6 @@
 # STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
 # THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-add_library(lwsf-unit-net OBJECT http.test.cpp)
+add_library(lwsf-unit-net OBJECT http.test.cpp push.test.cpp push.test.h)
 #target_include_directories(lwsf-unit-net PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} "${CMAKE_SOURCE_DIR}/src")
 target_link_libraries(lwsf-unit-net PRIVATE lwsf-unit-framework lwsf-net monero::libraries)

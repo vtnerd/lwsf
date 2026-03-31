@@ -113,21 +113,8 @@ namespace lwsf { namespace internal { namespace backend
   };
   WIRE_DECLARE_OBJECT(sub_account);
 
-  struct transfer_spend
-  {
-    std::uint64_t amount;
-    rpc::address_meta sender;
-    crypto::public_key tx_pub;
-    crypto::public_key output_pub;
-
-    transfer_spend() noexcept
-      : amount(0), sender{}, tx_pub{}, output_pub{}
-    {}
-  };
-  WIRE_DECLARE_OBJECT(transfer_spend);
-
   struct transfer_in
- {
+  {
     std::uint64_t global_index;
     std::uint64_t amount;
     rpc::address_meta recipient;
@@ -143,8 +130,51 @@ namespace lwsf { namespace internal { namespace backend
         rct_mask(),
         tx_pub{}
     {}
+
+    transfer_in(const rpc::feed_tx::receive& src) noexcept
+      : global_index(src.id.legacy.index),
+        amount(src.amount),
+        recipient(src.recipient),
+        index(src.index),
+        rct_mask(src.rct),
+        tx_pub(src.tx_pub_key)
+    {}
+
+    rpc::feed_tx::output_id get_output_id() const noexcept
+    {
+      return {
+        rpc::feed_tx::legacy_id{
+          bool(rct_mask) ? unsigned(0) : amount,
+          global_index
+        }
+      };
+    }
+
+    rpc::feed_tx::receive as_receive(const crypto::public_key& pub) const noexcept
+    {
+      return {
+        amount, get_output_id(), recipient, index, rct_mask, pub, tx_pub
+      };
+    }
   };
   WIRE_DECLARE_OBJECT(transfer_in);
+
+  struct transfer_spend
+  {
+    std::uint64_t amount;
+    rpc::address_meta sender;
+    crypto::public_key tx_pub;
+    crypto::public_key output_pub;
+
+    transfer_spend() noexcept
+      : amount(0), sender{}, tx_pub{}, output_pub{}
+    {}
+
+    transfer_spend(const transfer_in& src, const crypto::public_key& pub) noexcept
+      : amount(src.amount), sender(src.recipient), tx_pub(src.tx_pub), output_pub(pub)
+    {}
+  };
+  WIRE_DECLARE_OBJECT(transfer_spend);
 
   struct transfer_out
   {
@@ -165,12 +195,16 @@ namespace lwsf { namespace internal { namespace backend
   struct transaction
   {
     transaction();
+
+    transaction(const rpc::feed_tx& src, const transaction* existing = nullptr);
+    transaction(const rpc::feed_mempool& src);
     
     transaction(transaction&&) = default;
     transaction(const transaction& rhs);
     transaction& operator=(transaction&&) = default;
 
     bool is_unlocked(std::uint64_t chain_height, Monero::NetworkType type) const;
+    bool has_metadata() const noexcept { return !description.empty() || !transfers.empty(); }
 
     /*! flat_map is used here for faster copies/merging. A single allocation
       is needed in the copy (done every refresh interval), instead of an
@@ -240,8 +274,11 @@ namespace lwsf { namespace internal { namespace backend
     // Everything uses `sync` for synchronization unless noted
 
     Monero::WalletListener* listener; //!< Use `sync_listener`
+    std::shared_ptr<websocket::stream> feed;
     boost::asio::io_context::strand strand; //<! useful in preventing contention on `sync` 
     http::client client;
+    std::function<void(std::error_code)> on_feed_refresh;
+    std::function<void(std::error_code)> on_feed_fail;
     account primary;
     std::string client_prefix;
     std::vector<std::uint64_t> per_byte_fee; //!< by priority level
@@ -252,17 +289,20 @@ namespace lwsf { namespace internal { namespace backend
     std::error_code lookahead_error; //!< warnings/errors of `server_lookahead` value
     std::error_code import_error; //!< Error from `import_wallet_request`
     std::chrono::steady_clock::time_point last_sync;
+    std::chrono::steady_clock::time_point last_fees;
     std::uint64_t blockchain_height;
     std::uint64_t fee_mask;
     config::lookahead server_lookahead; //!< Status of lookahead server-side
     mutable boost::mutex sync;
     boost::mutex sync_listener;
     boost::mutex sync_queue;
-    bool passed_login;
+    bool passed_login; //!< Reset to false to re-initialize all other values
     bool probed_lookahead; //!< True iff queries were done to determine lookahead re-sync
+    bool feed_disabled;
 
     wallet(boost::asio::io_context& io);
     ~wallet() noexcept;
+
 
     //! Extra guard against memory cycles
     void shutdown();
@@ -292,13 +332,14 @@ namespace lwsf { namespace internal { namespace backend
 
 
     // `sync` mutex is NOT acquired for this group
-
     cryptonote::network_type get_net_type() const;
     crypto::public_key get_spend_public(const rpc::address_meta& index) const;
     cryptonote::account_keys get_primary_keys() const;
     cryptonote::account_public_address get_spend_account(const rpc::address_meta& index) const;
     std::string get_spend_address(const rpc::address_meta& index) const;
     bool lookahead_good() const noexcept;
+    bool need_fees() const noexcept;
+    void update_fees(const rpc::get_unspent_outs_response& unspents);
 
     // End GROUP
 
@@ -309,6 +350,9 @@ namespace lwsf { namespace internal { namespace backend
 
     //! De-serialize `this` from msgpack. Locks+replaces contents.
     std::error_code from_bytes(epee::byte_slice source);
+
+    //! Do not hold `sync` or `sync_listener`
+    void add_pending_tx(std::shared_ptr<transaction> pending);
 
     // End GROUP
 
@@ -328,6 +372,9 @@ namespace lwsf { namespace internal { namespace backend
 
     //! Refreshes txes information. Strong exception guarantee.
     static void refresh(std::shared_ptr<wallet> self, bool mandatory, std::function<void(std::error_code)>);
+
+    //! Calls `get_unspent_outs` to update the fees when using websockets
+    static void get_fees(std::shared_ptr<wallet> self, std::function<void(std::error_code)>);
 
     //! Notify server that new major accounts need to be watched.
     static void register_subaccount(std::shared_ptr<wallet> self, std::uint32_t maj_i, std::function<void(std::error_code)> f);

@@ -34,6 +34,7 @@
 #include <boost/optional/optional.hpp>
 #include <boost/thread/locks.hpp>
 #include <boost/variant.hpp>
+#include <chrono>
 #include <ctime>
 #include <system_error>
 #include <type_traits>
@@ -49,6 +50,7 @@
 #include "wire/basic_value.h"
 #include "wire/fwd.h"
 #include "wire/json.h"
+#include "wire/msgpack/fwd.h"
 #include "wire/traits.h"
 
 namespace lwsf { namespace internal { namespace rpc
@@ -140,7 +142,7 @@ namespace lwsf { namespace internal { namespace rpc
     std::string address;
     crypto::secret_key view_key;
   };
-  void write_bytes(wire::json_writer&, const login&); 
+  void write_bytes(wire::writer&, const login&);
 
  
   struct login_request
@@ -179,6 +181,197 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::json_reader&, daemon_status&);
 
 
+  enum class feed_status : std::uint16_t
+  {
+    unspecified_error = 0,
+    account_not_found,
+    bad_address,
+    bad_view_key,
+    blockchain_reorg,
+    daemon_unresponsive,
+    parse_error,
+    protocol_error,
+    queue_error,
+    schema_error
+  };
+  WIRE_AS_INTEGER(feed_status);
+
+  struct feed
+  {
+    feed() = delete;
+    static constexpr const char* endpoint() noexcept { return "/feed"; }
+    static constexpr const char* protocol() noexcept { return "lws.feed.v0.msgpack"; }
+  };
+  void read_bytes(wire::json_reader&, const feed&);
+
+  struct feed_tx
+  { 
+    struct legacy_id
+    {
+      legacy_id() = delete;
+      std::uint64_t amount;
+      std::uint64_t index;
+    };
+
+    struct output_id { legacy_id legacy; };
+
+    struct receive
+    {
+      std::uint64_t amount;
+      output_id id;
+      address_meta recipient;
+      std::uint16_t index;
+      boost::optional<rct::key> rct;
+      crypto::public_key public_key;
+      crypto::public_key tx_pub_key;
+
+      receive() noexcept
+        : amount(0), id{}, recipient{}, index(0), rct(), public_key{}, tx_pub_key{}
+      {}
+
+      receive(std::uint64_t amount, const output_id& id, const address_meta& recipient, std::uint16_t index, const boost::optional<rct::key> rct, const crypto::public_key& public_key, const crypto::public_key& tx_pub_key) noexcept
+        : amount(amount), id(id), recipient(recipient), index(index), rct(rct), public_key(public_key), tx_pub_key(tx_pub_key)
+      {}
+    };
+
+    struct spend
+    {
+      output_id id;
+      crypto::key_image key_image;
+
+      spend() noexcept
+        : id{}, key_image{}
+      {}
+    };
+
+    std::vector<receive> receives;
+    std::vector<spend> spends;
+    std::uint64_t fee;
+    std::uint64_t unlock_time;
+    std::uint64_t height;
+    std::chrono::system_clock::time_point timestamp;
+    std::uint32_t mixin;
+    std::variant<empty, crypto::hash8, crypto::hash> payment_id;
+    crypto::hash hash;
+    crypto::hash prefix_hash;
+    bool coinbase;
+    bool mempool;
+
+    //! Hack because `boost/std::optional` sort left adjacent
+    static constexpr std::uint64_t txpool() noexcept { return std::uint64_t(-1); }
+
+    feed_tx()
+      : receives(),
+        spends(),
+        unlock_time(0),
+        height(),
+        timestamp(),
+        mixin(),
+        payment_id(),
+        hash{},
+        prefix_hash{},
+        coinbase(false),
+        mempool(false)
+    {}
+
+    boost::optional<std::uint64_t> get_height() const noexcept
+    { return boost::make_optional(height != txpool(), height); }
+  };
+  void read_bytes(wire::msgpack_reader&, feed_tx&);
+
+  inline constexpr bool operator==(const feed_tx::output_id& lhs, const feed_tx::output_id& rhs) noexcept
+  {
+    return lhs.legacy.index == rhs.legacy.index && lhs.legacy.amount == rhs.legacy.amount;
+  }
+  inline constexpr bool operator!=(const feed_tx::output_id& lhs, const feed_tx::output_id& rhs) noexcept
+  {
+    return lhs.legacy.index != rhs.legacy.index || lhs.legacy.amount != rhs.legacy.amount;
+  }
+  inline constexpr bool operator<(const feed_tx::output_id& lhs, const feed_tx::output_id& rhs) noexcept
+  {
+    return lhs.legacy.amount == rhs.legacy.amount ?
+      lhs.legacy.index < rhs.legacy.index : lhs.legacy.amount < rhs.legacy.amount;
+  }
+
+  struct feed_blocks
+  {
+    feed_blocks() = delete;
+    static constexpr const char* prefix() noexcept { return "blocks:"; }
+
+    std::vector<feed_tx> transactions;
+    std::uint64_t scan_start;
+    std::uint64_t scan_end;
+    std::uint64_t blockchain_height;
+    boost::optional<std::uint64_t> lookahead_fail;
+    address_meta lookahead;
+  };
+  void read_bytes(wire::msgpack_reader&, feed_blocks&);
+
+  struct feed_error
+  {
+    feed_error() = delete;
+    static constexpr const char* prefix() noexcept { return "error:"; }
+
+    std::string msg;
+    feed_status code;
+  };
+  void read_bytes(wire::msgpack_reader&, feed_error&);
+
+  struct feed_login
+  {
+    feed_login() = delete;
+    static constexpr const char* prefix() noexcept { return "login:"; }
+    login account;
+  };
+  void write_bytes(wire::msgpack_writer&, const feed_login&);
+
+  //! One specific output is sent per-message
+  struct feed_mempool
+  {
+    feed_mempool() = delete;
+    static constexpr const char* prefix() noexcept { return "mempool:"; }
+
+    std::uint64_t amount;
+    std::uint64_t fee;
+    std::uint64_t unlock_time;
+    address_meta recipient;
+    std::uint32_t mixin;
+    std::variant<empty, crypto::hash8, crypto::hash> payment_id;
+    boost::optional<rct::key> rct;
+    crypto::hash hash;
+    crypto::hash prefix_hash;
+    crypto::public_key public_key;
+    crypto::public_key tx_pub_key;
+    std::uint16_t index;
+  };
+  void read_bytes(wire::msgpack_reader&, feed_mempool&);
+
+  struct feed_tx_sync
+  {
+    feed_tx_sync() = delete;
+    static constexpr const char* prefix() noexcept { return "tx_sync:"; }
+
+    std::vector<feed_tx> transactions;
+    std::uint64_t scanned_block_height;
+    std::uint64_t start_height;
+    std::uint64_t blockchain_height;
+    boost::optional<std::uint64_t> lookahead_fail;
+    address_meta lookahead;
+  };
+  void read_bytes(wire::msgpack_reader&, feed_tx_sync&);
+
+  struct feed_warning
+  {
+    feed_warning() = delete;
+    static constexpr const char* prefix() noexcept { return "warning:"; }
+
+    std::string msg;
+    std::uint64_t height;
+    feed_status code;
+  };
+  void read_bytes(wire::msgpack_reader&, feed_warning&);
+
+
   enum class uint64_string : std::uint64_t {};
   void write_bytes(wire::json_writer&, uint64_string);
   void read_bytes(wire::json_reader&, uint64_string&); 
@@ -197,6 +390,14 @@ namespace lwsf { namespace internal { namespace rpc
         out_index(0),
         key_image{},
         tx_pub_key{}
+    {}
+
+    transaction_spend(const feed_tx::spend& spend, const feed_tx::receive& receive) noexcept
+      : amount(uint64_string(receive.amount)),
+        sender(receive.recipient),
+        out_index(receive.index),
+        key_image(spend.key_image),
+        tx_pub_key(receive.tx_pub_key)
     {}
   };
   void read_bytes(wire::json_reader&, transaction_spend&);
@@ -226,6 +427,24 @@ namespace lwsf { namespace internal { namespace rpc
         coinbase(false),
         mempool(false)
     {}
+
+    transaction(const feed_tx& src)
+      : spent_outputs(),
+        payment_id(src.payment_id),
+        timestamp(std::chrono::system_clock::to_time_t(src.timestamp)),
+        fee(uint64_string(src.fee)),
+        total_received(uint64_string(0)),
+        unlock_time(src.unlock_time),
+        height(src.get_height()),
+        hash(src.hash),
+        coinbase(src.coinbase),
+        mempool(src.mempool)
+    {
+      std::uint64_t total = 0;
+      for (const auto& received : src.receives)
+        total += received.amount;
+      total_received = uint64_string(total);
+    }
   };
   void read_bytes(wire::json_reader&, transaction&);
   
@@ -333,8 +552,6 @@ namespace lwsf { namespace internal { namespace rpc
 
   struct ringct
   {
-    ringct() = delete;
-
     enum class format : std::uint8_t
     {
       none = 0, //!< Not ringct
@@ -342,6 +559,19 @@ namespace lwsf { namespace internal { namespace rpc
       recompute,
       unencrypted
     };
+
+    ringct() noexcept
+      : mask{}, type(format::none)
+    {}
+
+    ringct(const rct::key& mask, const format type) noexcept
+      : mask(mask), type(type)
+    {}
+
+    ringct(const boost::optional<rct::key>& src) noexcept
+      : mask(src.value_or(rct::key{})),
+        type(bool(src) ? format::unencrypted : format::none)
+    {}
 
     rct::key mask;
     format type;
@@ -369,6 +599,30 @@ namespace lwsf { namespace internal { namespace rpc
         tx_prefix_hash{},
         public_key{},
         tx_pub_key{}
+    {}
+
+    output(const feed_mempool& src) noexcept
+      : amount(uint64_string(src.amount)),
+        global_index(uint64_string(std::numeric_limits<std::uint64_t>::max())),
+        recipient(src.recipient),
+        index(src.index),
+        rct(src.rct),
+        tx_hash(src.hash),
+        tx_prefix_hash(src.prefix_hash),
+        public_key(src.public_key),
+        tx_pub_key(src.tx_pub_key)
+    {}
+
+    output(const feed_tx::receive& src, const feed_tx& tx) noexcept
+      : amount(uint64_string(src.amount)),
+        global_index(uint64_string(src.id.legacy.index)),
+        recipient(src.recipient),
+        index(src.index),
+        rct(src.rct),
+        tx_hash(tx.hash),
+        tx_prefix_hash(tx.prefix_hash),
+        public_key(src.public_key),
+        tx_pub_key(src.tx_pub_key)
     {}
   };
   void read_bytes(wire::json_reader&, output&);

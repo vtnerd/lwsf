@@ -70,7 +70,11 @@ namespace internal
         void operator()(std::error_code error) const;
       };
 
-      bool thead_start();
+      struct async_clear_error
+      {
+        std::shared_ptr<frame> self;
+        void operator()(std::error_code) const;
+      };
     };
 
     const net::wallet_io data_;

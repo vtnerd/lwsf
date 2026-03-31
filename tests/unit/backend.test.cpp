@@ -39,6 +39,7 @@
 #include <boost/beast/http/read.hpp>
 #include <boost/beast/http/string_body.hpp>
 #include <boost/beast/http/write.hpp>
+#include <boost/beast/websocket/error.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/thread/lock_guard.hpp>
 #include <boost/thread/mutex.hpp>
@@ -56,9 +57,15 @@
 
 #include "hex.h"                    // monero/contrib/include
 #include "rapidjson/document.h"     // monero/external/rapidjson/include
+#include "rapidjson/error/en.h"     // monero/external/rapidjson/include
 #include "rapidjson/stringbuffer.h" // monero/external/rapidjson/incldue
 #include "rapidjson/writer.h"       // monero/external/rapidjson/incldue
 #include "ringct/rctOps.h"          // monero/src
+#include "net/http.h"
+#include "net/websocket.h"
+#include "net/push.test.h"
+#include "wire/adapted/crypto.h"
+#include "wire/msgpack.h"
 
 namespace rapidjson
 {
@@ -92,6 +99,73 @@ namespace
     return out;
   }
 
+  void to_msgpack(wire::msgpack_writer& dest, const rapidjson::Value& src)
+  {
+    switch (src.GetType())
+    {
+      default:
+      case rapidjson::kNullType:
+        throw std::logic_error{"unexpected json value - " + std::to_string(src.GetType())};
+      case rapidjson::kFalseType:
+        dest.boolean(false);
+        break;
+      case rapidjson::kTrueType:
+        dest.boolean(true);
+        break;
+      case rapidjson::kObjectType:
+        dest.start_object(src.MemberCount());
+        {
+          const auto end = src.MemberEnd();
+          for (auto cur = src.MemberBegin(); cur != end; ++cur)
+          {
+            dest.key({cur->name.GetString(), cur->name.GetStringLength()});
+            to_msgpack(dest, cur->value);
+          }
+        }
+        dest.end_object();
+        break;
+      case rapidjson::kArrayType:
+        dest.start_array(src.Size());
+        {
+          for (std::size_t i = 0; i < src.Size(); ++i)
+            to_msgpack(dest, src[i]);
+        }
+        dest.end_array();
+        break;
+      case rapidjson::kStringType:
+        {
+          std::string binary;
+          const boost::string_ref str{src.GetString(), src.GetStringLength()};
+          if (epee::from_hex::to_string(binary, str))
+            dest.binary(epee::to_byte_span(epee::to_span(binary)));
+          else
+            dest.string(str);
+        }
+        break;
+      case rapidjson::kNumberType:
+        if (src.IsUint()) dest.unsigned_integer(src.GetUint());
+        else if (src.IsUint64()) dest.unsigned_integer(std::uintmax_t(src.GetUint64()));
+        else if (src.IsInt()) dest.integer(src.GetInt());
+        else if (src.IsInt64()) dest.integer(std::intmax_t(src.GetInt64()));
+        else throw std::logic_error{"unexpected json number"};
+        break;
+    }
+  }
+
+  std::string to_msgpack(const std::string& src)
+  {
+    rapidjson::Document ir;
+    ir.Parse(src.c_str());
+    if (ir.HasParseError())
+      throw std::runtime_error{GetParseError_En(ir.GetParseError())};
+
+    wire::msgpack_slice_writer dest{};
+    to_msgpack(dest, ir);
+
+    const auto bytes = dest.take_sink();
+    return std::string{reinterpret_cast<const char*>(bytes.data()), bytes.size()};
+  }
+
   struct empty_slice
   {
     operator epee::byte_slice() const { return {}; }
@@ -102,21 +176,49 @@ namespace
     operator lwsf::internal::rpc::get_random_outs_request() const { return {}; }
   };
 
+  struct login
+  {
+    struct details
+    {
+      std::string address;
+      crypto::secret_key view_key;
+    };
+
+    details account;
+  };
+
+  void read_bytes(wire::reader& src, login::details& self)
+  {
+    wire::object(src, WIRE_FIELD(address), WIRE_FIELD(view_key));
+  }
+
+  void read_bytes(wire::reader& src, login& self)
+  {
+    wire::object(src, WIRE_FIELD(account));
+  }
+
   struct response_loop : boost::asio::coroutine
   {
     struct frame
     {
       lest::env& lest_env;
-      boost::asio::ip::tcp::socket server;
+      lwsf_test::net::push::socket server;
       boost::beast::flat_buffer buffer;
       boost::optional<client_request> request;
       boost::beast::http::response<boost::beast::http::string_body> response;
       std::deque<std::pair<std::string, std::string>> requests;
       std::deque<boost::variant<std::string, boost::beast::http::status>> responses;
+      std::shared_ptr<lwsf_test::net::push::connection> ws;
 
       explicit frame(lest::env& lest_env, boost::asio::io_context& io)
-        : lest_env(lest_env), server(io), buffer(), request(), response(), requests(), responses()
+        : lest_env(lest_env), server(io), buffer(), request(), response(), requests(), responses(), ws()
       {}
+
+      ~frame()
+      {
+        if (ws)
+          lwsf_test::net::push::async_close(std::move(ws));
+      }
     };
 
     std::shared_ptr<frame> self;
@@ -155,17 +257,33 @@ namespace
 
           {
             LWSF_VERIFY(!self->responses.empty());
-            const auto string = boost::get<std::string>(std::addressof(self->responses.front()));
-            if (string)
-              self->response = {boost::beast::http::status::ok, 11, *string};
-            else
-              self->response = {boost::get<boost::beast::http::status>(self->responses.front()), 11, ""};
+            boost::variant<std::string, boost::beast::http::status> response;
+            response.swap(self->responses.front());
+            self->responses.pop_front();
+            {
+              const auto string = boost::get<std::string>(std::addressof(response));
+              if (!string)
+              {
+                const auto status = boost::get<boost::beast::http::status>(response);
+                if (status == boost::beast::http::status::switching_protocols)
+                {
+                  auto self_ = self;
+                  lwsf_test::net::push::async_handshake(std::move(self->server), *self->request, [self_] (auto ws) {
+                    self_->ws = ws.value();
+                  });
+                  return;
+                }
+                else
+                  self->response = {status, 11, std::string{}};
+              }
+              else
+                self->response = {boost::beast::http::status::ok, 11, *string};
+            }
           }
           self->response.keep_alive(true);
           self->response.prepare_payload();
  
           BOOST_ASIO_CORO_YIELD boost::beast::http::async_write(self->server, self->response, *this);
-          self->responses.pop_front();
         }
       }
     }
@@ -250,7 +368,9 @@ namespace
           BOOST_ASIO_CORO_YIELD boost::beast::http::async_read(self->server, self->buffer, *self->request, *this);
 
           LWSF_VERIFY(self->request->keep_alive());
-          if (self->dist(self->eng))
+          if (self->request->target() == "/feed")
+            self->response = {boost::beast::http::status::not_found, 11, ""};
+          else if (self->dist(self->eng))
             self->response = {boost::beast::http::status::ok, 11, get_response(self->request->target())};
           else
             self->response = {boost::beast::http::status::internal_server_error, 11, ""};
@@ -264,7 +384,7 @@ namespace
   };
 }
 
-LWS_CASE("backend::acount")
+LWS_CASE("backend::account")
 {
   using subaddrs = lwsf::internal::rpc::subaddrs;
 
@@ -307,7 +427,7 @@ LWS_CASE("backend::acount")
   }
 }
 
-LWS_CASE("backend::wallet")
+LWS_CASE("backend::wallet (non-websocket)")
 {
   using bwallet = lwsf::internal::backend::wallet;
   using tcp = boost::asio::ip::tcp;
@@ -327,9 +447,10 @@ LWS_CASE("backend::wallet")
     SECTION("uninitialized http client")
     {
       using namespace std::placeholders;
-      const std::array<std::pair<std::function<void(std::function<void(std::error_code)>)>, std::string>, 5> funcs1
+      const std::array<std::pair<std::function<void(std::function<void(std::error_code)>)>, std::string>, 6> funcs1
       {{
         {std::bind(bwallet::refresh, wallet, true, _1), "refresh"},
+        {std::bind(bwallet::get_fees, wallet, _1), "get_fees"},
         {std::bind(bwallet::register_subaccount, wallet, 0, _1), "register_subaccount"},
         {std::bind(bwallet::register_subaddress, wallet, 0, 0, _1), "register_subaddress"},
         {std::bind(bwallet::set_lookahead, wallet, 0, 0, _1), "set_lookahead"},
@@ -338,13 +459,15 @@ LWS_CASE("backend::wallet")
 
       for (const auto& func : funcs1)
       {
+        const lest::ctx ctx{lest_env, func.second};
+
         std::error_code actual{};
         func.first([&] (auto result) { actual = result; });
 
         io.restart();
         io.run();
-        SECTION(func.second)
-          EXPECT(actual == common_error::kInvalidArgument);
+
+        EXPECT(actual == common_error::kInvalidArgument);
       }
 
       std::error_code actual = {};
@@ -542,10 +665,14 @@ LWS_CASE("backend::wallet")
         frame->requests = {
           {"/login", ""},
           {"/upsert_subaddrs", ""},
+          {"/feed", ""},
           {"/get_address_txs", ""}
         };
         frame->responses = {
-          R"({"new_address": true})", "", boost::beast::http::status::forbidden
+          R"({"new_address": true})",
+          "",
+          boost::beast::http::status::not_found,
+          boost::beast::http::status::forbidden
         };
 
         bool done2 = false;
@@ -570,6 +697,7 @@ LWS_CASE("backend::wallet")
         frame->requests = {
           {"/login", ""},
           {"/upsert_subaddrs", ""},
+          {"/feed", ""},
           {"/get_address_txs", ""},
           {"/get_unspent_outs", ""},
           {"/get_version", ""}
@@ -577,6 +705,7 @@ LWS_CASE("backend::wallet")
         frame->responses = {
           R"({"new_address": true})",
           "",
+          boost::beast::http::status::not_found,
           R"({
             "total_received": "5000",
             "scanned_height": 150,
@@ -664,11 +793,13 @@ LWS_CASE("backend::wallet")
       {
         frame->requests = {
           {"/login", ""},
+          {"/feed", ""},
           {"/get_address_txs", ""},
           {"/get_unspent_outs", ""},
         };
         frame->responses = {
           R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
+          boost::beast::http::status::not_found,
           R"({
             "total_received": "4000",
             "scanned_height": 175,
@@ -795,6 +926,7 @@ LWS_CASE("backend::wallet")
         frame->requests = {
           {"/login", ""},
           {"/upsert_subaddrs", upsert_body},
+          {"/feed", ""},
           {"/get_address_txs", ""},
           {"/get_unspent_outs", ""},
           {"/get_version", ""},
@@ -803,6 +935,7 @@ LWS_CASE("backend::wallet")
         frame->responses = {
           R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
           "",
+          boost::beast::http::status::not_found,
           R"({
             "total_received": "4000",
             "scanned_height": 175,
@@ -944,6 +1077,7 @@ LWS_CASE("backend::wallet")
         frame->requests = {
           {"/login", ""},
           {"/upsert_subaddrs", upsert_body},
+          {"/feed", ""},
           {"/get_address_txs", ""},
           {"/get_unspent_outs", ""},
           {"/get_version", ""},
@@ -953,6 +1087,7 @@ LWS_CASE("backend::wallet")
         frame->responses = {
           R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
           "",
+          boost::beast::http::status::not_found,
           R"({
             "total_received": "4000",
             "scanned_height": 175,
@@ -1097,6 +1232,7 @@ LWS_CASE("backend::wallet")
         frame->requests = {
           {"/login", ""},
           {"/upsert_subaddrs", upsert_body},
+          {"/feed", ""},
           {"/get_address_txs", ""},
           {"/get_unspent_outs", ""},
           {"/import_wallet_request", import_body}
@@ -1104,6 +1240,7 @@ LWS_CASE("backend::wallet")
         frame->responses = {
           R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
           "",
+          boost::beast::http::status::not_found,
           R"({
             "total_received": "4000",
             "scanned_height": 175,
@@ -1216,10 +1353,11 @@ LWS_CASE("backend::wallet")
       std::atomic<unsigned> count{0};
       const auto completed = [&] (auto) { ++count; };
 
-      const std::array<std::function<void()>, 8> rpcs
+      const std::array<std::function<void()>, 9> rpcs
       {{
         std::bind(bwallet::login_is_new, wallet, completed),
         std::bind(bwallet::refresh, wallet, true, completed),
+        std::bind(bwallet::get_fees, wallet, completed),
         std::bind(bwallet::register_subaccount, wallet, 1, completed),
         std::bind(bwallet::register_subaddress, wallet, 1, 0, completed),
         std::bind(bwallet::set_lookahead, wallet, 1, 1, completed),
@@ -1286,6 +1424,678 @@ LWS_CASE("backend::wallet")
       EXPECT(asio_fail == "");
       EXPECT(count == high_level_calls);
       EXPECT(!io.stopped());
+    }
+  }
+}
+
+LWS_CASE("backend::wallet /feed (websocket)")
+{
+  using bwallet = lwsf::internal::backend::wallet;
+  using tcp = boost::asio::ip::tcp;
+  const auto no_ssl = epee::net_utils::ssl_support_t::e_ssl_support_disabled;
+
+  SETUP("base empty wallet and basic server")
+  {
+    boost::asio::io_context io;
+    const auto wallet = std::make_shared<lwsf::internal::backend::wallet>(io);
+    crypto::generate_keys(wallet->primary.view.pub, wallet->primary.view.sec);
+    crypto::generate_keys(wallet->primary.spend.pub, wallet->primary.spend.sec);
+    wallet->primary.address = wallet->get_spend_address({0, 0});
+
+    tcp::acceptor acceptor{io, tcp::endpoint(tcp::v4(), 0)};
+    acceptor.listen();
+
+    const auto login_verify = [&] (std::string sub)
+    {
+      EXPECT(boost::string_view{sub}.starts_with("login:"));
+      sub.erase(0, std::strlen("login:"));
+
+      login user{};
+      EXPECT(wire::msgpack::from_bytes(epee::byte_slice{std::move(sub)}, user) == std::error_code{});
+      EXPECT(user.account.address == wallet->get_spend_address({0, 0}));
+      EXPECT(user.account.view_key == wallet->primary.view.sec);
+    };
+
+    const std::string upsert_body =
+      R"({"address":")" + wallet->get_spend_address({0, 0}) +
+      R"(","view_key":")" + to_hex(unwrap(unwrap(wallet->primary.view.sec))) +
+      R"(","subaddrs":[{"key":1,"value":[[0,2]]}],"get_all":false})";
+
+    const auto frame = std::make_shared<response_loop::frame>(lest_env, io);
+    const auto frame2 = std::make_shared<response_loop::frame>(lest_env, io);
+    wallet->client.init(io, "127.0.0.1", "", acceptor.local_endpoint().port(), no_ssl);
+
+    bool done = false;
+    std::size_t refreshed = 0;
+    std::error_code result{};
+    std::error_code ws_result{};
+    const auto record_response = [&] (auto val) { done = true; result = val; };
+    bwallet::refresh(wallet, true, record_response);
+
+    wallet->passed_login = false;
+    wallet->feed_disabled = false;
+    wallet->on_feed_fail = [&] (auto val) { ws_result = val; };
+    wallet->on_feed_refresh = [&] (auto err) { EXPECT(!err); ++refreshed; };
+    acceptor.async_accept(frame->server, response_loop{frame});
+
+    SECTION("feed is aborted during upgrade")
+    {
+      wallet->on_feed_fail = [&] (auto err) {
+        EXPECT(err == boost::system::error_code{boost::beast::websocket::error::upgrade_declined});
+        acceptor.async_accept(frame2->server, response_loop{frame2});
+      };
+
+      frame->requests = {
+        {"/login", ""},
+        {"/feed", ""},
+        {"/feed", ""}
+      };
+      frame->responses = {
+        R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
+        boost::beast::http::status::not_implemented,
+        boost::beast::http::status::not_found
+      };
+
+      frame2->requests = {{"/get_address_txs", ""}};
+      frame2->responses = {boost::beast::http::status::forbidden};
+
+      while (!done)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 0);
+      EXPECT(!wallet->on_feed_fail);
+      EXPECT(!wallet->on_feed_refresh);
+      EXPECT(frame->responses.size() == 0);
+      EXPECT(frame2->responses.size() == 0);
+      EXPECT(result == lwsf::error::approval);
+      EXPECT(!wallet->passed_login);
+      EXPECT(wallet->feed_disabled);
+      EXPECT(wallet->refresh_error == lwsf::error::approval);
+    }
+
+    SECTION("feed is aborted after upgrade")
+    {
+      wallet->on_feed_fail = [&] (auto err) {
+        EXPECT(err == lwsf::error::bad_feed_prefix);
+        acceptor.async_accept(frame2->server, response_loop{frame2});
+      };
+
+      const std::string error =R"({"msg": "account not found", "code": 1})";
+
+      frame->requests = {
+        {"/login", ""},
+        {"/feed", ""},
+        {"/feed", ""}
+      };
+      frame->responses = {
+        R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
+        boost::beast::http::status::not_implemented,
+        boost::beast::http::status::switching_protocols
+      };
+
+      while (!frame->ws)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 0);
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(frame->responses.size() == 0);
+      EXPECT(frame2->responses.size() == 0);
+      EXPECT(result == std::error_code{});
+      EXPECT(wallet->passed_login);
+      EXPECT(!wallet->feed_disabled);
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+
+      wallet->on_feed_refresh =
+        [&] (auto err) { EXPECT(err == lwsf::error::bad_feed_prefix); ++refreshed; };
+
+      lwsf_test::net::push::async_read(frame->ws, [&] (auto user) {
+        login_verify(user.value());
+        lwsf_test::net::push::async_pub(
+          frame->ws, "error:" + to_msgpack(error), [&] (auto err) { EXPECT(!err); }
+        );
+      });
+
+      frame2->requests = {{"/get_address_txs", ""}};
+      frame2->responses = {boost::beast::http::status::forbidden};
+
+      while (!done)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 1);
+      EXPECT(!wallet->on_feed_fail);
+      EXPECT(!wallet->on_feed_refresh);
+      EXPECT(frame->responses.size() == 0);
+      EXPECT(frame2->responses.size() == 0);
+      EXPECT(result == lwsf::error::approval);
+      EXPECT(!wallet->passed_login);
+      EXPECT(wallet->feed_disabled);
+      EXPECT(wallet->refresh_error == lwsf::error::approval);
+    }
+
+    SECTION("feed sync (no initial txes)")
+    {
+      rct::key ringct{};
+      lwsf::internal::backend::keypair tx_key{};
+      lwsf::internal::backend::keypair output_key{};
+      crypto::generate_keys(tx_key.pub, tx_key.sec);
+      const crypto::hash tx_hash = crypto::rand<crypto::hash>();
+      const crypto::hash prefix_hash = crypto::rand<crypto::hash>();
+      {
+        crypto::secret_key scalar{};
+        crypto::key_derivation derived{};
+        EXPECT(crypto::generate_key_derivation(tx_key.pub, wallet->primary.view.sec, derived));
+        EXPECT(crypto::derive_public_key(derived, 3, wallet->primary.spend.pub, output_key.pub));
+        crypto::derive_secret_key(derived, 3, wallet->primary.spend.sec, output_key.sec);
+
+        crypto::derivation_to_scalar(derived, 3, scalar);
+
+        rct::ecdhTuple commitment{};
+        rct::ecdhDecode(commitment, rct::sk2rct(scalar), true);
+        ringct = commitment.mask;
+      }
+
+      const std::string tx_sync =
+        R"({
+          "scanned_block_height": 950,
+          "start_height": 900,
+          "blockchain_height": 1000,
+          "lookahead": {"maj_i": 50, "min_i": 200}
+        })";
+
+      const std::string blocks =
+        R"({
+          "scan_start": 950,
+          "scan_end": 975,
+          "blockchain_height": 1001,
+          "transactions": [{
+            "hash": ")" + to_hex(tx_hash) + R"(",
+            "prefix_hash": ")" + to_hex(prefix_hash) + R"(",
+            "timestamp": 9000,
+            "fee": 105,
+            "unlock_time": 5000,
+            "height": 961,
+            "mixin": 16,
+            "receives": [{
+              "amount": 2566,
+              "public_key": ")" + to_hex(output_key.pub) + R"(",
+              "index": 3,
+              "id": {"legacy": {"amount": 0, "index": 1000}},
+              "tx_pub_key": ")" + to_hex(tx_key.pub) + R"(",
+              "rct": ")" + to_hex(ringct) + R"("
+            }]
+          }]
+        })";
+
+      const std::string warning = R"({"msg": "e", "height": 960, "code": 4})";
+
+      frame->requests = {
+        {"/login", ""},
+        {"/feed", ""},
+        {"/feed", ""}
+      };
+      frame->responses = {
+        R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
+        boost::beast::http::status::not_implemented,
+        boost::beast::http::status::switching_protocols
+      };
+
+      while (!frame->ws)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(!done);
+      EXPECT(refreshed == 0);
+      EXPECT(!wallet->feed_disabled);
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(frame->responses.size() == 0);
+      EXPECT(result == std::error_code{});
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->passed_login);
+
+      lwsf_test::net::push::async_read(frame->ws, [&] (auto user) {
+        login_verify(user.value());
+        lwsf_test::net::push::async_pub(
+          frame->ws, "tx_sync:" + to_msgpack(tx_sync), [&] (auto err) { EXPECT(!err); }
+        );
+      });
+
+      while (!done)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 1);
+      EXPECT(result == std::error_code{});
+      EXPECT(ws_result == std::error_code{});
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->primary.restore_height == 900);
+      EXPECT(wallet->primary.scan_height == 950);
+      EXPECT(wallet->primary.requested_start == 900);
+      EXPECT(wallet->blockchain_height == 1000);
+      EXPECT(wallet->primary.txes.empty());
+
+      lwsf_test::net::push::async_pub(
+        frame->ws, "blocks:" + to_msgpack(blocks), [&] (auto err) { EXPECT(!err); }
+      );
+
+      while (refreshed <= 1)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 2);
+      EXPECT(result == std::error_code{});
+      EXPECT(ws_result == std::error_code{});
+      EXPECT(!wallet->feed_disabled);
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->primary.restore_height == 900);
+      EXPECT(wallet->primary.scan_height == 975);
+      EXPECT(wallet->primary.requested_start == 900);
+      EXPECT(wallet->blockchain_height == 1001);
+      EXPECT(wallet->primary.txes.size() == 1);
+      EXPECT(wallet->primary.txes.count(tx_hash) == 1);
+      const auto tx = wallet->primary.txes.at(tx_hash);
+      EXPECT(tx != nullptr);
+      EXPECT(tx->spends.empty());
+      EXPECT(tx->receives.size() == 1);
+      EXPECT(tx->receives.count(output_key.pub) == 1);
+      const auto& in = tx->receives.at(output_key.pub);
+      EXPECT(in.global_index == 1000);
+      EXPECT(in.amount == 2566);
+      EXPECT(in.recipient == lwsf::internal::rpc::address_meta{});
+      EXPECT(in.index == 3);
+      EXPECT(bool(in.rct_mask));
+      EXPECT(in.rct_mask.value_or(rct::key{}) == ringct);
+      EXPECT(in.tx_pub == tx_key.pub);
+      EXPECT(tx->transfers.empty());
+      EXPECT(tx->description.empty());
+      EXPECT(bool(tx->timestamp));
+      EXPECT(tx->timestamp.value_or(std::chrono::system_clock::time_point{}) == std::chrono::system_clock::time_point{std::chrono::seconds{9000}});
+      EXPECT(bool(tx->height));
+      EXPECT(tx->height.value_or(0) == 961);
+      EXPECT(tx->amount == 2566);
+      EXPECT(tx->fee == 105);
+      EXPECT(tx->unlock_time == 5000);
+      EXPECT(tx->direction == Monero::TransactionInfo::Direction_In);
+      EXPECT(std::get_if<lwsf::internal::rpc::empty>(std::addressof(tx->payment_id)));
+      EXPECT(tx->id == tx_hash);
+      EXPECT(tx->prefix == prefix_hash);
+      EXPECT(tx->coinbase == false);
+      EXPECT(tx->failed == false);
+
+      lwsf_test::net::push::async_pub(
+        frame->ws, "warning:" + to_msgpack(warning), [&] (auto err) { EXPECT(!err); }
+      );
+
+      while (refreshed <= 2)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 3);
+      EXPECT(result == std::error_code{});
+      EXPECT(ws_result == std::error_code{});
+      EXPECT(!wallet->feed_disabled);
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->primary.restore_height == 900);
+      EXPECT(wallet->primary.scan_height == 960);
+      EXPECT(wallet->primary.requested_start == 900);
+      EXPECT(wallet->blockchain_height == 960);
+      EXPECT(wallet->primary.txes.empty());
+    }
+
+    SECTION("feed sync (initial txes)")
+    {
+      rct::key ringct{};
+      rct::key ringct2{};
+      crypto::key_image image{};
+      lwsf::internal::backend::keypair tx_key{};
+      lwsf::internal::backend::keypair tx_key2{};
+      lwsf::internal::backend::keypair output_key{};
+      lwsf::internal::backend::keypair output_key2{};
+      crypto::generate_keys(tx_key.pub, tx_key.sec);
+      crypto::generate_keys(tx_key2.pub, tx_key2.sec);
+      const crypto::hash8 pid = crypto::rand<crypto::hash8>();
+      const crypto::hash tx_hash = crypto::rand<crypto::hash>();
+      const crypto::hash tx_hash2 = crypto::rand<crypto::hash>();
+      const crypto::hash prefix_hash = crypto::rand<crypto::hash>();
+      const crypto::hash prefix_hash2 = crypto::rand<crypto::hash>();
+      {
+        crypto::secret_key scalar{};
+        crypto::key_derivation derived{};
+        EXPECT(crypto::generate_key_derivation(tx_key.pub, wallet->primary.view.sec, derived));
+        EXPECT(crypto::derive_public_key(derived, 0, wallet->primary.spend.pub, output_key.pub));
+        crypto::derive_secret_key(derived, 0, wallet->primary.spend.sec, output_key.sec);
+        crypto::generate_key_image(output_key.pub, output_key.sec, image);
+
+        crypto::derivation_to_scalar(derived, 0, scalar);
+
+        rct::ecdhTuple commitment{};
+        rct::ecdhDecode(commitment, rct::sk2rct(scalar), true);
+        ringct = commitment.mask;
+      }
+      {
+        crypto::secret_key scalar{};
+        crypto::key_derivation derived{};
+        EXPECT(crypto::generate_key_derivation(tx_key2.pub, wallet->primary.view.sec, derived));
+        EXPECT(crypto::derive_public_key(derived, 3, wallet->primary.spend.pub, output_key2.pub));
+        crypto::derive_secret_key(derived, 3, wallet->primary.spend.sec, output_key2.sec);
+
+        crypto::derivation_to_scalar(derived, 3, scalar);
+
+        rct::ecdhTuple commitment{};
+        rct::ecdhDecode(commitment, rct::sk2rct(scalar), true);
+        ringct2 = commitment.mask;
+      }
+
+      const std::string tx_sync =
+        R"({
+          "scanned_block_height": 1950,
+          "start_height": 900,
+          "blockchain_height": 11000,
+          "lookahead": {"maj_i": 50, "min_i": 200},
+          "transactions": [
+            {
+              "hash": ")" + to_hex(tx_hash) + R"(",
+              "prefix_hash": ")" + to_hex(prefix_hash) + R"(",
+              "timestamp": 7000,
+              "fee": 103,
+              "unlock_time": 4000,
+              "height": 1955,
+              "mixin": 16,
+              "receives": [{
+                "amount": 1366,
+                "public_key": ")" + to_hex(output_key.pub) + R"(",
+                "index": 0,
+                "id": {"legacy": {"amount": 0, "index": 1000}},
+                "tx_pub_key": ")" + to_hex(tx_key.pub) + R"(",
+                "rct": ")" + to_hex(ringct) + R"("
+              }]
+            },{
+              "hash": ")" + to_hex(tx_hash2) + R"(",
+              "prefix_hash": ")" + to_hex(prefix_hash2) + R"(",
+              "timestamp": 9000,
+              "payment_id": ")" + to_hex(pid) + R"(",
+              "fee": 105,
+              "unlock_time": 5000,
+              "height": 1961,
+              "mixin": 16,
+              "receives": [
+                {
+                  "amount": 566,
+                  "public_key": ")" + to_hex(output_key.pub) + R"(",
+                  "index": 0,
+                  "id": {"legacy": {"amount": 0, "index": 2000}},
+                  "tx_pub_key": ")" + to_hex(tx_key.pub) + R"(",
+                  "rct": ")" + to_hex(ringct) + R"("
+                },{
+                  "amount": 655,
+                  "public_key": ")" + to_hex(output_key2.pub) + R"(",
+                  "index": 3,
+                  "id": {"legacy": {"amount": 0, "index": 2001}},
+                  "tx_pub_key": ")" + to_hex(tx_key2.pub) + R"(",
+                  "rct": ")" + to_hex(ringct2) + R"("
+                }
+              ], "spends": [{
+                "id": {"legacy": {"amount": 0, "index": 1000}},
+                "key_image": ")" + to_hex(image) + R"("
+              }]
+            }
+          ]
+        })";
+
+      const std::string error = R"({"msg": "e", "code": 5})";
+
+      frame->requests = {
+        {"/login", ""},
+        {"/feed", ""},
+        {"/feed", ""}
+      };
+      frame->responses = {
+        R"({"new_address": true, "lookahead": {"maj_i": 50, "min_i": 200}})",
+        boost::beast::http::status::not_implemented,
+        boost::beast::http::status::switching_protocols
+      };
+
+      while (!frame->ws)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(!done);
+      EXPECT(refreshed == 0);
+      EXPECT(!wallet->feed_disabled);
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(frame->responses.size() == 0);
+      EXPECT(result == std::error_code{});
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->passed_login);
+
+      lwsf_test::net::push::async_read(frame->ws, [&] (auto user) {
+        login_verify(user.value());
+        lwsf_test::net::push::async_pub(
+          frame->ws, "tx_sync:" + to_msgpack(tx_sync), [&] (auto err) { EXPECT(!err); }
+        );
+      });
+
+      while (!done)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 1);
+      EXPECT(result == std::error_code{});
+      EXPECT(ws_result == std::error_code{});
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->primary.restore_height == 900);
+      EXPECT(wallet->primary.scan_height == 1950);
+      EXPECT(wallet->primary.requested_start == 900);
+      EXPECT(wallet->blockchain_height == 11000);
+      EXPECT(wallet->primary.txes.size() == 2);
+      EXPECT(wallet->primary.txes.count(tx_hash) == 1);
+      {
+        const auto tx = wallet->primary.txes.at(tx_hash);
+        EXPECT(tx != nullptr);
+        EXPECT(tx->spends.empty());
+        EXPECT(tx->receives.size() == 1);
+        EXPECT(tx->receives.count(output_key.pub) == 1);
+        const auto& in = tx->receives.at(output_key.pub);
+        EXPECT(in.global_index == 1000);
+        EXPECT(in.amount == 1366);
+        EXPECT(in.recipient == lwsf::internal::rpc::address_meta{});
+        EXPECT(in.index == 0);
+        EXPECT(bool(in.rct_mask));
+        EXPECT(in.rct_mask.value_or(rct::key{}) == ringct);
+        EXPECT(in.tx_pub == tx_key.pub);
+        EXPECT(tx->transfers.empty());
+        EXPECT(tx->description.empty());
+        EXPECT(bool(tx->timestamp));
+        EXPECT(tx->timestamp.value_or(std::chrono::system_clock::time_point{}) == std::chrono::system_clock::time_point{std::chrono::seconds{7000}});
+        EXPECT(bool(tx->height));
+        EXPECT(tx->height.value_or(0) == 1955);
+        EXPECT(tx->amount == 1366);
+        EXPECT(tx->fee == 103);
+        EXPECT(tx->unlock_time == 4000);
+        EXPECT(tx->direction == Monero::TransactionInfo::Direction_In);
+        EXPECT(std::get_if<lwsf::internal::rpc::empty>(std::addressof(tx->payment_id)));
+        EXPECT(tx->id == tx_hash);
+        EXPECT(tx->prefix == prefix_hash);
+        EXPECT(tx->coinbase == false);
+        EXPECT(tx->failed == false);
+      }
+      {
+        const auto tx = wallet->primary.txes.at(tx_hash2);
+        EXPECT(tx != nullptr);
+        EXPECT(tx->spends.size() == 1);
+        EXPECT(tx->spends.count(image) == 1);
+        const auto& out = tx->spends.at(image);
+        EXPECT(out.amount == 1366);
+        EXPECT(out.sender == lwsf::internal::rpc::address_meta{});
+        EXPECT(out.tx_pub == tx_key.pub);
+        EXPECT(out.output_pub == output_key.pub);
+        EXPECT(tx->receives.size() == 2);
+        EXPECT(tx->receives.count(output_key.pub) == 1);
+        EXPECT(tx->receives.count(output_key2.pub) == 1);
+        {
+          const auto& in = tx->receives.at(output_key.pub);
+          EXPECT(in.global_index == 2000);
+          EXPECT(in.amount == 566);
+          EXPECT(in.recipient == lwsf::internal::rpc::address_meta{});
+          EXPECT(in.index == 0);
+          EXPECT(bool(in.rct_mask));
+          EXPECT(in.rct_mask.value_or(rct::key{}) == ringct);
+          EXPECT(in.tx_pub == tx_key.pub);
+        }
+        {
+          const auto& in = tx->receives.at(output_key2.pub);
+          EXPECT(in.global_index == 2001);
+          EXPECT(in.amount == 655);
+          EXPECT(in.recipient == lwsf::internal::rpc::address_meta{});
+          EXPECT(in.index == 3);
+          EXPECT(bool(in.rct_mask));
+          EXPECT(in.rct_mask.value_or(rct::key{}) == ringct2);
+          EXPECT(in.tx_pub == tx_key2.pub);
+        }
+        EXPECT(tx->transfers.empty());
+        EXPECT(tx->description.empty());
+        EXPECT(bool(tx->timestamp));
+        EXPECT(tx->timestamp.value_or(std::chrono::system_clock::time_point{}) == std::chrono::system_clock::time_point{std::chrono::seconds{9000}});
+        EXPECT(bool(tx->height));
+        EXPECT(tx->height.value_or(0) == 1961);
+        EXPECT(tx->amount == 40);
+        EXPECT(tx->fee == 105);
+        EXPECT(tx->unlock_time == 5000);
+        EXPECT(tx->direction == Monero::TransactionInfo::Direction_Out);
+        EXPECT(std::get_if<crypto::hash8>(std::addressof(tx->payment_id)));
+        EXPECT(std::get<crypto::hash8>(tx->payment_id) == pid);
+        EXPECT(tx->id == tx_hash2);
+        EXPECT(tx->prefix == prefix_hash2);
+        EXPECT(tx->coinbase == false);
+        EXPECT(tx->failed == false);
+      }
+
+      wallet->on_feed_refresh =
+        [&] (auto err) { EXPECT(err == lwsf::error::feed); ++refreshed; };
+      lwsf_test::net::push::async_pub(
+        frame->ws, "error:" + to_msgpack(error), [&] (auto err) { EXPECT(!err); }
+      );
+
+      while (refreshed <= 1)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 2);
+      EXPECT(result == std::error_code{});
+      EXPECT(ws_result == std::error_code{});
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->primary.restore_height == 900);
+      EXPECT(wallet->primary.scan_height == 1950);
+      EXPECT(wallet->primary.requested_start == 900);
+      EXPECT(wallet->blockchain_height == 11000);
+      EXPECT(wallet->primary.txes.size() == 2);
+
+      acceptor.async_accept(frame2->server, response_loop{frame2});
+      frame2->requests = {{"/feed", ""}, {"/feed", ""}};
+      frame2->responses = {
+        boost::beast::http::status::not_implemented,
+        boost::beast::http::status::switching_protocols
+      };
+
+      while (!frame2->ws)
+      {
+        io.restart();
+        io.run_one();
+      }
+
+      EXPECT(refreshed == 2);
+      EXPECT(result == std::error_code{});
+      EXPECT(ws_result == std::error_code{});
+      EXPECT(wallet->on_feed_fail);
+      EXPECT(wallet->on_feed_refresh);
+      EXPECT(wallet->refresh_error == std::error_code{});
+      EXPECT(wallet->lookahead_error == std::error_code{});
+      EXPECT(wallet->subaddress_error == std::error_code{});
+      EXPECT(wallet->import_error == std::error_code{});
+      EXPECT(wallet->primary.restore_height == 900);
+      EXPECT(wallet->primary.scan_height == 1950);
+      EXPECT(wallet->primary.requested_start == 900);
+      EXPECT(wallet->blockchain_height == 11000);
+      EXPECT(wallet->primary.txes.size() == 2);
+    }
+
+    /*
+     * Websocket Cleanup
+     */
+
+    std::shared_ptr<lwsf::internal::websocket::stream> ws;
+    ws.swap(wallet->feed);
+    if (ws)
+    {
+      const std::size_t refreshed_count = refreshed;
+      wallet->on_feed_refresh = [&] (auto) { ++refreshed; };
+      lwsf::internal::websocket::async_close(std::move(ws));
+      lwsf_test::net::push::async_read(frame->ws, [] (auto) {});
+
+      while (refreshed_count == refreshed)
+      {
+        io.restart();
+        io.run_one();
+      }
     }
   }
 }

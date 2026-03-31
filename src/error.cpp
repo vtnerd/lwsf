@@ -40,12 +40,18 @@ namespace lwsf
       return "No error";
     case error::approval:
       return "Account needs approval on light-wallet-server";
+    case error::bad_feed_prefix:
+      return "Websocket prefix on '/feed' message was invalid";
     case error::configuration:
       return "Configuration issue";
     case error::create:
       return "Account creation not possible";
     case error::decryption:
       return "Unable to decrypt file (likely bad password)";
+    case error::feed:
+      return "Websocket '/feed' had error requiring resync";
+    case error::feed_missing_output:
+      return "Websocket '/feed' sent a spent without sending the receive";
     case error::import_fee:
       return "Import/restore from height needs payment, see address book";
     case error::import_invalid:
