@@ -51,6 +51,7 @@ namespace crypto
 
 namespace lwsf { namespace wire
 {
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::ec_point);
   LWSF_WIRE_DECLARE_BLOB_NS(crypto::ec_scalar);
   LWSF_WIRE_DECLARE_BLOB_NS(crypto::hash);
   LWSF_WIRE_DECLARE_BLOB_NS(crypto::hash8);

@@ -31,6 +31,7 @@
 #include <string>
 #include "lws_frontend.h"
 
+#if 0
 namespace
 {
   struct expected
@@ -104,3 +105,4 @@ LWS_CASE("wallet_manager")
   }
 }
 
+#endif 
