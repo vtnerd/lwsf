@@ -32,17 +32,19 @@
 #include <boost/container/flat_set.hpp>
 #include <boost/core/demangle.hpp>
 #include <boost/optional/optional.hpp>
-#include <boost/thread/locks.hpp>
-#include <boost/variant.hpp>
 #include <ctime>
+#include <optional>
 #include <system_error>
 #include <type_traits>
+#include <variant>
 #include <vector>
 #include "byte_slice.h"  // monero/contrib/epee/include
 #include "byte_stream.h" // moneor/contrib/epee/include
+#include "carrot_core/core_types.h" // monero/src
 #include "common/expect.h"   // monero/src
 #include "crypto/crypto.h"   // monero/src
 #include "error.h"
+#include "fcmp_pp/curve_trees.h" // monero/src
 #include "lwsf_config.h"
 #include "net/http.h"
 #include "ringct/rctTypes.h" // monero/src
@@ -186,7 +188,7 @@ namespace lwsf { namespace internal { namespace rpc
   struct transaction_spend
   {
     uint64_string amount;
-    boost::optional<address_meta> sender;
+    std::optional<address_meta> sender;
     std::uint16_t out_index;
     crypto::key_image key_image;
     crypto::public_key tx_pub_key;
@@ -205,11 +207,11 @@ namespace lwsf { namespace internal { namespace rpc
   {
     std::vector<transaction_spend> spent_outputs;
     std::variant<empty, crypto::hash8, crypto::hash> payment_id;
-    boost::optional<std::time_t> timestamp;
-    boost::optional<uint64_string> fee;
+    std::optional<std::time_t> timestamp;
+    std::optional<uint64_string> fee;
     uint64_string total_received;
     std::uint64_t unlock_time;
-    boost::optional<std::uint64_t> height;
+    std::optional<std::uint64_t> height;
     crypto::hash hash;
     bool coinbase;
     bool mempool;
@@ -235,7 +237,7 @@ namespace lwsf { namespace internal { namespace rpc
     static constexpr const char* endpoint() noexcept { return "/get_address_txs"; }
 
     std::vector<transaction> transactions;
-    boost::optional<std::uint64_t> lookahead_fail;
+    std::optional<std::uint64_t> lookahead_fail;
     std::uint64_t scanned_block_height;
     std::uint64_t start_height;
     std::uint64_t blockchain_height;
@@ -296,6 +298,43 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::json_reader&, get_random_outs_response&);
 
 
+  struct legacy_id
+  {
+    legacy_id() = delete;
+    std::uint64_t amount;
+    std::uint64_t index;
+  };
+
+  using composite_id = std::variant<std::uint64_t, legacy_id>;
+
+  struct get_tree_paths_request
+  {
+    get_tree_paths_request() = delete;
+    std::vector<composite_id> output_ids;
+  };
+  void write_bytes(wire::json_writer&, const get_tree_paths_request&);
+
+  struct path_response
+  {
+    fcmp_pp::CompressedPath path;
+    composite_id output_id;
+    std::uint64_t leaf_idx;
+  };
+
+  struct get_tree_paths_response
+  {
+    get_tree_paths_response() = delete;
+    static constexpr const char* endpoint() noexcept { return "/get_tree_paths"; }
+
+    std::vector<path_response> paths;
+    fcmp_pp::CompressedPath last_path;
+    std::uint64_t top_block_height;
+    std::uint64_t n_leaf_tuples;
+    crypto::hash top_block_hash;
+  };
+  void read_bytes(wire::json_reader&, get_tree_paths_response&);
+
+
   struct subaddrs
   {
     subaddrs() noexcept
@@ -351,13 +390,16 @@ namespace lwsf { namespace internal { namespace rpc
   {
     uint64_string amount;
     uint64_string global_index;
-    boost::optional<address_meta> recipient;
+    std::optional<address_meta> recipient;
     std::uint16_t index;
     ringct rct;
     crypto::hash tx_hash;	
     crypto::hash tx_prefix_hash;
     crypto::public_key public_key;
     crypto::public_key tx_pub_key;
+    std::optional<crypto::key_image> first_key_image; //!< `nullopt` if coinbase
+    std::optional<carrot::encrypted_janus_anchor_t> janus_enc;
+    bool unified;
 
     output() noexcept
       : amount(uint64_string(0)),
@@ -368,7 +410,8 @@ namespace lwsf { namespace internal { namespace rpc
         tx_hash{},
         tx_prefix_hash{},
         public_key{},
-        tx_pub_key{}
+        tx_pub_key{},
+        unified(false)
     {}
   };
   void read_bytes(wire::json_reader&, output&);
@@ -414,10 +457,10 @@ namespace lwsf { namespace internal { namespace rpc
     import_response& operator=(const import_response&) = delete;
     static constexpr const char* endpoint() noexcept { return "/import_wallet_request"; }
 
-    boost::optional<std::string> payment_address;
-    boost::optional<epee::byte_slice> payment_id;
-    boost::optional<uint64_string> import_fee;
-    boost::optional<address_meta> lookahead;
+    std::optional<std::string> payment_address;
+    std::optional<epee::byte_slice> payment_id;
+    std::optional<uint64_string> import_fee;
+    std::optional<address_meta> lookahead;
     std::string status;
     bool new_request;
     bool request_fulfilled;

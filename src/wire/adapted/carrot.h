@@ -1,4 +1,4 @@
-// Copyright (c) 2020, The Monero Project
+// Copyright (c) 2025, The Monero Project
 // All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without modification, are
@@ -29,36 +29,11 @@
 
 #include <type_traits>
 
-#include "crypto/crypto.h"   // monero/src
-#include "span.h"            // monero/contrib/include
-#include "ringct/rctTypes.h" // monero/src
+#include "carrot_core/core_types.h" // monero/src
 #include "wire/traits.h"
-
-namespace crypto
-{
-  template<typename R>
-  void read_bytes(R& source, crypto::secret_key& self)
-  {
-    source.binary(epee::as_mut_byte_span(unwrap(unwrap(self))), /* exact */ true);
-  }
-
-  template<typename W>
-  void write_bytes(W& dest, const crypto::secret_key& self)
-  {
-    dest.binary(epee::as_byte_span(unwrap(unwrap(self))));
-  }
-}
 
 namespace wire
 {
-  WIRE_DECLARE_BLOB_NS(crypto::ec_point);
-  WIRE_DECLARE_BLOB_NS(crypto::ec_scalar);
-  WIRE_DECLARE_BLOB_NS(crypto::hash);
-  WIRE_DECLARE_BLOB_NS(crypto::hash8);
-  WIRE_DECLARE_BLOB_NS(crypto::key_derivation);
-  WIRE_DECLARE_BLOB_NS(crypto::key_image);
-  WIRE_DECLARE_BLOB_NS(crypto::public_key);
-  WIRE_DECLARE_BLOB_NS(crypto::signature);
-  WIRE_DECLARE_BLOB_NS(crypto::view_tag);
-  WIRE_DECLARE_BLOB_NS(rct::key);
+  WIRE_DECLARE_BLOB_NS(carrot::encrypted_janus_anchor_t);
+  WIRE_DECLARE_BLOB_NS(carrot::view_tag_t);
 }

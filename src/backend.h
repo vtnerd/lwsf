@@ -32,7 +32,7 @@
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/strand.hpp>
 #include <boost/container/flat_map.hpp>
-#include <boost/optional/optional.hpp>
+#include <boost/thread/lock_guard.hpp>
 #include <boost/thread/mutex.hpp>
 #include <chrono>
 #include <cstdint>
@@ -41,6 +41,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <unordered_map>
 #include <type_traits>
 #include <variant>
@@ -58,6 +59,21 @@
 #include "ringct/rctTypes.h"   // monero/src
 #include "wallet/api/wallet2_api.h" // monero/src
 #include "wire/fwd.h"
+
+//! Runtime-check (assertion) for tx construction
+#define LWSF_TX_VERIFY(x) \
+  do                      \
+  {                       \
+    if (!(x))             \
+      throw std::logic_error{"Tx construction assertion failed (line " + std::to_string(__LINE__) + "): " + #x}; \
+  } while (0)
+
+namespace carrot
+{
+  struct CarrotEnoteV1;
+  struct CarrotSelectedInput;
+  struct CarrotTransactionProposalV1;
+}
 
 namespace lwsf { namespace internal { namespace backend
 {
@@ -132,8 +148,17 @@ namespace lwsf { namespace internal { namespace backend
     std::uint64_t amount;
     rpc::address_meta recipient;
     std::uint16_t index;
-    boost::optional<rct::key> rct_mask;
+    std::optional<rct::key> rct_mask;
+    std::optional<carrot::encrypted_janus_anchor_t> janus;
     crypto::public_key tx_pub;
+    bool unified; //<! False if `global_index` is legacy (within `amount`)
+
+    rpc::composite_id get_id() const noexcept
+    {
+      if (unified)
+        return global_index;
+      return rpc::legacy_id{rct_mask ? 0 : amount, global_index};
+    }
 
     transfer_in() noexcept
       : global_index(0),
@@ -141,7 +166,9 @@ namespace lwsf { namespace internal { namespace backend
         recipient{},
         index(0),
         rct_mask(),
-        tx_pub{}
+        janus(),
+        tx_pub{},
+        unified(false)
     {}
   };
   WIRE_DECLARE_OBJECT(transfer_in);
@@ -180,8 +207,8 @@ namespace lwsf { namespace internal { namespace backend
     boost::container::flat_map<crypto::public_key, transfer_in, memory> receives; //!< Key is output pub
     std::vector<transfer_out> transfers;
     std::string description;
-    boost::optional<std::chrono::system_clock::time_point> timestamp; //!< guaranteed to be unix epoch in C++20
-    boost::optional<std::uint64_t> height;
+    std::optional<std::chrono::system_clock::time_point> timestamp; //!< guaranteed to be unix epoch in C++20
+    std::optional<std::uint64_t> height;
     std::uint64_t amount;
     std::uint64_t fee;
     std::uint64_t unlock_time;
@@ -189,6 +216,7 @@ namespace lwsf { namespace internal { namespace backend
     std::variant<rpc::empty, crypto::hash8, crypto::hash> payment_id;
     crypto::hash id;
     crypto::hash prefix;
+    std::optional<crypto::key_image> first;
     bool coinbase;
     bool failed;
   };
@@ -217,7 +245,7 @@ namespace lwsf { namespace internal { namespace backend
 
     std::string address; //!< not serialized, recovered on read_bytes
     std::string language;
-    boost::optional<polyseed> poly;
+    std::optional<polyseed> poly;
     std::vector<address_book_entry> addressbook;
     std::vector<sub_account> subaccounts; //! Enabled major subaccounts. Index indicates `sub.major` value.
     std::unordered_map<crypto::hash, std::shared_ptr<transaction>> txes;
@@ -304,6 +332,15 @@ namespace lwsf { namespace internal { namespace backend
 
     // `sync` mutex IS acquired for this group Do not hold this mutex
 
+    bool try_scan(const carrot::CarrotEnoteV1& enote, crypto::public_key& spend);
+    carrot::CarrotSelectedInput get_input(const transaction& tx, const crypto::public_key& onetime);
+    std::shared_ptr<backend::transaction> make_tx(
+      carrot::CarrotTransactionProposalV1&& proposal,
+      const rpc::get_tree_paths_response& tree_init,
+      const std::optional<crypto::hash8>& pid,
+      std::uint32_t subaddr_account
+    );
+
     //! Serialize `this` wallet to msgpack. Locks contents.
     expect<epee::byte_slice> to_bytes() const;
 
@@ -349,6 +386,10 @@ namespace lwsf { namespace internal { namespace backend
     using decoys_callable = void(expect<std::vector<rpc::random_outputs>>);
     static void get_decoys(std::shared_ptr<wallet> self, rpc::get_random_outs_request&& req, std::function<decoys_callable> f);
 
+    using paths_callable = void(expect<rpc::get_tree_paths_response>);
+    static void get_tree_paths(std::shared_ptr<wallet> self, rpc::get_tree_paths_request&& req, std::function<paths_callable> f);
+
     static void send_tx(std::shared_ptr<wallet> slef, epee::byte_slice tx_bytes, std::function<void(std::error_code)> f);
   };
+
 }}} // lwsf // internal // backend
