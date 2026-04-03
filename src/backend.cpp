@@ -32,15 +32,30 @@
 #include <boost/asio/coroutine.hpp>
 #include <boost/numeric/conversion/cast.hpp>
 #include <boost/thread/lock_guard.hpp>
+#include "carrot_core/device_ram_borrowed.h"          // monero/src
+#include "carrot_core/enote_utils.h"                  // monero/src
+#include "carrot_core/scan.h"                         // monero/src
+#include "carrot_impl/address_device_ram_borrowed.h"  // monero/src
+#include "carrot_impl/format_utils.h"                 // monero/src
+#include "carrot_impl/key_image_device_composed.h"    // monero/src
+#include "carrot_impl/tx_builder_inputs.h"            // monero/src
+#include "carrot_impl/tx_builder_outputs.h"           // monero/src
+#include "carrot_impl/tx_proposal_utils.h"            // monero/src
+#include "common/apply_permutation.h"                 // monero/src
 #include "crypto/crypto.h"     // monero/src
 #include "crypto/crypto-ops.h" // monero/src
 #include "cryptonote_basic/cryptonote_basic_impl.h"   // monero/src
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "error.h"
+#include "fcmp_pp/curve_trees.h"                      // monero/src
+#include "fcmp_pp/tree_cache.h"                       // monero/src
 #include "hex.h"               // monero/src
 #include "lwsf_config.h"
+#include "numeric.h"
 #include "ringct/rctOps.h"
+#include "wallet/tx_builder.h" // monero/src
 #include "wire.h"
+#include "wire/adapted/carrot.h"
 #include "wire/adapted/crypto.h"
 #include "wire/adapted/pair.h"
 #include "wire/msgpack.h"
@@ -202,7 +217,9 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_FIELD(recipient),
         WIRE_FIELD(index),
         WIRE_OPTIONAL_FIELD(rct_mask),
-        WIRE_FIELD(tx_pub)
+        WIRE_OPTIONAL_FIELD(janus),
+        WIRE_FIELD(tx_pub),
+        WIRE_FIELD_DEFAULTED(unified, false)
       );
     }
 
@@ -239,13 +256,14 @@ namespace lwsf { namespace internal { namespace backend
         WIRE_OPTION("payment_id32", crypto::hash, payment_id),
         WIRE_FIELD(id),
         WIRE_FIELD(prefix),
+        WIRE_OPTIONAL_FIELD(first),
         WIRE_FIELD(coinbase),
         WIRE_FIELD_DEFAULTED(failed, false)
       );
 
       if constexpr (!std::is_const<T>())
       {
-        self.timestamp = boost::none;
+        self.timestamp = std::nullopt;
         if (timestamp)
           self.timestamp = time_point{time_point::duration{boost::numeric_cast<time_point::rep>(*timestamp)}};
       }
@@ -323,13 +341,15 @@ namespace lwsf { namespace internal { namespace backend
       out.recipient = source.recipient.value_or(rpc::address_meta{});
       out.index = source.index;
       out.tx_pub = source.tx_pub_key;
+      out.janus = source.janus_enc;
+      out.unified = source.unified;
 
       switch (source.rct.type)
       {
       default:
         throw std::runtime_error{"Unexpected ringct mask type"};
       case rpc::ringct::format::none:
-        out.rct_mask = boost::none;
+        out.rct_mask = std::nullopt;
         break;
       case rpc::ringct::format::encrypted:
       case rpc::ringct::format::recompute:
@@ -365,7 +385,7 @@ namespace lwsf { namespace internal { namespace backend
       }
     }
 
-    crypto::secret_key get_spend_secret(const account& self, const boost::optional<rpc::address_meta>& index)
+    crypto::secret_key get_spend_secret(const account& self, const std::optional<rpc::address_meta>& index)
     {
       if (!index || index->is_default())
         return self.spend.sec;
@@ -387,7 +407,7 @@ namespace lwsf { namespace internal { namespace backend
       return self.subaccounts[sub.maj_i].last < sub.min_i; // last is inclusive
     }
 
-    boost::optional<std::vector<rpc::address_meta>> update_tx(const account& self, transaction& out, const rpc::transaction& source)
+    std::optional<std::vector<rpc::address_meta>> update_tx(const account& self, transaction& out, const rpc::transaction& source)
     {
       /* Let `receives` and `spends` re-populate in `merge_output` and
         `update_spend` respectively. This works because the server supplies all
@@ -402,7 +422,7 @@ namespace lwsf { namespace internal { namespace backend
       if (source.timestamp)
         out.timestamp = std::chrono::system_clock::from_time_t(*source.timestamp);
       else
-        out.timestamp = boost::none;
+        out.timestamp = std::nullopt;
       out.fee = std::uint64_t(source.fee.value_or(rpc::uint64_string(0)));
       out.height = source.height;
       out.unlock_time = source.unlock_time;
@@ -442,7 +462,7 @@ namespace lwsf { namespace internal { namespace backend
       }
 
       if (!std::uint64_t(source.total_received) && !total_spent)
-        return boost::none; // used as decoy
+        return std::nullopt; // used as decoy
 
       if (out.fee <= total_spent)
         total_spent -= out.fee;
@@ -467,6 +487,9 @@ namespace lwsf { namespace internal { namespace backend
         throw std::logic_error{"nullptr transaction in merge_output"};
 
       out->prefix = source.tx_prefix_hash;
+      out->first = source.first_key_image;
+      if (source.janus_enc && !out->first && !out->coinbase)
+        return {}; // server sent invalid output
       return update_output(out->receives[source.public_key], source, view_key);
     }
 
@@ -474,7 +497,7 @@ namespace lwsf { namespace internal { namespace backend
     {
       std::vector<std::shared_ptr<transaction>> new_transactions;
       boost::container::flat_set<rpc::address_meta> new_subaddrs;
-      boost::optional<std::uint64_t> lookahead_fail;
+      std::optional<std::uint64_t> lookahead_fail;
 
       void merge_subaddr(const rpc::address_meta& meta)
       {
@@ -528,10 +551,10 @@ namespace lwsf { namespace internal { namespace backend
               iter->second = std::make_shared<transaction>(*tx.second);
               for (const auto& spend : tx.second->spends)
                 images.emplace(spend.first, iter->second);
-
+ 
               if (!rescanning)
               {
-                iter->second->height = boost::none;
+                iter->second->height = std::nullopt;
                 iter->second->failed = false;
               }
             }
@@ -889,6 +912,7 @@ namespace lwsf { namespace internal { namespace backend
       payment_id(),
       id{},
       prefix{},
+      first(),
       coinbase(false),
       failed(false)
   {}
@@ -908,6 +932,7 @@ namespace lwsf { namespace internal { namespace backend
       payment_id(rhs.payment_id),
       id(rhs.id),
       prefix(rhs.prefix),
+      first(rhs.first),
       coinbase(rhs.coinbase),
       failed(rhs.failed)
   {}
@@ -992,7 +1017,322 @@ namespace lwsf { namespace internal { namespace backend
   {
     return
       primary.lookahead.major <= server_lookahead.major &&
-      primary.lookahead.minor <= server_lookahead.minor; 
+      primary.lookahead.minor <= server_lookahead.minor;
+  }
+
+  carrot::CarrotSelectedInput wallet::get_input(const transaction& tx, const crypto::public_key& onetime)
+  {
+    const bool coinbase = tx.coinbase;
+    const std::uint64_t height = tx.height.value_or(0);
+    const auto& input = tx.receives.at(onetime);
+    const std::uint64_t amount = input.amount;
+
+    if (input.janus)
+    {
+      carrot::input_context_t context;
+      if (!coinbase)
+      {
+        LWSF_TX_VERIFY(tx.first);
+        context = carrot::make_carrot_input_context(*tx.first);
+      }
+      else
+        context = carrot::make_carrot_input_context_coinbase(height);
+
+      mx25519_pubkey shared_unctx{};
+      const auto tx_pub = carrot::raw_byte_convert<mx25519_pubkey>(input.tx_pub);
+
+      const boost::lock_guard<boost::mutex> lock{sync};
+      LWSF_TX_VERIFY(carrot::make_carrot_uncontextualized_shared_key_receiver(primary.view.sec, tx_pub, shared_unctx));
+
+      carrot::view_tag_t view_tag{};
+      carrot::make_carrot_view_tag(shared_unctx.data, context, onetime, view_tag);
+
+      std::optional<carrot::encrypted_payment_id_t> encrypted_pid;
+      const auto pid = std::get_if<crypto::hash8>(std::addressof(tx.payment_id));
+      if (pid)
+      {
+        crypto::hash shared_ctx{};
+        carrot::make_carrot_sender_receiver_secret(shared_unctx.data, tx_pub, context, shared_ctx);
+        encrypted_pid = carrot::encrypt_legacy_payment_id(carrot::raw_byte_convert<carrot::payment_id_t>(*pid), shared_ctx, onetime);
+      }
+
+      if (coinbase)
+      {
+        return {
+          amount,
+          carrot::CarrotCoinbaseOutputOpeningHintV1{
+            {onetime, amount, *input.janus, view_tag, tx_pub, height},
+            carrot::AddressDeriveType::PreCarrot
+          }
+        };
+      }
+
+      return {
+        amount,
+        carrot::CarrotOutputOpeningHintV2{
+          onetime,
+          input.rct_mask.value_or(rct::identity()),
+          *input.janus,
+          view_tag,
+          tx_pub,
+          *tx.first,
+          amount,
+          encrypted_pid,
+          {{input.recipient.maj_i, input.recipient.min_i}, carrot::AddressDeriveType::PreCarrot}
+        }
+      };
+    }
+    
+    return {
+      amount,
+      carrot::LegacyOutputOpeningHintV1{
+        onetime,
+        input.tx_pub,
+        {input.recipient.maj_i, input.recipient.min_i},
+        amount,
+        input.rct_mask.value_or(rct::identity()),
+        input.index
+      }
+    };
+  }
+
+  bool wallet::try_scan(const carrot::CarrotEnoteV1& enote, crypto::public_key& spend)
+  {
+    crypto::secret_key g;
+    crypto::secret_key t;
+    crypto::secret_key blinding;
+    rct::xmr_amount amount;
+    carrot::payment_id_t pid;
+    carrot::CarrotEnoteType type;
+    mx25519_pubkey shared{};
+    const auto tx_pub = carrot::raw_byte_convert<mx25519_pubkey>(enote.enote_ephemeral_pubkey);
+
+    const boost::lock_guard<boost::mutex> lock{sync};
+    const carrot::view_incoming_key_ram_borrowed_device view_device{primary.view.sec};
+    const epee::span<const crypto::public_key> main_address{std::addressof(primary.spend.pub), 1};
+    LWSF_TX_VERIFY(carrot::make_carrot_uncontextualized_shared_key_receiver(view_device, tx_pub, shared));
+
+    // find self-sends the hard-way
+    bool matched = 
+      carrot::try_scan_carrot_enote_external_receiver(
+        enote, std::nullopt, shared, main_address, view_device, g, t, spend, amount, blinding, pid, type 
+      );
+
+    if (!matched)
+    {
+      /* Enable when using view-balance keys!
+      matched = carrot::try_scan_carrot_enote_internal_receiver(
+        enote, *view_device, g, t, spend, amount, blinding, type, janus
+      ); */
+      if (!matched)
+        return false;
+    }
+    else // external self-send (expected with legacy keys)
+    {
+      const carrot::input_context_t context =
+        carrot::make_carrot_input_context(enote.tx_first_key_image);
+    }
+    return true;
+  }
+
+  std::shared_ptr<backend::transaction> wallet::make_tx(carrot::CarrotTransactionProposalV1&& proposal, const rpc::get_tree_paths_response& tree_init, const std::optional<crypto::hash8>& pid, const std::uint32_t subaddr_account)
+  {
+    cryptonote::network_type ctype{};
+    carrot::encrypted_payment_id_t enc_pid{};
+    std::vector<crypto::key_image> images;
+    std::vector<fcmp_pp::OutputPair> pairs;
+    std::vector<fcmp_pp::FcmpPpSalProof> proofs;
+    std::vector<FcmpRerandomizedOutputCompressed> rerandomized;
+    std::vector<carrot::RCTOutputEnoteProposal> enotes;
+    {
+      const boost::lock_guard<boost::mutex> lock{sync}; 
+      ctype = get_net_type();
+      const auto generate_image_device =
+        std::make_shared<::carrot::generate_image_key_ram_borrowed_device>(primary.spend.sec);
+      const auto view_device =
+        std::make_shared<carrot::cryptonote_view_incoming_key_ram_borrowed_device>(primary.view.sec);
+
+      const auto incoming_device =
+        std::make_shared<carrot::cryptonote_view_incoming_key_ram_borrowed_device>(primary.view.sec);
+      const auto generate_device =
+        std::make_shared<carrot::generate_address_secret_ram_borrowed_device>(primary.spend.sec);
+      const auto address_device =
+        std::make_shared<carrot::carrot_hierarchy_address_device>(generate_device, primary.spend.pub, primary.view.pub);
+      const carrot::key_image_device_composed image_composed{
+        generate_image_device, address_device, nullptr, view_device
+      };
+      const carrot::cryptonote_hierarchy_address_device cryptonote_device{
+        view_device, primary.spend.pub
+      };
+
+      crypto::hash tx_hash{};
+      carrot::make_signable_tx_hash_from_proposal_v1(
+        proposal, nullptr, view_device.get(), image_composed, tx_hash
+      );
+
+      std::vector<std::size_t> order;
+      carrot::get_sorted_input_key_images_from_proposal_v1(
+        proposal, image_composed, images, std::addressof(order)
+      );
+
+      LWSF_TX_VERIFY(!images.empty());
+      LWSF_TX_VERIFY(order.size() == images.size());
+      carrot:get_output_enote_proposals_from_proposal_v1(
+        proposal, nullptr, view_device.get(), images.at(0), enotes, enc_pid
+      );
+
+      std::vector<bool> biased;
+      std::vector<crypto::public_key> one_times;
+      std::vector<rct::key> commitments;
+      std::vector<rct::key> input_blinding;
+      std::vector<rct::key> output_blinding;
+
+      for (const auto& input : proposal.input_proposals)
+      {
+        biased.push_back(carrot::use_biased_hash_to_point(input));
+        one_times.push_back(onetime_address_ref(input));
+        commitments.push_back(amount_commitment_ref(input));
+        pairs.push_back(carrot::to_output_pair(input));
+
+        rct::xmr_amount amount;
+        carrot::try_scan_opening_hint_amount(
+          input,
+          {std::addressof(primary.spend.pub), 1},
+          view_device.get(),
+          nullptr,
+          amount,
+          input_blinding.emplace_back()
+        );
+      }
+
+      for (const auto& enote : enotes)
+        output_blinding.push_back(rct::sk2rct(enote.amount_blinding_factor));
+
+      carrot::make_carrot_rerandomized_outputs_nonrefundable(
+        one_times, commitments, biased, input_blinding, output_blinding, rerandomized
+      );
+
+      LWSF_TX_VERIFY(rerandomized.size() == proposal.input_proposals.size());
+      for (std::size_t i = 0; i < proposal.input_proposals.size(); ++i)
+      {
+        crypto::key_image ignored;
+        carrot::make_sal_proof_any_to_legacy_v1(
+          tx_hash, rerandomized.at(i), proposal.input_proposals.at(i), primary.spend.sec, cryptonote_device, proofs.emplace_back(), ignored
+        );
+      }
+
+      tools::apply_permutation(order, rerandomized);
+      tools::apply_permutation(order, pairs);
+      tools::apply_permutation(order, proofs);
+    } // release lock on `sync`
+
+    const auto tree = fcmp_pp::curve_trees::curve_trees_v1();
+    fcmp_pp::curve_trees::TreeCache cache(tree);
+
+    cache.init(tree_init.top_block_height, tree_init.top_block_hash, tree_init.n_leaf_tuples, tree_init.last_path, {});
+    for (const auto& path : tree_init.paths)
+    {
+      for (const auto& leaf : path.path.leaves)
+      {
+        if (cache.register_output(leaf.output_pair))
+          cache.force_add_output_path(leaf.output_pair, path.leaf_idx, path.path, tree_init.n_leaf_tuples);
+      }
+    }
+
+    const auto tx = tools::wallet::finalize_fcmps_and_range_proofs(
+      images, rerandomized, pairs, proofs, enotes, enc_pid, proposal.fee, cache, *tree
+    );
+
+    std::unordered_set<crypto::public_key> selfs;
+    for (const auto& self_send : proposal.selfsend_payment_proposals)
+      selfs.emplace(self_send.proposal.destination_address_spend_pubkey);
+
+    safe_uint64_t transfer_total{};
+    for (const auto& spend : proposal.normal_payment_proposals)
+      transfer_total += spend.amount;
+
+    auto details = std::make_shared<backend::transaction>();
+    details->raw_bytes = epee::byte_slice{cryptonote::t_serializable_object_to_blob(tx)};
+    details->timestamp = std::chrono::system_clock::now();
+    details->fee = get_tx_fee(tx);
+    details->amount = transfer_total;
+
+    details->direction = Monero::TransactionInfo::Direction_Out;
+    if (pid)
+      details->payment_id = *pid;
+    get_transaction_hash(tx, details->id);
+    get_transaction_prefix_hash(tx, details->prefix);
+
+    LWSF_TX_VERIFY(proposal.input_proposals.size() == tx.vin.size());
+    for (std::size_t i = 0; i < proposal.input_proposals.size(); ++i)
+    {
+      struct get_output_pub
+      {
+        crypto::public_key operator()(const carrot::LegacyOutputOpeningHintV1& src) const noexcept { return src.onetime_address; }
+        crypto::public_key operator()(const carrot::CarrotOutputOpeningHintV1& src) const noexcept { return src.source_enote.onetime_address; }
+        crypto::public_key operator()(const carrot::CarrotOutputOpeningHintV2& src) const noexcept { return src.onetime_address; }
+        crypto::public_key operator()(const carrot::CarrotCoinbaseOutputOpeningHintV1& src) const noexcept { return src.source_enote.onetime_address; }
+      };
+
+      auto spend = details->spends.try_emplace(boost::get<cryptonote::txin_to_key>(tx.vin.at(i)).k_image).first;
+      spend->second.output_pub = std::visit(get_output_pub{}, proposal.input_proposals.at(i));
+
+      std::shared_ptr<backend::transaction> source;
+      for (const auto& tx : primary.txes)
+      {
+        LWSF_TX_VERIFY(tx.second);
+        for (const auto& receive : tx.second->receives)
+        {
+          if (receive.first == spend->second.output_pub)
+          {
+            source = tx.second;
+            break;
+          }
+        }
+      }
+      LWSF_TX_VERIFY(source);
+      const auto& base = source->receives.at(spend->second.output_pub);
+      spend->second.sender = base.recipient;
+      spend->second.tx_pub = base.tx_pub;
+      spend->second.amount = base.amount;
+    }
+    
+    LWSF_TX_VERIFY(enotes.size() == tx.vout.size());
+    for (std::size_t i = 0; i < enotes.size(); ++i)
+    {
+      crypto::public_key destination{};
+      const auto& enote = enotes.at(i);
+      if (!try_scan(enote.enote, destination) || selfs.count(destination) == 0)
+        continue;
+  
+      details->first = enote.enote.tx_first_key_image;
+      auto receive = details->receives.try_emplace(enote.enote.onetime_address).first;
+      receive->second.global_index = std::numeric_limits<std::uint64_t>::max();
+      receive->second.amount = enote.amount;
+      receive->second.recipient = {subaddr_account, 0};
+      receive->second.index = i;
+      receive->second.rct_mask = rct::sk2rct(enote.amount_blinding_factor);
+      receive->second.tx_pub = carrot::raw_byte_convert<crypto::public_key>(enote.enote.enote_ephemeral_pubkey);
+      receive->second.janus = enote.enote.anchor_enc;
+    }
+
+    LWSF_TX_VERIFY(1 <= enotes.size());
+    for (const auto& payment : proposal.normal_payment_proposals)
+    {
+      const cryptonote::account_public_address dest{
+        payment.destination.address_spend_pubkey, payment.destination.address_view_pubkey
+      };
+      const std::string address = 
+        payment.destination.payment_id == carrot::payment_id_t{} ?
+          cryptonote::get_account_address_as_str(ctype, payment.destination.is_subaddress, dest) :
+          cryptonote::get_account_integrated_address_as_str(ctype, dest, carrot::raw_byte_convert<crypto::hash8>(payment.destination.payment_id));
+
+      const auto context = carrot::make_carrot_input_context(enotes.at(0).enote.tx_first_key_image);
+      details->transfers.emplace_back(address, payment.amount).secret =
+        carrot::get_enote_ephemeral_privkey(payment, context);
+    }
+
+    return details;
   }
 
   expect<epee::byte_slice> wallet::to_bytes() const
@@ -1495,7 +1835,7 @@ namespace lwsf { namespace internal { namespace backend
     const std::uint64_t from_height = self->primary.scan_height;
     restore_height(std::move(self), from_height, std::move(f));
   }
-
+ 
   void wallet::restore_height_raw(std::shared_ptr<wallet> self, const std::uint64_t height, std::function<void(expect<rpc::import_response>)> f)
   {
     struct frame
@@ -1670,6 +2010,52 @@ namespace lwsf { namespace internal { namespace backend
     handler{std::make_shared<frame>(std::move(self), std::move(req), std::move(f))}();
   }
 
+  void wallet::get_tree_paths(std::shared_ptr<wallet> self, rpc::get_tree_paths_request&& req, std::function<paths_callable> f)
+  {
+    struct frame
+    {
+      const std::weak_ptr<wallet> self;
+      const std::function<paths_callable> f;
+      const rpc::get_tree_paths_request request;
+      rpc::get_tree_paths_response response;
+
+      explicit frame(std::shared_ptr<wallet>&& self, rpc::get_tree_paths_request&& req, std::function<paths_callable>&& f)
+        : self(std::move(self)), f(std::move(f)), request(std::move(req)), response{}
+      {}
+    };
+
+    struct handler : boost::asio::coroutine
+    {
+      std::shared_ptr<frame> frame_;
+
+      explicit handler(std::shared_ptr<frame>&& in)
+        : frame_(std::move(in))
+      {}
+
+      void operator()(const std::error_code error = {})
+      {
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
+        wallet& self = *self_ptr;
+        BOOST_ASIO_CORO_REENTER(*this)
+        {
+          BOOST_ASIO_CORO_YIELD rpc::invoke_async(
+            self.client,
+            frame_->request,
+            std::addressof(frame_->response),
+            *this
+          );
+          if (error)
+            return frame_->f(error);
+          return frame_->f(std::move(frame_->response));
+        }
+      }
+    };
+
+    handler{std::make_shared<frame>(std::move(self), std::move(req), std::move(f))}();
+  }
+ 
   void wallet::send_tx(std::shared_ptr<wallet> self, epee::byte_slice tx_bytes, std::function<void(std::error_code)> f)
   {
     struct frame

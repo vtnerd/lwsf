@@ -48,11 +48,13 @@
 #include <string_view>
 #include "address_book.h"
 #include "backend.h"
+#include "carrot_impl/tx_proposal_utils.h"            // monero/src
 #include "common/expect.h"                            // monero/src
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "cryptonote_config.h"                        // monero/src
 #include "cryptonote_core/cryptonote_tx_utils.h"      // monero/src
 #include "error.h"
+#include "hardforks/hardforks.h"                       // monero/src
 #include "hex.h" // monero/contrib/epee/include
 #include "lwsf_config.h"
 #include "mnemonics/electrum-words.h" // monero/src
@@ -67,14 +69,6 @@
 #include "utils/encrypted_file.h"
 #include "wire.h"
 #include "wire/msgpack.h"
-
-//! Runtime-check (assertion) for tx construction
-#define LWSF_TX_VERIFY(x) \
-  do                      \
-  {                       \
-    if (!(x))             \
-      throw std::logic_error{"Tx construction assertion failed (line " + std::to_string(__LINE__) + "): " + #x}; \
-  } while (0)
 
 namespace lwsf { namespace internal
 { 
@@ -1302,6 +1296,7 @@ namespace lwsf { namespace internal
           Monero::NetworkType mtype{};
           std::uint64_t per_byte_fee = 0;
           std::uint64_t fee_mask = 0;
+          std::uint64_t height = 0;
           std::string change_address{};
           cryptonote::account_keys keys{};
           cryptonote::account_public_address change_account{};
@@ -1327,7 +1322,7 @@ namespace lwsf { namespace internal
             change_address = data_.wallet->get_spend_address({subaddr_account, 0});
             keys = data_.wallet->get_primary_keys();
             change_account = data_.wallet->get_spend_account({subaddr_account, 0});
-            const std::uint64_t height = data_.wallet->blockchain_height;
+            height = data_.wallet->blockchain_height;
 
             if (!amount && subaddr_indices.empty())
             {
@@ -1686,7 +1681,7 @@ namespace lwsf { namespace internal
 
               struct get_output_pub
               {
-                crypto::public_key operator()(const cryptonote::txout_to_script&) const noexcept { return {}; }
+                crypto::public_key operator()(const cryptonote::txout_to_carrot_v1& src) const noexcept { return src.key; }
                 crypto::public_key operator()(const cryptonote::txout_to_scripthash&) const noexcept { return {}; }
                 crypto::public_key operator()(const cryptonote::txout_to_key& src) const noexcept { return src.key; }
                 crypto::public_key operator()(const cryptonote::txout_to_tagged_key& src) const noexcept { return src.key; }
@@ -1748,6 +1743,113 @@ namespace lwsf { namespace internal
             }
             LWSF_TX_VERIFY(false); // this should be unreachable
           }; // end `gather_sources_and_construct_tx` lamda
+
+
+          // By copy to catch mutations (want each invoke to be consistent)
+          const auto construct_fcmp_tx = [=] (unspent_by_amount_map unspent_by_amount, const destinations_vector& dests, const std::string& extra_nonce)
+            -> std::shared_ptr<backend::transaction>
+          {
+            carrot::payment_id_t pid{};
+            std::optional<crypto::hash8> pid2;
+            if (extra_nonce.size() == sizeof(pid) + 1)
+            {
+              std::memcpy(std::addressof(pid), extra_nonce.data() + 1, sizeof(pid));
+              std::memcpy(std::addressof(pid2.emplace()), extra_nonce.data() + 1, sizeof(crypto::hash8));
+            }
+
+            std::vector<carrot::CarrotPaymentProposalV1> payments;
+            for (const auto& dest : dests)
+              payments.push_back({{dest.addr.m_spend_public_key, dest.addr.m_view_public_key, dest.is_subaddress, dest.is_integrated ? pid : carrot::payment_id_t{}}, dest.amount, carrot::gen_janus_anchor()});
+ 
+            rpc::get_tree_paths_request paths_req{};
+            carrot::CarrotTransactionProposalV1 proposal;
+            if (!subtract_from_dest)
+            {
+              using uint128_t = boost::multiprecision::uint128_t;
+              const auto select_inputs = [&] (
+                const uint128_t& transfer_total,
+                const std::map<std::size_t, rct::xmr_amount>& fees,
+                const std::size_t,
+                const std::size_t,
+                std::vector<carrot::CarrotSelectedInput>& inputs)
+                {
+                  paths_req.output_ids.clear();
+                  inputs.clear();
+
+                  for (uint128_t remaining = transfer_total;;)
+                  {
+                    if (unspent_by_amount.empty())
+                      throw_low_funds();
+
+                    const uint128_t needed =
+                      remaining + fees.at(inputs.size() + 1);
+                    const std::uint64_t truncated =
+                      needed <= std::numeric_limits<std::uint64_t>::max() ?
+                        needed.convert_to<std::uint64_t>() : std::numeric_limits<std::uint64_t>::max();
+
+                    auto output = unspent_by_amount.lower_bound({truncated, 0});
+                    if (output == unspent_by_amount.end())
+                      --output; 
+
+                    LWSF_TX_VERIFY(output->second.second);
+                    inputs.push_back(data_.wallet->get_input(*output->second.second, output->second.first));
+
+                    const auto& source = output->second.second->receives.at(output->second.first);
+                    paths_req.output_ids.push_back(source.get_id());
+                    unspent_by_amount.erase(output);
+                    if (needed <= source.amount)
+                      break;
+
+                    remaining -= std::min(remaining, uint128_t(source.amount));
+                  }
+                };
+
+              carrot::make_carrot_transaction_proposal_v1_transfer(
+                payments,
+                {},
+                per_byte_fee,
+                {},
+                select_inputs,
+                change_account.m_spend_public_key,
+                {{subaddr_account, 0}, carrot::AddressDeriveType::PreCarrot},
+                {}, 
+                {},
+                proposal
+              );
+            }
+            else
+            {
+              for (auto& payment : payments)
+                payment.amount = 0;
+
+              std::vector<carrot::CarrotSelectedInput> inputs;
+              for (const auto& input : unspent_by_amount)
+              {
+                LWSF_TX_VERIFY(input.second.second);
+                inputs.push_back(data_.wallet->get_input(*input.second.second, input.second.first));
+
+                const auto& source = input.second.second->receives.at(input.second.first);
+                paths_req.output_ids.push_back(source.get_id());
+              }
+
+              carrot::make_carrot_transaction_proposal_v1_sweep(
+                payments,
+                {},
+                per_byte_fee,
+                {},
+                std::move(inputs),
+                change_account.m_spend_public_key,
+                {{subaddr_account, 0}, carrot::AddressDeriveType::PreCarrot},
+                proposal
+              );
+            }
+
+            auto paths = wait_for<expect<rpc::get_tree_paths_response>>(
+              [this, &paths_req] (auto&& f) { backend::wallet::get_tree_paths(this->data_.wallet, std::move(paths_req), std::move(f)); }
+            );
+
+            return data_.wallet->make_tx(std::move(proposal), MONERO_UNWRAP(std::move(paths)), pid2, subaddr_account);
+          }; // end `construct_fcmp_tx` lambda
 
           const auto get_unspent_by_amount = [] (const unspent_map& unspent)
           {
@@ -1899,6 +2001,26 @@ namespace lwsf { namespace internal
             return out;
           };
 
+          const hardfork_t* fcmp_fork = nullptr;
+          switch (ctype)
+          {
+            case cryptonote::MAINNET:
+              if (HF_VERSION_FCMP_PLUS_PLUS <= num_mainnet_hard_forks)
+                fcmp_fork = std::addressof(mainnet_hard_forks[HF_VERSION_FCMP_PLUS_PLUS - 1]);
+              break;
+            case cryptonote::TESTNET:
+              if (HF_VERSION_FCMP_PLUS_PLUS <= num_testnet_hard_forks)
+                fcmp_fork = std::addressof(testnet_hard_forks[HF_VERSION_FCMP_PLUS_PLUS - 1]);
+              break;
+            case cryptonote::STAGENET:
+              if (HF_VERSION_FCMP_PLUS_PLUS <= num_stagenet_hard_forks)
+                fcmp_fork = std::addressof(stagenet_hard_forks[HF_VERSION_FCMP_PLUS_PLUS - 1]);
+              break;
+            default:
+              throw std::logic_error{"unsupported chain type"};
+          };
+
+          const bool do_fcmp = !fcmp_fork || fcmp_fork->height <= height;
           std::vector<std::shared_ptr<backend::transaction>> pending;
           while (!dests_flat.empty())
           {
@@ -1912,7 +2034,10 @@ namespace lwsf { namespace internal
             {
               try
               {
-                auto tx = gather_sources_and_construct_tx(unspent_by_amount, std::get<0>(dests), std::get<1>(dests), extra_nonce, min_fee);
+                auto tx = do_fcmp ?
+                  construct_fcmp_tx(unspent_by_amount, std::get<0>(dests), extra_nonce) :
+                  gather_sources_and_construct_tx(unspent_by_amount, std::get<0>(dests), std::get<1>(dests), extra_nonce, min_fee);
+
                 LWSF_TX_VERIFY(tx != nullptr);
                 for (const auto& spend : tx->spends)
                   unspent.erase(spend.second.output_pub);

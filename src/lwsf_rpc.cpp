@@ -39,18 +39,57 @@
 #include "ringct/rctOps.h"   // monero/contrib/epee/include
 #include "wire.h"
 #include "wire/adapted/array.h"
+#include "wire/adapted/carrot.h"
 #include "wire/adapted/crypto.h"
 #include "wire/field.h"
 #include "wire/json.h"
 #include "wire/traits.h"
+#include "wire/vector.h"
 #include "wire/wrapper/array.h"
 #include "wire/wrapper/defaulted.h"
 #include "wire/wrapper/trusted_array.h"
+#include "wire/wrapper/variant.h"
 #include "wire/wrappers_impl.h"
 
 #ifdef _WIN32
  #define timegm _mkgmtime
 #endif
+
+namespace
+{
+  using min_chunk_size = wire::min_element_sizeof<crypto::ec_point>;
+  using min_pair_size = wire::min_element_sizeof<crypto::public_key, rct::key>;
+  using min_path_size = wire::min_element_sizeof<crypto::ec_point, crypto::public_key, rct::key>;
+}
+
+namespace fcmp_pp
+{
+  template<typename T>
+  static void read_bytes(wire::json_reader& source, OutputPairTemplate<T>& self)
+  {
+    wire::object(source, WIRE_FIELD(output_pubkey), WIRE_FIELD(commitment));
+  }
+
+  static void read_bytes(wire::json_reader& source, UnifiedOutput& self)
+  {
+    auto pair = wire::variant(std::ref(self.output_pair));
+    wire::object(source,
+      WIRE_FIELD(unified_id),
+      WIRE_OPTION("legacy_pair", LegacyOutputPair, pair),
+      WIRE_OPTION("carrot_pair", CarrotOutputPairV1, pair)
+    );
+  }
+
+  static void read_bytes(wire::json_reader& source, CompressedChunk& self)
+  {
+    wire::object(source, WIRE_FIELD_ARRAY(elems, min_chunk_size));
+  }
+ 
+  static void read_bytes(wire::json_reader& source, CompressedPath& self)
+  {
+    wire::object(source, WIRE_FIELD_ARRAY(leaves, min_pair_size), WIRE_FIELD_ARRAY(layer_chunks, min_chunk_size));
+  }
+} // fcmp_pp
 
 namespace lwsf { namespace internal { namespace rpc
 {
@@ -233,6 +272,73 @@ namespace lwsf { namespace internal { namespace rpc
     wire::object(source, WIRE_FIELD_ARRAY(amount_outs, max_inputs));
   }
 
+  namespace
+  {
+    template<typename F, typename T>
+    void map_legacy(F& format, T& self)
+    {
+      wire::object(format, WIRE_FIELD(amount), WIRE_FIELD(index));
+    }
+  }
+
+  static void read_bytes(wire::json_reader& source, legacy_id& self)
+  {
+    map_legacy(source, self);
+  }
+
+  static void write_bytes(wire::json_writer& dest, const legacy_id& self)
+  {
+    map_legacy(dest, self);
+  }
+
+  namespace
+  {
+    template<typename F, typename T>
+    void map_unified(F& format, T& self)
+    {
+      auto id = wire::variant(std::ref(self));
+      wire::object(format,
+        WIRE_OPTION("legacy", legacy_id, id),
+        WIRE_OPTION("unified", std::uint64_t, id)
+      );
+    }
+  }
+
+  static void read_bytes(wire::json_reader& source, composite_id& self)
+  {
+    map_unified(source, self);
+  }
+
+  static void write_bytes(wire::json_writer& dest, const composite_id& self)
+  {
+    map_unified(dest, self);
+  }
+
+  void write_bytes(wire::json_writer& dest, const get_tree_paths_request& self)
+  {
+    wire::object(dest, WIRE_FIELD(output_ids));
+  }
+
+  static void read_bytes(wire::json_reader& source, path_response& self)
+  {
+    wire::object(source,
+      WIRE_FIELD(path),
+      WIRE_FIELD(output_id),
+      WIRE_FIELD(leaf_idx)
+    );
+  }
+
+  void read_bytes(wire::json_reader& source, get_tree_paths_response& self)
+  {
+    wire::object(source,
+      WIRE_FIELD_ARRAY(paths, min_path_size),
+      WIRE_FIELD(last_path),
+      WIRE_FIELD(top_block_height),
+      WIRE_FIELD(n_leaf_tuples),
+      WIRE_FIELD(top_block_hash)
+    );
+  }
+
 
   namespace
   {
@@ -410,7 +516,10 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD(tx_hash),
       WIRE_FIELD(tx_prefix_hash),
       WIRE_FIELD(public_key),
-      WIRE_FIELD(tx_pub_key)
+      WIRE_FIELD(tx_pub_key),
+      WIRE_OPTIONAL_FIELD(first_key_image),
+      WIRE_OPTIONAL_FIELD(janus_enc),
+      WIRE_FIELD_DEFAULTED(unified, false)
     );
     self.rct = std::visit(convert_rct{}, raw_rct.value);
   }
