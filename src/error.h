@@ -43,9 +43,12 @@ namespace lwsf
   {
     none = 0,           //!< Must be zero for `expect<..>`
     approval,           //!< Account needs approval
+    bad_feed_prefix,    //!< Websocket '/feed' received invalid prefix on msg
     configuration,      //!< Bad Configuration
     create,             //!< Account creation not possible
     decryption,         //!< Failed to decrypt data
+    feed,               //!< '/feed' websocket had error requiring restart
+    feed_missing_output,//!< '/feed' websocket sent spend without receive
     import_fee,         //!< `import_wallet_request` has fee
     import_invalid,     //!< `import_wallet_request` has invalid fee
     import_pending,     //!< `import_wallet_request` not fulfilled/approved

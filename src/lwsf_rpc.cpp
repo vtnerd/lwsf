@@ -34,6 +34,7 @@
 #include <boost/spirit/include/qi_parse_attr.hpp>
 #include <boost/spirit/include/qi_sequence.hpp>
 #include <ctime>
+#include <limits>
 #include "hex.h"             // monero/contrib/epee/include
 #include "lwsf_config.h"
 #include "ringct/rctOps.h"   // monero/contrib/epee/include
@@ -42,6 +43,7 @@
 #include "wire/adapted/crypto.h"
 #include "wire/field.h"
 #include "wire/json.h"
+#include "wire/msgpack.h"
 #include "wire/traits.h"
 #include "wire/wrapper/array.h"
 #include "wire/wrapper/defaulted.h"
@@ -59,7 +61,7 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::reader& source, empty&)
   { wire::object(source); }
 
-  void write_bytes(wire::json_writer& dest, const login& self)
+  void write_bytes(wire::writer& dest, const login& self)
   {
     wire::object(dest, WIRE_FIELD(address), WIRE_FIELD(view_key));
   }
@@ -92,8 +94,143 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD(height),
       WIRE_FIELD(target_height)
     );
-
   }
+
+  namespace
+  {
+    std::variant<empty, crypto::hash8, crypto::hash> make_payment_id(const boost::optional<epee::byte_slice>& payment_id)
+    {
+      if (payment_id && !payment_id->empty())
+      {
+        if (payment_id->size() == sizeof(crypto::hash8))
+        {
+          crypto::hash8 out{};
+          std::memcpy(std::addressof(out), payment_id->data(), sizeof(crypto::hash8));
+          return out;
+        }
+        else if (payment_id->size() == sizeof(crypto::hash))
+        {
+          crypto::hash out{};
+          std::memcpy(std::addressof(out), payment_id->data(), sizeof(crypto::hash));
+          return out;
+        }
+        else
+          WIRE_DLOG_THROW(wire::error::schema::fixed_binary, "Invalid payment_id size");
+      }
+
+      return empty{};
+    }
+  }
+
+  void read_bytes(wire::json_reader& source, const feed&)
+  { wire::object(source); }
+
+  static void read_bytes(wire::msgpack_reader& source, feed_tx::legacy_id& self)
+  { wire::object(source, WIRE_FIELD(amount), WIRE_FIELD(index)); }
+
+  static void read_bytes(wire::msgpack_reader& source, feed_tx::output_id& self)
+  { wire::object(source, WIRE_FIELD(legacy)); }
+
+  static void read_bytes(wire::msgpack_reader& source, feed_tx::receive& self)
+  {
+    static constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
+    static constexpr auto txpool = feed_tx::output_id{feed_tx::legacy_id{max, max}};
+    wire::object(source,
+      WIRE_FIELD(amount),
+      WIRE_FIELD_DEFAULTED(id, txpool),
+      WIRE_FIELD_DEFAULTED(recipient, address_meta{}),
+      WIRE_FIELD(index),
+      WIRE_OPTIONAL_FIELD(rct),
+      WIRE_FIELD(public_key),
+      WIRE_FIELD(tx_pub_key)
+    );
+  }
+
+  static void read_bytes(wire::msgpack_reader& source, feed_tx::spend& self)
+  { wire::object(source, WIRE_FIELD(id), WIRE_FIELD(key_image)); }
+
+  void read_bytes(wire::msgpack_reader& source, feed_tx& self)
+  {
+    using min_receive = wire::min_element_sizeof<crypto::public_key, crypto::public_key>;
+    using min_spend = wire::min_element_sizeof<crypto::key_image>;
+    using time_point = std::chrono::system_clock::time_point;
+
+    time_point::rep timestamp = 0;
+    boost::optional<epee::byte_slice> payment_id;
+
+    wire::object(source,
+      WIRE_FIELD_ARRAY(receives, min_receive),
+      WIRE_FIELD_ARRAY(spends, min_spend),
+      WIRE_FIELD(fee),
+      WIRE_FIELD(unlock_time),
+      WIRE_FIELD_DEFAULTED(height, feed_tx::txpool()),
+      wire::field("timestamp", std::ref(timestamp)),
+      WIRE_FIELD_DEFAULTED(mixin, std::numeric_limits<std::uint32_t>::max()),
+      wire::optional_field("payment_id", std::ref(payment_id)),
+      WIRE_FIELD(hash),
+      WIRE_FIELD(prefix_hash),
+      WIRE_FIELD_DEFAULTED(coinbase, false),
+      WIRE_FIELD_DEFAULTED(mempool, false)
+    );
+
+    self.payment_id = make_payment_id(payment_id);
+    self.timestamp = time_point{std::chrono::seconds{timestamp}};
+  }
+
+  using min_tx_size = wire::min_element_sizeof<crypto::public_key, crypto::public_key>;
+  void read_bytes(wire::msgpack_reader& source, feed_blocks& self)
+  {
+    wire::object(source,
+      WIRE_FIELD_ARRAY(transactions, min_tx_size),
+      WIRE_FIELD(scan_start),
+      WIRE_FIELD(scan_end),
+      WIRE_FIELD(blockchain_height),
+      WIRE_OPTIONAL_FIELD(lookahead_fail),
+      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
+    );
+  }
+
+  void read_bytes(wire::msgpack_reader& source, feed_error& self)
+  { wire::object(source, WIRE_FIELD(msg), WIRE_FIELD(code)); }
+
+  void write_bytes(wire::msgpack_writer& dest, const feed_login& self)
+  { wire::object(dest, WIRE_FIELD(account)); }
+
+  void read_bytes(wire::msgpack_reader& source, feed_mempool& self)
+  {
+    boost::optional<epee::byte_slice> payment_id;
+    wire::object(source,
+      WIRE_FIELD(amount),
+      WIRE_FIELD(fee),
+      WIRE_FIELD(unlock_time),
+      WIRE_FIELD_DEFAULTED(recipient, address_meta{}),
+      WIRE_FIELD_DEFAULTED(mixin, std::numeric_limits<std::uint32_t>::max()),
+      wire::optional_field("payment_id", std::ref(payment_id)),
+      WIRE_OPTIONAL_FIELD(rct),
+      WIRE_FIELD(hash),
+      WIRE_FIELD(prefix_hash),
+      WIRE_FIELD(public_key),
+      WIRE_FIELD(tx_pub_key),
+      WIRE_FIELD(index)
+    );
+
+    self.payment_id = make_payment_id(payment_id);
+  }
+
+  void read_bytes(wire::msgpack_reader& source, feed_tx_sync& self)
+  {
+    wire::object(source,
+      WIRE_FIELD_ARRAY(transactions, min_tx_size),
+      WIRE_FIELD(scanned_block_height),
+      WIRE_FIELD(start_height),
+      WIRE_FIELD(blockchain_height),
+      WIRE_OPTIONAL_FIELD(lookahead_fail),
+      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
+    );
+  }
+
+  void read_bytes(wire::msgpack_reader& source, feed_warning& self)
+  { wire::object(source, WIRE_FIELD(msg), WIRE_FIELD(height), WIRE_FIELD(code)); }
 
   void write_bytes(wire::json_writer& dest, const uint64_string source)
   {
@@ -147,26 +284,9 @@ namespace lwsf { namespace internal { namespace rpc
       WIRE_FIELD(mempool)
     );
 
-    if (payment_id && !payment_id->empty())
-    {
-      if (payment_id->size() == sizeof(crypto::hash8))
-      {
-        self.payment_id = crypto::hash8{};
-        std::memcpy(std::addressof(std::get<crypto::hash8>(self.payment_id)), payment_id->data(), sizeof(crypto::hash8));
-      }
-      else if (payment_id->size() == sizeof(crypto::hash))
-      {
-        self.payment_id = crypto::hash{};
-        std::memcpy(std::addressof(std::get<crypto::hash>(self.payment_id)), payment_id->data(), sizeof(crypto::hash));
-      }
-      else
-        WIRE_DLOG_THROW(wire::error::schema::fixed_binary, "Invalid payment_id size");
-    }
-    else
-      self.payment_id = empty{};
+    self.payment_id = make_payment_id(payment_id);
 
     self.timestamp.reset();
-
     if (timestamp)
     {
       //  %Y-%m-%dT%H:%M:%SZ
@@ -348,7 +468,6 @@ namespace lwsf { namespace internal { namespace rpc
   {
     wire::object(source, WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs));
   }
-
 
   namespace
   {

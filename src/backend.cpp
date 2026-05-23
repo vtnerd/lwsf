@@ -32,6 +32,8 @@
 #include <boost/asio/coroutine.hpp>
 #include <boost/numeric/conversion/cast.hpp>
 #include <boost/thread/lock_guard.hpp>
+#include <system_error>
+
 #include "crypto/crypto.h"     // monero/src
 #include "crypto/crypto-ops.h" // monero/src
 #include "cryptonote_basic/cryptonote_basic_impl.h"   // monero/src
@@ -39,6 +41,7 @@
 #include "error.h"
 #include "hex.h"               // monero/src
 #include "lwsf_config.h"
+#include "net/websocket.h"
 #include "ringct/rctOps.h"
 #include "wire.h"
 #include "wire/adapted/crypto.h"
@@ -387,6 +390,31 @@ namespace lwsf { namespace internal { namespace backend
       return self.subaccounts[sub.maj_i].last < sub.min_i; // last is inclusive
     }
 
+    boost::optional<crypto::public_key> is_real_spend(const account& self, const rpc::transaction_spend& source)
+    {
+      crypto::key_derivation derivation{};
+      if (!crypto::generate_key_derivation(source.tx_pub_key, self.view.sec, derivation))
+        return boost::none;
+
+      crypto::public_key spend_pub{};
+      const crypto::secret_key spend_sec = get_spend_secret(self, source.sender);
+      if (!crypto::secret_key_to_public_key(spend_sec, spend_pub))
+        return boost::none;
+
+      crypto::public_key output_pub{};
+      if (!crypto::derive_public_key(derivation, source.out_index, spend_pub, output_pub))
+        return boost::none;
+
+      crypto::secret_key output_secret{};
+      crypto::derive_secret_key(derivation, source.out_index, spend_sec, output_secret);
+
+      crypto::key_image image{};
+      crypto::generate_key_image(output_pub, output_secret, image);
+      if (source.key_image == image)
+        return output_pub;
+      return boost::none;
+    }
+
     boost::optional<std::vector<rpc::address_meta>> update_tx(const account& self, transaction& out, const rpc::transaction& source)
     {
       /* Let `receives` and `spends` re-populate in `merge_output` and
@@ -412,29 +440,12 @@ namespace lwsf { namespace internal { namespace backend
       std::uint64_t total_spent = 0; 
       for (const auto& spend : source.spent_outputs)
       {
-        crypto::key_derivation derivation{};
-        if (!crypto::generate_key_derivation(spend.tx_pub_key, self.view.sec, derivation))
-          continue;
-
-        crypto::public_key spend_pub{};
-        const crypto::secret_key spend_sec = get_spend_secret(self, spend.sender);
-        if (!crypto::secret_key_to_public_key(spend_sec, spend_pub))
-          continue;
-
-        crypto::public_key output_pub{};
-        if (!crypto::derive_public_key(derivation, spend.out_index, spend_pub, output_pub))
-          continue;
-
-        crypto::secret_key output_secret{};
-        crypto::derive_secret_key(derivation, spend.out_index, spend_sec, output_secret);
-
-        crypto::key_image image{};
-        crypto::generate_key_image(output_pub, output_secret, image);
-        if (image == spend.key_image)
+        const auto output_pub = is_real_spend(self, spend);
+        if (output_pub)
         {
           /* Frontend will typically know about spend before backend. So only
             merge and never erase spends. */
-          const rpc::address_meta sub = update_spend(out.spends.try_emplace(image).first->second, spend, output_pub);
+          const rpc::address_meta sub = update_spend(out.spends.try_emplace(spend.key_image).first->second, spend, *output_pub);
           if (need_expansion(self, sub))
             meta.push_back(sub);
           total_spent += std::uint64_t(spend.amount);
@@ -517,12 +528,9 @@ namespace lwsf { namespace internal { namespace backend
         {
           const bool rescanning =
             source.scanned_block_height < tx.second->height.value_or(0);
-          if (rescanning || !tx.second->description.empty() || !tx.second->transfers.empty())
+          if (rescanning || tx.second->has_metadata())
           {
-            const auto iter = updated_txes.emplace_hint(
-              updated_txes.end(), tx.first, nullptr
-            );
-
+            const auto iter = updated_txes.emplace(tx.first, nullptr).first;
             if (!iter->second)
             {
               iter->second = std::make_shared<transaction>(*tx.second);
@@ -610,15 +618,7 @@ namespace lwsf { namespace internal { namespace backend
       if (self.primary.restore_height <= self.primary.requested_start && !source.lookahead_fail) 
         self.import_error = {};
 
-      self.fee_mask = unspents.fee_mask;
-      if (unspents.fees.empty())
-      {
-        self.per_byte_fee.resize(1);
-        self.per_byte_fee[0] = unspents.per_byte_fee;
-      }
-      else
-        self.per_byte_fee = std::move(unspents.fees);
-
+      self.update_fees(unspents);
       return out;
     }
 
@@ -709,6 +709,447 @@ namespace lwsf { namespace internal { namespace backend
       runner();
     }
 
+    void notify_listener(Monero::WalletListener& listener, const std::uint64_t new_height, const std::uint64_t orig_height, const merge_results& merged)
+    {
+      listener.refreshed();
+      if (!merged.new_transactions.empty() || new_height - orig_height)
+        listener.updated();
+
+      for (std::uint64_t i = orig_height; i < new_height; ++i)
+        listener.newBlock(i);
+
+      for (const auto& tx : merged.new_transactions)
+      {
+        const auto txid = epee::string_tools::pod_to_hex(tx->id);
+        if (tx->direction == Monero::TransactionInfo::Direction_In)
+        {
+          if (tx->height)
+            listener.moneyReceived(txid, tx->amount);
+          else
+            listener.unconfirmedMoneyReceived(txid, tx->amount);
+        }
+        else
+          listener.moneySpent(txid, tx->amount);
+      }
+    }
+
+    class feed_loop
+    {
+      struct frame
+      {
+        std::weak_ptr<wallet> self;
+        std::weak_ptr<websocket::stream> ws;
+        merge_results* merged;
+        std::function<void(std::error_code)> on_sync;
+
+        explicit frame(std::shared_ptr<wallet> in, merge_results* merged, std::function<void(std::error_code)>&& on_sync)
+          : self(in), ws(in->feed), merged(merged), on_sync(std::move(on_sync))
+        {}
+      };
+
+      std::shared_ptr<frame> frame_;
+
+      /* Convert the simplified '/feed:tx_sync:' message to a split
+        '/get_address_txs' and '/get_unspent_outs' format. This way both legacy
+        and new syncing mechanisms use the same code. This slows down the new
+        sync, but keeps the legacy sync fast, which occurs more frequently. */
+      static expect<std::pair<rpc::get_address_txs, rpc::get_unspent_outs_response>> convert_to_legacy(rpc::feed_tx_sync src)
+      {
+        auto out = std::make_pair(rpc::get_address_txs{}, rpc::get_unspent_outs_response{});
+
+        out.first.lookahead_fail = src.lookahead_fail;
+        out.first.scanned_block_height = src.scanned_block_height;
+        out.first.start_height = src.start_height;
+        out.first.blockchain_height = src.blockchain_height;
+        out.first.lookahead = src.lookahead;
+
+        std::sort(
+          src.transactions.begin(), src.transactions.end(),
+          [] (const auto& lhs, const auto& rhs) 
+          {
+            static_assert(std::is_integral<decltype(lhs.height)>(), "optional types sort incorrectly");
+            return lhs.height < rhs.height;
+          }
+        );
+
+        std::map<rpc::feed_tx::output_id, rpc::feed_tx::receive> receives;
+        for (const auto& orig : src.transactions)
+        {
+          for (const auto& receive : orig.receives)
+          {
+            receives.emplace(receive.id, receive);
+            out.second.outputs.emplace_back(receive, orig);
+          }
+
+          auto& tx = out.first.transactions.emplace_back(orig);
+          for (const auto& orig_spend : orig.spends)
+          {
+            const auto receive = receives.find(orig_spend.id);
+            if (receive == receives.end())
+              return {error::feed_missing_output};
+            tx.spent_outputs.emplace_back(orig_spend, receive->second);
+          }
+        }
+
+        return out;
+      }
+
+      void on_error(wallet& self, boost::unique_lock<boost::mutex>& lock, const std::error_code error)
+      {
+        std::shared_ptr<websocket::stream> feed;
+        std::function<void(std::error_code)> on_sync;
+
+        LWSF_VERIFY(lock.owns_lock());
+        const std::function<void(std::error_code)> on_refresh{self.on_feed_refresh};
+        feed.swap(self.feed);
+        on_sync.swap(frame_->on_sync);
+
+        {
+          const boost::lock_guard<boost::mutex> lock_listener{self.sync_listener};
+          lock.unlock();
+          if (self.listener)
+            self.listener->refreshed();
+        }
+
+        MERROR("Error on websocket '/feed': " << error.message());
+        if (feed)
+          websocket::async_close(std::move(feed));
+
+        if (on_sync)
+          on_sync(self.refresh_error = error);
+        else
+          backend::wallet::refresh(frame_->self.lock(), true, [] (auto) {});
+
+        if (on_refresh)
+          on_refresh(error);
+      }
+
+      static std::string_view get_prefix(const epee::byte_slice& msg) noexcept
+      {
+        void const* const sep = std::memchr(msg.data(), u8':', msg.size());
+        if (!sep)
+          return {};
+        return {
+          reinterpret_cast<const char*>(msg.data()),
+          std::size_t(reinterpret_cast<const std::uint8_t*>(sep) - msg.data() + 1)
+        };
+      }
+
+      template<typename T>
+      static expect<T> unpack(epee::byte_slice&& msg)
+      {
+        const std::string_view prefix = get_prefix(msg);
+        if (prefix != T::prefix())
+          return {error::bad_feed_prefix};
+        msg.remove_prefix(prefix.size());
+
+        T out{};
+        const std::error_code error = wire::msgpack::from_bytes(std::move(msg), out);
+        if (error)
+          return error;
+        return out;
+      }
+
+      bool process(wallet& self, expect<rpc::feed_blocks>&& msg, boost::unique_lock<boost::mutex>& lock, merge_results& merged)
+      {
+        if (!msg)
+        {
+          on_error(self, lock, msg.error());
+          return false;
+        }
+
+        LWSF_VERIFY(lock.owns_lock());
+        std::map<rpc::feed_tx::output_id, std::shared_ptr<transaction>> receives;
+        std::unordered_map<crypto::hash, std::shared_ptr<transaction>> updated;
+        std::unordered_multimap<crypto::key_image, std::shared_ptr<transaction>> images;
+        updated.reserve(self.primary.txes.size() + msg->transactions.size());
+        for (const auto& tx : self.primary.txes)
+        {
+          auto elem = updated.try_emplace(tx.first, std::make_shared<transaction>(*tx.second));
+          for (const auto& receive : elem.first->second->receives)
+            receives.emplace(receive.second.get_output_id(), elem.first->second);
+          for (const auto& spend : elem.first->second->spends)
+            images.emplace(spend.first, elem.first->second);
+        }
+
+        for (const auto& new_tx : msg->transactions)
+        {
+          auto tx = updated.try_emplace(new_tx.hash, nullptr).first;
+          const bool is_new = !tx->second;
+          tx->second = std::make_shared<transaction>(new_tx, tx->second.get());
+          if (is_new)
+            merged.new_transactions.push_back(tx->second);
+
+          std::uint64_t receiving = 0;
+          for (const auto& receive : new_tx.receives)
+          {
+            receiving += receive.amount;
+            receives.emplace(receive.id, tx->second);
+            if (need_expansion(self.primary, receive.recipient))
+              merged.merge_subaddr(receive.recipient);
+          }
+
+          std::uint64_t spending = 0;
+          for (const auto& spend : new_tx.spends)
+          {
+            const auto receive = receives.find(spend.id);
+            if (receive == receives.end())
+            {
+              on_error(self, lock, error::feed_missing_output);
+              return false;
+            }
+
+            std::pair<crypto::public_key, transfer_in> const* output = nullptr;
+            for (const auto& existing : receive->second->receives)
+            {
+              if (existing.second.get_output_id() == spend.id)
+              {
+                output = std::addressof(existing);
+                break;
+              }
+            }
+
+            if (output == nullptr)
+            {
+              on_error(self, lock, error::feed_missing_output);
+              return false;
+            }
+
+            if (is_real_spend(self.primary, {spend, output->second.as_receive(output->first)}))
+            {
+              spending += output->second.amount;
+              tx->second->spends.try_emplace(spend.key_image, output->second, output->first);
+              auto failed = images.equal_range(spend.key_image);
+              for ( ; failed.first != failed.second; ++failed.first)
+                failed.first->second->failed = true;
+            }
+          }
+
+          if (receiving || spending)
+          {
+            if (new_tx.fee <= spending)
+              spending -= new_tx.fee;
+
+            if (tx->second->amount <= spending)
+            {
+              tx->second->direction = Monero::TransactionInfo::Direction_Out;
+              tx->second->amount = spending - tx->second->amount;
+            }
+            else
+            {
+              tx->second->direction = Monero::TransactionInfo::Direction_In;
+              tx->second->amount = tx->second->amount - spending;
+            }
+          }
+          else
+            updated.erase(new_tx.hash); // used solely as decoy in this tx
+        }
+
+        self.primary.txes.swap(updated);
+        merged.lookahead_fail = msg->lookahead_fail;
+        self.server_lookahead = {msg->lookahead.maj_i, msg->lookahead.min_i};
+        self.blockchain_height = std::max(self.blockchain_height, msg->blockchain_height);
+        self.primary.scan_height = std::max(self.primary.scan_height, msg->scan_end);
+        return true;
+      }
+
+      void process(wallet& self, expect<rpc::feed_error>&& msg, boost::unique_lock<boost::mutex>& lock)
+      {
+        if (!msg)
+          return on_error(self, lock, msg.error());
+        MERROR("Received websocket '/feed' error from server: " << msg->msg);
+        on_error(self, lock, error::feed);
+      }
+
+      bool process(wallet& self, expect<rpc::feed_mempool>&& msg, boost::unique_lock<boost::mutex>& lock, merge_results& merged)
+      {
+        if (!msg)
+        {
+          on_error(self, lock, msg.error());
+          return false;
+        }
+
+        LWSF_VERIFY(lock.owns_lock());
+        std::unordered_map<crypto::hash, std::shared_ptr<transaction>> updated;
+        for (const auto& tx : self.primary.txes)
+          updated.emplace(tx.first, std::make_shared<transaction>(*tx.second));
+
+        auto tx = updated.emplace(msg->hash, nullptr).first;
+        if (!tx->second)
+        {
+          tx->second = std::make_shared<transaction>(*msg);
+          merged.new_transactions.push_back(tx->second);
+          if (need_expansion(self.primary, msg->recipient))
+            merged.merge_subaddr(msg->recipient);
+
+          auto receive = tx->second->receives.try_emplace(msg->public_key);
+          if (receive.second)
+          {
+            tx->second->amount += msg->amount;
+            const auto sub = update_output(receive.first->second, *msg, self.primary.view.sec);
+            if (need_expansion(self.primary, sub))
+              merged.merge_subaddr(sub);
+          }
+        } // else we saw it because we spent it
+
+        self.primary.txes.swap(updated);
+        return true;
+      }
+
+      bool process(wallet& self, expect<rpc::feed_warning>&& msg, boost::unique_lock<boost::mutex>& lock)
+      {
+        if (!msg)
+        {
+          on_error(self, lock, msg.error());
+          return false;
+        }
+
+        MDEBUG("Received websocket '/feed' warning from server: " << msg->msg);
+        if (msg->code != rpc::feed_status::blockchain_reorg)
+          return false; // skip notifying wallet
+
+        LWSF_VERIFY(lock.owns_lock());
+        std::unordered_map<crypto::hash, std::shared_ptr<transaction>> updated;
+        for (const auto& tx : self.primary.txes)
+        {
+          LWSF_VERIFY(tx.second);
+          const bool by_height =
+            tx.second->height.value_or(std::numeric_limits<std::uint64_t>::max()) <= msg->height;
+          if (by_height || tx.second->has_metadata())
+          {
+            auto fresh = updated.emplace(tx.first, std::make_shared<transaction>(*tx.second));
+            if (!by_height)
+            {
+              fresh.first->second->timestamp = boost::none;
+              fresh.first->second->height = boost::none;
+              fresh.first->second->failed = false;
+            }
+          }
+        }
+
+        self.primary.txes.swap(updated);
+        self.blockchain_height = std::min(self.blockchain_height, msg->height);
+        self.primary.restore_height = std::min(self.primary.restore_height, msg->height);
+        self.primary.scan_height = std::min(self.primary.scan_height, msg->height);
+        return true;
+      }
+
+    public:
+      explicit feed_loop(std::shared_ptr<wallet> self, merge_results* merged, std::function<void(std::error_code)> on_sync)
+        : frame_(std::make_shared<frame>(std::move(self), merged, std::move(on_sync)))
+      {}
+
+      void operator()(std::error_code error = {}, copyable_slice incoming = {})
+      {
+        LWSF_VERIFY(frame_);
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
+        wallet& self = *self_ptr;
+
+        boost::unique_lock<boost::mutex> lock{self.sync};
+        auto ws = frame_->ws.lock();
+        if (ws.get() != self.feed.get()) // sketchy, relies on make_shared not freeing until weak_ptr closes
+        {
+          LWSF_VERIFY(!frame_->on_sync); // violation in `wallet::refresh`
+          if (ws)
+            websocket::async_close(std::move(ws));
+          return;
+        }
+
+        if (error)
+          return on_error(self, lock, error);
+ 
+        self.last_sync = std::chrono::steady_clock::now();
+        if (frame_->merged)
+        {
+          auto msg = unpack<rpc::feed_tx_sync>(std::move(incoming.data));
+          if (!msg)
+            return on_error(self, lock, msg.error());
+
+          const auto split = convert_to_legacy(std::move(*msg));
+          if (!split)
+            return on_error(self, lock, split.error());
+
+          const std::uint64_t orig_height = self.primary.scan_height;
+          msg = {error::feed}; // release memory
+          *frame_->merged = merge_response(self, split->first, split->second);
+
+          std::function<void(std::error_code)> on_sync;
+          on_sync.swap(frame_->on_sync);
+          const std::function<void(std::error_code)> on_refresh{self.on_feed_refresh};
+
+          const std::uint64_t new_height = std::max(self.primary.scan_height, orig_height);
+          const boost::lock_guard<boost::mutex> listener_lock{self.sync_listener};
+          lock.unlock();
+
+          if (self.listener)
+            notify_listener(*self.listener, new_height, orig_height, *frame_->merged);
+
+          frame_->merged = nullptr;
+          if (on_sync)
+            on_sync({});
+          if (on_refresh)
+            on_refresh({});
+        }
+        else
+        {
+          if (incoming.data.empty())
+            return on_error(self, lock, error::bad_feed_prefix);
+
+          merge_results merged{};
+          const std::uint64_t orig_height = self.primary.scan_height;
+          switch (incoming.data.data()[0])
+          {
+            default:
+              return on_error(self, lock, error::bad_feed_prefix);
+            case 'b':
+              if (process(self, unpack<rpc::feed_blocks>(std::move(incoming.data)), lock, merged))
+                break;
+              return;
+            case 'e':
+              return process(self, unpack<rpc::feed_error>(std::move(incoming.data)), lock);
+            case 'm':
+              if (process(self, unpack<rpc::feed_mempool>(std::move(incoming.data)), lock, merged))
+                break;
+              return;
+            case 'w':
+              if (process(self, unpack<rpc::feed_warning>(std::move(incoming.data)), lock))
+                break;
+              return;
+          }
+
+          const boost::lock_guard<boost::mutex> listener_lock{self.sync_listener};
+          LWSF_VERIFY(lock.owns_lock());
+          if (!self.listener && !self.on_feed_refresh)
+            return;
+
+          const std::function<void(std::error_code)> on_refresh{self.on_feed_refresh};
+          const std::uint64_t new_height = self.primary.scan_height;
+
+          lock.unlock();
+          if (self.listener)
+            notify_listener(*self.listener, new_height, orig_height, merged);
+          if (on_refresh)
+            on_refresh({});
+        }
+      }
+    };
+
+    template<typename T>
+    epee::byte_slice generate_feed_msg(const T& msg)
+    {
+      epee::byte_stream sink;
+
+      const std::string_view prefix = T::prefix();
+      sink.write(prefix.data(), prefix.size());
+
+      const std::error_code error = wire::msgpack::to_bytes(sink, msg);
+      if (error)
+        throw std::system_error{error, std::string{"Failed to create "} + T::prefix()};
+
+      return epee::byte_slice{std::move(sink)};
+    }
+
     //! Bind N arguments into a callback that takes zero arguments to run
     template<typename F, typename... T>
     struct binder 
@@ -733,14 +1174,14 @@ namespace lwsf { namespace internal { namespace backend
       F f_;
 
       template<typename... T>
-      void operator()(T... args)
+      void operator()(T... args) const
       {
         // Use `post` instead of `dispatch` due to locking in handlers
         const auto self = self_.lock();
         LWSF_VERIFY(self);
         boost::asio::post(
           self->strand,
-          binder<F, T...>{self, std::move(f_), std::tuple<T...>(std::move(args)...)}
+          binder<F, T...>{self, f_, std::tuple<T...>(std::move(args)...)}
         );
       }
     };
@@ -772,6 +1213,24 @@ namespace lwsf { namespace internal { namespace backend
       LWSF_VERIFY(self);
       boost::asio::post(self->strand, binder<F>{self, std::move(f)});
     }
+
+    template<typename T, typename F>
+    struct store_
+    {
+      T* out;
+      F f;
+
+      void operator()(const std::error_code error, T val)
+      {
+        LWSF_VERIFY(out);
+        *out = val;
+        f(error);
+      }
+    };
+
+    template<typename T, typename F>
+    store_<T, F> store(T* out, F f)
+    { return {out, std::move(f)}; }
   } // anonymous
 
   WIRE_DEFINE_OBJECT(address_book_entry, map_address_book_entry);
@@ -904,6 +1363,64 @@ namespace lwsf { namespace internal { namespace backend
       failed(false)
   {}
 
+  transaction::transaction(const rpc::feed_tx& src, const transaction* existing)
+    : raw_bytes(),
+      spends(),
+      receives(),
+      transfers(),
+      description(),
+      timestamp(src.timestamp),
+      height(src.get_height()),
+      amount(0),
+      fee(src.fee),
+      unlock_time(src.unlock_time),
+      direction(Monero::TransactionInfo::Direction_In),
+      payment_id(src.payment_id),
+      id(src.hash),
+      prefix(src.prefix_hash),
+      coinbase(src.coinbase),
+      failed(false)
+  {
+    for (const auto& receive : src.receives)
+    {
+      amount += receive.amount;
+      receives.try_emplace(receive.public_key, receive);
+    }
+
+    if (existing)
+    {
+      transfers = existing->transfers;
+      description = existing->description;
+    }
+  }
+
+  transaction::transaction(const rpc::feed_mempool& src)
+   : raw_bytes(),
+      spends(),
+      receives(),
+      transfers(),
+      description(),
+      timestamp(std::chrono::system_clock::now()),
+      height(),
+      amount(src.amount),
+      fee(src.fee),
+      unlock_time(src.unlock_time),
+      direction(Monero::TransactionInfo::Direction_In),
+      payment_id(src.payment_id),
+      id(src.hash),
+      prefix(src.prefix_hash),
+      coinbase(false),
+      failed(false) 
+  {
+    auto elem = receives.try_emplace(src.public_key).first;
+    elem->second.global_index = std::numeric_limits<std::uint64_t>::max();
+    elem->second.amount = src.amount;
+    elem->second.recipient = src.recipient;
+    elem->second.index = src.index;
+    elem->second.rct_mask = src.rct;
+    elem->second.tx_pub = src.tx_pub_key;
+  }
+
   transaction::transaction(const transaction& rhs)
     : raw_bytes(rhs.raw_bytes.clone()), // required because of this
       spends(rhs.spends),
@@ -936,8 +1453,11 @@ namespace lwsf { namespace internal { namespace backend
 
   wallet::wallet(boost::asio::io_context& io)
     : listener(nullptr),
+      feed(nullptr),
       strand(io),
       client{},
+      on_feed_refresh(nullptr),
+      on_feed_fail(nullptr),
       primary{},
       per_byte_fee(),
       login_queue(),
@@ -946,13 +1466,16 @@ namespace lwsf { namespace internal { namespace backend
       lookahead_error(default_subaddr_state),
       import_error(),
       last_sync(),
+      last_fees(),
       blockchain_height(0),
       fee_mask(0),
       server_lookahead{},
       sync(),
       sync_listener(),
       sync_queue(),
-      passed_login(false)
+      passed_login(false),
+      probed_lookahead(false),
+      feed_disabled(false)
   {
     prep_primary_account(primary.subaccounts.emplace_back());
   }
@@ -962,6 +1485,11 @@ namespace lwsf { namespace internal { namespace backend
   void wallet::shutdown()
   {
     client.shutdown();
+
+    const boost::lock_guard<boost::mutex> lock1{sync};
+    feed = nullptr;
+    on_feed_refresh = nullptr;
+    on_feed_fail = nullptr;
 
     const boost::lock_guard<boost::mutex> lock{sync_queue};
     login_queue.clear();
@@ -1017,6 +1545,24 @@ namespace lwsf { namespace internal { namespace backend
       primary.lookahead.minor <= server_lookahead.minor; 
   }
 
+  bool wallet::need_fees() const noexcept
+  {
+    return config::refresh_interval_min <= std::chrono::steady_clock::now() - last_fees;
+  }
+
+  void wallet::update_fees(const rpc::get_unspent_outs_response& unspents)
+  {
+    last_fees = std::chrono::steady_clock::now();
+    fee_mask = unspents.fee_mask;
+    if (unspents.fees.empty())
+    {
+      per_byte_fee.resize(1);
+      per_byte_fee[0] = unspents.per_byte_fee;
+    }
+    else
+      per_byte_fee = unspents.fees;
+  }
+
   expect<epee::byte_slice> wallet::to_bytes() const
   {
     epee::byte_stream dest{};
@@ -1043,6 +1589,26 @@ namespace lwsf { namespace internal { namespace backend
       blockchain_height = primary.scan_height;
     }
     return status;
+  }
+
+  void wallet::add_pending_tx(std::shared_ptr<transaction> pending)
+  {
+    const auto txid = epee::string_tools::pod_to_hex(pending->id);
+    const std::uint64_t amount = pending->amount;
+
+    {
+      const boost::lock_guard<boost::mutex> lock{sync};
+      auto entry = primary.txes.try_emplace(pending->id).first;
+      if (!entry->second)
+        entry->second = std::move(pending);
+    }
+    const boost::lock_guard<boost::mutex> lock{sync_listener};
+    if (!listener)
+      return;
+
+    listener->refreshed();
+    listener->updated();
+    listener->moneySpent(txid, amount);
   }
 
   void wallet::login_is_new(std::shared_ptr<wallet> self, std::function<void(expect<bool>)> f)
@@ -1095,6 +1661,10 @@ namespace lwsf { namespace internal { namespace backend
           self.subaddress_error = {};
           self.import_error = {}; 
           self.lookahead_error = self.lookahead_good() ? std::error_code{} :  error::subaddr_upgrade;
+          if (self.feed)
+            websocket::async_close(std::move(self.feed));
+          self.feed = nullptr;
+          self.feed_disabled = false;
 
           frame_->login = rpc::login_request{
             self.primary.address, self.primary.view.sec, self.primary.lookahead, true, self.primary.generated_locally
@@ -1179,6 +1749,7 @@ namespace lwsf { namespace internal { namespace backend
       rpc::get_subaddrs subaddrs;
       merge_results merged;
       std::uint64_t orig_scan_height;
+      rpc::feed feed;
       const bool mandatory;
 
       explicit frame(std::shared_ptr<wallet> in, const bool mandatory)
@@ -1190,6 +1761,7 @@ namespace lwsf { namespace internal { namespace backend
           subaddrs{},
           merged{},
           orig_scan_height(0),
+          feed{},
           mandatory(mandatory)
       {}
 
@@ -1244,6 +1816,57 @@ namespace lwsf { namespace internal { namespace backend
               return self.run(self.refresh_queue, self.refresh_error = error);
           }
 
+          if (!self.feed_disabled)
+          {
+            if (!self.feed)
+            {
+              BOOST_ASIO_CORO_YIELD rpc::invoke_async(
+                self.client, rpc::empty{}, &frame_->feed, wrap(self_ptr, *this)
+              );
+              if (error == http::error(501))
+              {
+  ws_connect:
+                BOOST_ASIO_CORO_YIELD self.client.ws_async(
+                  rpc::feed::endpoint(), rpc::feed::protocol(), store(&self.feed, wrap(self_ptr, *this))
+                );
+
+                if (!error && self.feed)
+                {
+                  // must hold lock to write `self.feed`, thus the frame
+                  BOOST_ASIO_CORO_YIELD websocket::async_subscribe(
+                    self.feed,
+                    generate_feed_msg(rpc::feed_login{rpc::login{self.primary.address, self.primary.view.sec}}),
+                    wrap(self_ptr, feed_loop{self_ptr, &frame_->merged, wrap(self_ptr, *this)})
+                  );
+                  if (!error)
+                    goto txs_merged;
+                }
+              }
+
+              if (self.feed)
+                websocket::async_close(std::move(self.feed));
+              self.feed = nullptr;
+              self.feed_disabled = true;
+              {
+                std::function<void(std::error_code)> on_feed_fail;
+                std::function<void(std::error_code)> on_feed_refresh;
+                on_feed_fail.swap(self.on_feed_fail);
+                on_feed_refresh.swap(self.on_feed_refresh);
+                if (on_feed_fail)
+                  on_feed_fail(error);
+              }
+            }
+            else // existing websocket stream to '/feed'
+            {
+              // ping should be quick, server doesn't hit disk, etc
+              BOOST_ASIO_CORO_YIELD websocket::async_ping(self.feed, wrap(self_ptr, *this));
+              if (!error)
+                return self.run(self.refresh_queue, self.refresh_error);
+              self.feed = nullptr;
+              goto ws_connect;
+            }
+          }
+
           frame_->orig_scan_height = self.primary.scan_height;
           frame_->login = rpc::login{self.primary.address, self.primary.view.sec};
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(
@@ -1273,7 +1896,7 @@ namespace lwsf { namespace internal { namespace backend
 
           // Remember that this function provides the strong exception guarantee.
           frame_->merged = merge_response(self, frame_->txs_response, frame_->outs_response);
-
+  txs_merged:
           if (!self.import_error && self.primary.requested_start < self.primary.restore_height)
           {
             BOOST_ASIO_CORO_YIELD restore_height(
@@ -1342,29 +1965,10 @@ namespace lwsf { namespace internal { namespace backend
             std::max(frame_->orig_scan_height, self.primary.scan_height);
           lock.unlock();
 
-          self.listener->refreshed();
-          const auto& merged = frame_->merged;
-          if (!merged.new_transactions.empty() || new_scan_height - frame_->orig_scan_height)
-            self.listener->updated();
-
-          for (std::uint64_t i = frame_->orig_scan_height; i < new_scan_height; ++i)
-            self.listener->newBlock(i);
-
-          for (const auto& tx : merged.new_transactions)
-          {
-            const auto txid = epee::string_tools::pod_to_hex(tx->id);
-            if (tx->direction == Monero::TransactionInfo::Direction_In)
-            {
-              if (tx->height)
-                self.listener->moneyReceived(txid, tx->amount);
-              else
-                self.listener->unconfirmedMoneyReceived(txid, tx->amount);
-            }
-            else
-              self.listener->moneySpent(txid, tx->amount);
-          }
+          notify_listener(*self.listener, new_scan_height, frame_->orig_scan_height, frame_->merged);
 
           self.run(self.refresh_queue, rc);
+          frame_->self.reset(); // prevent re-invoking listener
         }
       }
     };
@@ -1372,6 +1976,65 @@ namespace lwsf { namespace internal { namespace backend
     LWSF_VERIFY(self);
     if (self->push(self->refresh_queue, std::move(f)))
       post(self, handler{std::make_shared<frame>(self, mandatory)});
+  }
+
+  void wallet::get_fees(std::shared_ptr<wallet> self, std::function<void(std::error_code)> f)
+  {
+    struct frame
+    {
+      std::weak_ptr<wallet> self;
+      rpc::get_unspent_outs_response response;
+      const std::function<void(std::error_code)> f;
+
+      explicit frame(std::shared_ptr<wallet> in, std::function<void(std::error_code)>&& f)
+        : self(std::move(in)),
+          response{},
+          f(std::move(f))
+      {}
+    };
+
+    struct handler : boost::asio::coroutine
+    {
+      std::shared_ptr<frame> frame_;
+
+      explicit handler(std::shared_ptr<frame> in)
+        : boost::asio::coroutine(), frame_(std::move(in))
+      {}
+
+      void operator()(const std::error_code error = {})
+      {
+        LWSF_VERIFY(frame_ && frame_->f);
+        if (error)
+          return frame_->f(error);
+
+        const auto self_ptr = frame_->self.lock();
+        LWSF_VERIFY(self_ptr);
+        wallet& self = *self_ptr;
+        assert(self.strand.running_in_this_thread());
+        const boost::lock_guard<boost::mutex> lock{self.sync};
+        BOOST_ASIO_CORO_REENTER(*this)
+        {
+          if (!self.need_fees())
+            return frame_->f(error);
+
+          if (!self.passed_login)
+            BOOST_ASIO_CORO_YIELD login(self_ptr, wrap(self_ptr, *this));
+
+          BOOST_ASIO_CORO_YIELD rpc::invoke_async(
+            self.client,
+            rpc::get_unspent_outs_request{rpc::login{self.primary.address, self.primary.view.sec}, rpc::uint64_string(0), 0, true},
+            &frame_->response,
+            wrap(self_ptr, *this)
+          );
+
+          self.update_fees(frame_->response);
+          frame_->f(error);
+        }
+      }
+    };
+
+    LWSF_VERIFY(self && f);
+    post(self, handler{std::make_shared<frame>(self, std::move(f))});
   }
 
   void wallet::register_subaccount(std::shared_ptr<wallet> self, const std::uint32_t maj_i, std::function<void(std::error_code)> f)

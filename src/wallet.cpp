@@ -59,6 +59,7 @@
 #include "net/http.h"
 #include "net/net_parse_helpers.h" // monero/contrib/epee/include
 #include "net/parse.h"         // monero/src
+#include "net/websocket.h"
 #include "numeric.h"
 #include "pending_transaction.h"
 #include "subaddress_account.h"
@@ -304,6 +305,12 @@ namespace lwsf { namespace internal
     self->set_error(error, false);
   }
 
+  void wallet::frame::async_clear_error::operator()(const std::error_code error) const
+  {
+    LWSF_VERIFY(self);
+    self->set_error(error, true);
+  }
+
   bool wallet::set_error(const std::error_code error, const bool clear) const
   {
     return status_->set_error(error, clear);
@@ -366,10 +373,16 @@ namespace lwsf { namespace internal
     {
       void operator()(wallet* val) const
       {
-        if (!val)
-          return;
-        const boost::lock_guard<boost::mutex> lock{val->status_->sync_};
-        val->status_->thread_state_ = state::stop;
+        LWSF_VERIFY(val && val->data_.wallet);
+        {
+          const boost::lock_guard<boost::mutex> lock{val->status_->sync_};
+          val->status_->thread_state_ = state::stop;
+        }
+        {
+          const boost::lock_guard<boost::mutex> lock{val->data_.wallet->sync};
+          val->data_.wallet->on_feed_refresh = nullptr;
+          val->data_.wallet->on_feed_fail = nullptr;
+        }
       }
     };
 
@@ -445,12 +458,22 @@ namespace lwsf { namespace internal
     const std::unique_ptr<wallet, set_stop_> set_stop{this};
     try
     {
+      LWSF_VERIFY(data_.wallet);
+
       std::shared_ptr<boost::asio::steady_timer> timer;
       boost::unique_lock<boost::mutex> lock{status_->sync_};
       if (status_->thread_state_ != state::stop)
       {
         timer = std::make_shared<boost::asio::steady_timer>(data_.context->io_);
-        backend::wallet::refresh(data_.wallet, false /* mandatory */, on_refresh{timer, status_, data_.wallet});
+        const boost::lock_guard<boost::mutex> lock_wallet{data_.wallet->sync};
+        if (!data_.wallet->feed_disabled)
+        {
+          data_.wallet->on_feed_fail = on_refresh{timer, status_, data_.wallet};
+          data_.wallet->on_feed_refresh = frame::async_clear_error{status_};
+          backend::wallet::refresh(data_.wallet, false /* mandatory */, frame::async_clear_error{status_}); 
+        }
+        else
+          backend::wallet::refresh(data_.wallet, false /* mandatory */, on_refresh{timer, status_, data_.wallet});
       }
       do
       {
@@ -688,7 +711,12 @@ namespace lwsf { namespace internal
       status_->exception_error_ = "view_key, spend_key, and address_string do not match";
   }
 
-  wallet::~wallet() { stop_refresh_loop(); }
+  wallet::~wallet()
+  {
+    stop_refresh_loop();
+    if (data_.wallet)
+      data_.wallet->shutdown();
+  }
 
   void wallet::add_subaddress(const std::uint32_t accountIndex, std::string label)
   {
@@ -870,7 +898,7 @@ namespace lwsf { namespace internal
         return false;
 
       if (!daemon_username.empty() || !daemon_password.empty())
-        throw std::runtime_error{"HTTP loging not supported"};
+        throw std::runtime_error{"HTTP login not supported"};
 
       // verify cert if `use_ssl == true`, otherwise autodetect if `https`
       // specified.
@@ -909,9 +937,15 @@ namespace lwsf { namespace internal
         }
       }
 
+      // backend permanently assumes `/feed` failure even after changing
+      // http server
       const boost::unique_lock<boost::mutex> lock{data_.wallet->sync};
       data_.wallet->passed_login = false;
       data_.wallet->client.init(data_.context->io_, std::move(url.host), std::move(url.uri), boost::numeric_cast<std::uint16_t>(url.port), std::move(options));
+      std::shared_ptr<websocket::stream> feed;
+      feed.swap(data_.wallet->feed);
+      if (feed)
+        websocket::async_close(std::move(feed)); // on_error
     }
     catch (const std::exception& e)
     {
@@ -947,7 +981,7 @@ namespace lwsf { namespace internal
   bool wallet::connectToDaemon()
   {
     boost::unique_lock<boost::mutex> lock{data_.wallet->sync};
-    if (data_.wallet->passed_login && data_.wallet->client.is_connected())
+    if (data_.wallet->passed_login && (data_.wallet->feed || data_.wallet->client.is_connected()))
       return true;
 
     lock.unlock();
@@ -970,7 +1004,8 @@ namespace lwsf { namespace internal
   Monero::Wallet::ConnectionStatus wallet::connected() const
   {
     const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
-    return data_.wallet->passed_login && data_.wallet->client.is_connected() ?
+    const bool feed_disabled = data_.wallet->feed_disabled;
+    return data_.wallet->passed_login && ((feed_disabled && data_.wallet->client.is_connected()) || (!feed_disabled && data_.wallet->feed)) ?
       ConnectionStatus_Connected : ConnectionStatus_Disconnected;
   }
 
@@ -1309,12 +1344,22 @@ namespace lwsf { namespace internal
           unspent_map unspent{};
           {
             wait_for<std::error_code>(
-              [this] (auto&& callable) { backend::wallet::refresh(this->data_.wallet, false, std::move(callable)); }
+              [this] (auto&& f) { backend::wallet::refresh(this->data_.wallet, false, std::move(f)); }
             );
             
-            const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
-            fee_mask = data_.wallet->fee_mask;
+            boost::unique_lock<boost::mutex> lock{data_.wallet->sync};
+            if (data_.wallet->need_fees()) // '/feed' doesn't fetch fees
+            {
+              lock.unlock();
+              const std::error_code fee_fail = wait_for<std::error_code>(
+                [this] (auto&& f) { backend::wallet::get_fees(this->data_.wallet, std::move(f)); }
+              );
+              if (fee_fail)
+                throw std::system_error{fee_fail, "Tx construction"};
+              lock.lock();
+            }
 
+            fee_mask = data_.wallet->fee_mask;
             if (data_.wallet->per_byte_fee.empty() || !fee_mask || !data_.wallet->passed_login)
               throw std::system_error{data_.wallet->refresh_error, "Tx construction"};
 

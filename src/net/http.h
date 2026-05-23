@@ -40,7 +40,9 @@
 #include "byte_slice.h"    // monero/contrib/epee/include
 #include "net/net_ssl.h"   // monero/contrib/epee/include
 
-namespace lwsf { namespace internal { namespace http
+namespace lwsf { namespace internal { 
+namespace websocket { class stream; }
+namespace http
 {
   enum class error : int
   {
@@ -57,6 +59,9 @@ namespace lwsf { namespace internal { namespace http
   using server_response_func = void(std::error_code, epee::byte_slice);
   using callback_func = void(boost::system::error_code);
   using connect_func = void(std::shared_ptr<client_state>, std::function<callback_func>);
+  using ws_func = void(std::error_code, std::shared_ptr<websocket::stream>);
+
+  std::string make_host(const std::string& host);
 
   //! Primarily for webhooks, where the response is (basically) ignored.
   class client
@@ -107,6 +112,17 @@ namespace lwsf { namespace internal { namespace http
       `success()` is returned.
       \return `success()` if `url` is valid. */
     void get_async(std::string target, std::function<server_response_func> notifier) const;
+
+
+    /*! Never blocks. Thread safe. Makes a HTTP "upgrade" websocket request
+      using the existing HTTP connection. If the handshake succeeds, the
+      `websocket::stream` handle is sent to `notifier`, else the error is
+      reported by same function.
+
+      Any existing HTTP connection is irrevocably converted to a websocket,
+      however `post_async` and `get_async` will create a new connection, when
+      needed, using the previously supplied values to `init` and `proxy`. */
+    void ws_async(std::string target, std::string protocol, std::function<ws_func> notifier);
   };
 }}} // lwsf // internal // http
 

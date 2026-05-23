@@ -58,6 +58,7 @@ namespace lwsf { namespace config
   constexpr const std::size_t max_txes_in_rpc = 2048;
   constexpr const std::size_t min_outputs = 2;
   constexpr const std::uint32_t mixin_default = 15;
+  constexpr const std::chrono::seconds ping_timeout{10};
   constexpr const std::chrono::seconds refresh_interval{30};
   constexpr const std::chrono::seconds refresh_interval_min{5};
   constexpr const std::chrono::seconds rpc_timeout{30};

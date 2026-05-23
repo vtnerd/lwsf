@@ -58,6 +58,7 @@
 #include "misc_log_ex.h"  // monero/contrib/epee/include
 #include "net/net_utils_base.h"
 #include "net/socks.h"    // monero/src
+#include "net/websocket.h"
 #include "string_tools.h" // monero/contrib/epee/include
 
 namespace lwsf { namespace internal { namespace http
@@ -211,7 +212,7 @@ namespace lwsf { namespace internal { namespace http
       void(std::shared_ptr<client_state>, std::function<void(boost::system::error_code)>);
 
     boost::beast::flat_static_buffer<config::http_parser_buffer_size> buffer;
-    std::function<connect_func> connect;
+    const std::function<connect_func> connect;
     std::deque<message> outgoing;
     const std::string host;
     const std::string prefix;
@@ -435,6 +436,14 @@ namespace lwsf { namespace internal { namespace http
           self.is_connected = true;
           while (!self.outgoing.empty())
           {
+            if (self.outgoing.front().verb == boost::beast::http::verb::subscribe)
+            {
+              std::function<server_response_func> notifier;
+              notifier.swap(self.outgoing.front().notifier);
+              self.outgoing.clear();
+              return notifier({}, {});
+            }
+
             set_timeout(self_, config::rpc_timeout);
 
             MDEBUG("Sending " << self.outgoing.front().body.size() << " bytes in HTTP " << (self.outgoing.front().is_get() ? "GET" : "POST") << " to " << self.outgoing.front());
@@ -490,31 +499,35 @@ namespace lwsf { namespace internal { namespace http
         }
       }
     };
+
+    void queue_async_(std::shared_ptr<client_state> state, std::string&& target, epee::byte_slice&& body, std::function<server_response_func>&& notifier, boost::beast::http::verb verb)
+    {
+      message msg{std::move(body), std::move(target), std::move(notifier), verb};
+      if (!state)
+        return msg.notifier(common_error::kInvalidArgument, epee::byte_slice{});
+
+      MDEBUG("Queueing HTTP " << to_string(verb) << " to " << msg << " using " << state.get());
+      boost::asio::dispatch(
+        state->strand,
+        [state, msg = std::move(msg)] () mutable
+        {
+          const bool empty = state->outgoing.empty();
+          state->outgoing.push_back(std::move(msg));
+          if (empty)
+            boost::asio::post(state->strand, client_loop{state});
+        }
+      );
+    }
   } // anonymous
 
   void client::queue_async(std::string&& target, epee::byte_slice&& body, std::function<server_response_func>&& notifier, boost::beast::http::verb verb) const
   {
-    message msg{std::move(body), std::move(target), std::move(notifier), verb};
     std::shared_ptr<client_state> state;
     {
       const boost::lock_guard<boost::mutex> lock{sync_};
       state = state_;
     }
-
-    if (!state)
-      return msg.notifier(common_error::kInvalidArgument, epee::byte_slice{});
-
-    MDEBUG("Queueing HTTP " << (msg.is_get() ? "GET" : "POST") << " to " << msg << " using " << this);
-    boost::asio::dispatch(
-      state->strand,
-      [state, msg = std::move(msg)] () mutable
-      {
-        const bool empty = state->outgoing.empty();
-        state->outgoing.push_back(std::move(msg));
-        if (empty)
-          boost::asio::post(state->strand, client_loop{state});
-      }
-    );
+    queue_async_(std::move(state), std::move(target), std::move(body), std::move(notifier), verb);
   }
 
   void client::direct::operator()(std::shared_ptr<client_state> self, std::function<callback_func> f) const
@@ -683,6 +696,51 @@ namespace lwsf { namespace internal { namespace http
     proxy_ = std::move(connector);
     if (state_)
       state_ = std::make_shared<client_state>(state_->strand.context(), state_->host, state_->prefix, state_->port, state_->ssl, proxy_);
+  }
+
+  void client::ws_async(std::string target, std::string protocol, std::function<ws_func> notifier)
+  {
+    std::shared_ptr<client_state> self;
+    {
+      const boost::lock_guard<boost::mutex> lock{sync_};
+      self = state_;
+      state_ = std::make_shared<client_state>(self->strand.context(), self->host, self->prefix, self->port, self->ssl, proxy_);
+    }
+    LWSF_VERIFY(self);
+
+    struct start_ws
+    {
+      std::weak_ptr<client_state> self_;
+      std::string target_;
+      std::string protocol_;
+      std::function<ws_func> notifier_;
+
+      void operator()(const std::error_code error, epee::byte_slice)
+      {
+        const auto self = self_.lock();
+        LWSF_VERIFY(self && notifier_);
+        if (error)
+          return notifier_(error, nullptr);
+
+        std::string host;
+        boost::system::error_code ec{};
+        boost::asio::ip::make_address_v6(self->host, ec);
+        const bool https = self->ssl_status == epee::net_utils::ssl_support_t::e_ssl_support_enabled;
+        if (!ec)
+          host = "[" + host + "]:" + std::to_string(self->port);
+        else if ((https && self->port == 443) || (!https && self->port == 80))
+          host = self->host;
+        else
+          host = self->host + ":" + std::to_string(self->port);
+
+        if (self->ssl_status == epee::net_utils::ssl_support_t::e_ssl_support_enabled)
+          websocket::async_start(std::move(self->sock), self->strand.context(), std::move(host), std::move(target_), std::move(protocol_), std::move(notifier_));
+        else
+          websocket::async_start(std::move(self->sock.next_layer()), self->strand.context(), std::move(host), std::move(target_), std::move(protocol_), std::move(notifier_));
+      }
+    };
+ 
+    queue_async_(self, {}, {}, start_ws{self, std::move(target), std::move(protocol), std::move(notifier)}, boost::beast::http::verb::subscribe);
   }
 
   void client::post_async(std::string url, epee::byte_slice json_body, std::function<server_response_func> notifier) const

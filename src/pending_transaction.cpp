@@ -155,10 +155,8 @@ namespace lwsf { namespace internal
           error_ = error.message();
           return false;
         }
-        const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
-        auto entry = data_.wallet->primary.txes.try_emplace(e->id).first;
-        if (!entry->second)
-          entry->second = std::move(e);
+
+        data_.wallet->add_pending_tx(std::move(e));
       }
     }
     catch(const std::exception& e)
