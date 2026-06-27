@@ -31,10 +31,10 @@
 #include <boost/core/demangle.hpp>
 #include "wire/error.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   [[noreturn]] void throw_variant_exception(wire::error::schema type, const char* variant_name)
   {
-    WIRE_DLOG_THROW(type, "error with variant type: " << boost::core::demangle(variant_name));
+    LWSF_WIRE_DLOG_THROW(type, "error with variant type: " << boost::core::demangle(variant_name));
   }
-}
+}}

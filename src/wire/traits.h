@@ -31,22 +31,22 @@
 #include <type_traits>
 #include <utility>
 
-#define WIRE_DECLARE_BLOB_NS(type) \
-  template<>                       \
-  struct is_blob<type>             \
-    : std::true_type               \
+#define LWSF_WIRE_DECLARE_BLOB_NS(type) \
+  template<>                            \
+  struct is_blob<type>                  \
+    : std::true_type                    \
   {}
 
-#define WIRE_DECLARE_BLOB(type)                  \
-  namespace wire { WIRE_DECLARE_BLOB_NS(type); }
+#define LWSF_WIRE_DECLARE_BLOB(type)                  \
+  namespace lwsf { namespace wire { LWSF_WIRE_DECLARE_BLOB_NS(type); } }
 
-#define WIRE_DECLARE_OPTIONAL_ROOT(type) \
-  template<>                             \
-  struct is_optional_root<type>          \
-    : std::true_type                     \
+#define LWSF_WIRE_DECLARE_OPTIONAL_ROOT(type) \
+  template<>                                  \
+  struct is_optional_root<type>               \
+    : std::true_type                          \
   {}
 
-namespace wire
+namespace lwsf { namespace wire
 {
   template<typename T>
   struct unwrap_reference
@@ -204,4 +204,4 @@ namespace wire
   template<typename T>
   inline auto clear(T& container) -> decltype(container.clear())
   { return container.clear(); }
-}
+}}

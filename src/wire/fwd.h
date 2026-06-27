@@ -33,7 +33,7 @@
 #include "common/expect.h" // monero/src
 
 //! Declare an enum to be serialized as an integer
-#define WIRE_AS_INTEGER(type_)						\
+#define LWSF_WIRE_AS_INTEGER(type_)						\
   static_assert(std::is_enum<type_>(), "AS_INTEGER only enum types");	\
   template<typename R>							\
   inline void read_bytes(R& source, type_& dest)                        \
@@ -49,21 +49,21 @@
   }
 
 //! Declare an enum to be serialized as a string (json) or integer (msgpack)
-#define WIRE_DECLARE_ENUM(type)                                         \
-  const char* get_string(type) noexcept;                                \
+#define LWSF_WIRE_DECLARE_ENUM(type)                                   \
+  const char* get_string(type) noexcept;                               \
   expect<type> type ## _from_string(const boost::string_ref) noexcept; \
-  void read_bytes(::wire::reader&, type&);                              \
-  void write_bytes(::wire::writer&, type)
+  void read_bytes(::lwsf::wire::reader&, type&);                       \
+  void write_bytes(::lwsf::wire::writer&, type)
 
 //! Declare a class/struct serialization for all available formats
-#define WIRE_DECLARE_OBJECT(type)                     \
-  void read_bytes(::wire::reader&, type&);            \
-  void write_bytes(::wire::writer&, const type&)
+#define LWSF_WIRE_DECLARE_OBJECT(type)                 \
+  void read_bytes(::lwsf::wire::reader&, type&);       \
+  void write_bytes(::lwsf::wire::writer&, const type&)
 
-namespace wire
+namespace lwsf { namespace wire
 {
   struct basic_value;
   class reader;
   struct writer;
-}
+}}
 

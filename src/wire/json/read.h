@@ -37,7 +37,7 @@
 #include "wire/read.h"
 #include "span.h" // monero/contrib/epee/include
 
-namespace wire
+namespace lwsf { namespace wire
 {
   //! Reads JSON tokens one-at-a-time for DOMless parsing
   class json_reader : public reader
@@ -117,4 +117,4 @@ namespace wire
         \return True if another value to read. */
     bool key(epee::span<const key_map> map, std::size_t&, std::size_t& index) override final;
   };
-} // wire
+}} // wire

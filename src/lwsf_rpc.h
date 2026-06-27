@@ -97,7 +97,7 @@ namespace lwsf { namespace internal { namespace rpc
   }
 
   struct empty {};
-  WIRE_DECLARE_OBJECT(empty);
+  LWSF_WIRE_DECLARE_OBJECT(empty);
 
   struct address_meta
   {
@@ -118,7 +118,7 @@ namespace lwsf { namespace internal { namespace rpc
 
     constexpr bool is_default() const noexcept { return !maj_i && !min_i; }
   };
-  WIRE_DECLARE_OBJECT(address_meta);
+  LWSF_WIRE_DECLARE_OBJECT(address_meta);
 
   inline constexpr bool operator<(const address_meta& lhs, const address_meta& rhs) noexcept
   {
@@ -194,7 +194,7 @@ namespace lwsf { namespace internal { namespace rpc
     queue_error,
     schema_error
   };
-  WIRE_AS_INTEGER(feed_status);
+  LWSF_WIRE_AS_INTEGER(feed_status);
 
   struct feed
   {
@@ -535,7 +535,7 @@ namespace lwsf { namespace internal { namespace rpc
 
     boost::container::flat_set<std::array<std::uint32_t, 2>, std::less<>> value;
   };
-  WIRE_JSON_DECLARE_OBJECT(subaddrs);
+  LWSF_WIRE_JSON_DECLARE_OBJECT(subaddrs);
   void read_bytes(wire::json_reader&, subaddrs&);
 
   struct get_subaddrs
@@ -546,7 +546,7 @@ namespace lwsf { namespace internal { namespace rpc
 
     boost::container::flat_map<std::uint32_t, subaddrs> all_subaddrs;
   };
-  WIRE_JSON_DECLARE_OBJECT(get_subaddrs::mapped_type);
+  LWSF_WIRE_JSON_DECLARE_OBJECT(get_subaddrs::mapped_type);
   void read_bytes(wire::json_reader&, get_subaddrs&);
 
 
@@ -737,5 +737,5 @@ namespace lwsf { namespace internal { namespace rpc
      
 }}} // lwsf // internal // rpc
 
-WIRE_DECLARE_BLOB(lwsf::internal::rpc::ringct);
+LWSF_WIRE_DECLARE_BLOB(lwsf::internal::rpc::ringct);
 

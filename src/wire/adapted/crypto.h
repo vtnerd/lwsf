@@ -49,15 +49,15 @@ namespace crypto
   }
 }
 
-namespace wire
+namespace lwsf { namespace wire
 {
-  WIRE_DECLARE_BLOB_NS(crypto::ec_scalar);
-  WIRE_DECLARE_BLOB_NS(crypto::hash);
-  WIRE_DECLARE_BLOB_NS(crypto::hash8);
-  WIRE_DECLARE_BLOB_NS(crypto::key_derivation);
-  WIRE_DECLARE_BLOB_NS(crypto::key_image);
-  WIRE_DECLARE_BLOB_NS(crypto::public_key);
-  WIRE_DECLARE_BLOB_NS(crypto::signature);
-  WIRE_DECLARE_BLOB_NS(crypto::view_tag);
-  WIRE_DECLARE_BLOB_NS(rct::key);
-}
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::ec_scalar);
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::hash);
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::hash8);
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::key_derivation);
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::key_image);
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::public_key);
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::signature);
+  LWSF_WIRE_DECLARE_BLOB_NS(crypto::view_tag);
+  LWSF_WIRE_DECLARE_BLOB_NS(rct::key);
+}}

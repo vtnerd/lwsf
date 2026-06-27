@@ -27,20 +27,20 @@
 
 #pragma once
 
-#define WIRE_MSGPACK_DECLARE_ENUM(type)            \
-  const char* get_string(type) noexcept;           \
-  void read_bytes(::wire::msgpack_reader&, type&); \
-  void write_bytes(:wire::msgpack_writer&, type)
+#define LWSF_WIRE_MSGPACK_DECLARE_ENUM(type)             \
+  const char* get_string(type) noexcept;                 \
+  void read_bytes(::lwsf::wire::msgpack_reader&, type&); \
+  void write_bytes(::lwsf::wire::msgpack_writer&, type)
 
-#define WIRE_MSGPACK_DECLARE_OBJECT(type)                \
-  void read_bytes(::wire::msgpack_reader&, type&);       \
-  void write_bytes(::wire::msgpack_writer&, const type&)
+#define LWSF_WIRE_MSGPACK_DECLARE_OBJECT(type)                 \
+  void read_bytes(::lwsf::wire::msgpack_reader&, type&);       \
+  void write_bytes(::lwsf::wire::msgpack_writer&, const type&)
 
-namespace wire
+namespace lwsf { namespace wire
 {
   struct msgpack;
   class msgpack_reader;
   class msgpack_slice_writer;
   class msgpack_writer;
-}
+}}
 

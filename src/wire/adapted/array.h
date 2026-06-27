@@ -32,7 +32,7 @@
 #include "wire/error.h"
 #include "wire/read.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   // enable writing of std::array
   template<typename T, std::size_t N>
@@ -79,18 +79,18 @@ namespace wire
     std::size_t count = source.start_array(0);
     const bool json = (count == 0);
     if (!json && count != dest.size())
-      WIRE_DLOG_THROW(wire::error::schema::array, "Expected array of size " << dest.size());
+      LWSF_WIRE_DLOG_THROW(wire::error::schema::array, "Expected array of size " << dest.size());
 
     for (auto& elem : dest)
     {
       if (json && source.is_array_end(count))
-        WIRE_DLOG_THROW(wire::error::schema::array, "Expected array of size " << dest.size());
+        LWSF_WIRE_DLOG_THROW(wire::error::schema::array, "Expected array of size " << dest.size());
       wire_read::bytes(source, elem);
       --count;
     }
     if (!source.is_array_end(count))
-      WIRE_DLOG_THROW(wire::error::schema::array, "Expected array of size " << dest.size());
+      LWSF_WIRE_DLOG_THROW(wire::error::schema::array, "Expected array of size " << dest.size());
     source.end_array();
   }
-}
+}}
 

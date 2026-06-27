@@ -38,7 +38,7 @@ namespace
   constexpr const unsigned max_buffer = 4096;
 }
 
-namespace wire
+namespace lwsf { namespace wire
 {
   void json_writer::do_flush(epee::span<const std::uint8_t>)
   {}
@@ -166,4 +166,4 @@ namespace wire
   {
     dest.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
   }
-}
+}}

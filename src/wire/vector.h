@@ -32,10 +32,10 @@
 
 #include "wire/traits.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   template<typename T>
   struct is_array<std::vector<T>>
     : std::true_type
   {};
-}
+}}

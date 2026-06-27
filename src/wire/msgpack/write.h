@@ -36,12 +36,11 @@
 #include "byte_stream.h" // monero/contrib/epee/include
 #include "span.h"        // monero/contrib/epee/include
 #include "wire/field.h"
-#include "wire/filters.h"
 #include "wire/msgpack/base.h"
 #include "wire/traits.h"
 #include "wire/write.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   //! Writes MSGPACK tokens one-at-a-time for DOMless output.
   class msgpack_writer : public writer
@@ -184,4 +183,4 @@ namespace wire
       flush();
     }
   };
-}
+}}

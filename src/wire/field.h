@@ -30,30 +30,29 @@
 #include <functional>
 #include <utility>
 
-#include "wire/filters.h"
 #include "wire/traits.h"
 
 //! A required field with the same key name and C/C++ name
-#define WIRE_FIELD_ID(id, name)                       \
-  ::wire::field< id >( #name , std::ref( self . name ))
+#define LWSF_WIRE_FIELD_ID(id, name)                          \
+  ::lwsf::wire::field< id >( #name , std::ref( self . name ))
 
 //! A required field has the same key name and C/C++ name
-#define WIRE_FIELD(name) \
-  WIRE_FIELD_ID(0, name)
+#define LWSF_WIRE_FIELD(name) \
+  LWSF_WIRE_FIELD_ID(0, name)
 
 //! A required field has the same key name and C/C++ name AND is cheap to copy (faster output).
-#define WIRE_FIELD_COPY(name)                   \
-  ::wire::field( #name , self . name )
+#define LWSF_WIRE_FIELD_COPY(name)           \
+  ::lwsf::wire::field( #name , self . name )
 
 //! The optional field has the same key name and C/C++ name
-#define WIRE_OPTIONAL_FIELD_ID(id, name)                         \
-  ::wire::optional_field< id >( #name , std::ref( self . name ))
+#define LWSF_WIRE_OPTIONAL_FIELD_ID(id, name)                         \
+  ::lwsf::wire::optional_field< id >( #name , std::ref( self . name ))
 
 //! The optional field has the same key name and C/C++ name
-#define WIRE_OPTIONAL_FIELD(name) \
-  WIRE_OPTIONAL_FIELD_ID(0, name)
+#define LWSF_WIRE_OPTIONAL_FIELD(name) \
+  LWSF_WIRE_OPTIONAL_FIELD_ID(0, name)
 
-namespace wire
+namespace lwsf { namespace wire
 {
   /*! Links `name` to a `value` and index `I` for object serialization.
 
@@ -156,60 +155,7 @@ namespace wire
     {
       return value;
     }
-  };
-
-  //! Callable that can filter `as_object` values or be used immediately.
-  template<typename Default>
-  struct as_array_filter
-  {
-    Default default_filter;
-
-    template<typename T>
-    constexpr as_array_<T, Default> operator()(T value) const
-    {
-      return {std::move(value), default_filter};
-    }
-
-    template<typename T, typename F>
-    constexpr as_array_<T, F> operator()(T value, F filter) const
-    {
-      return {std::move(value), std::move(filter)};
-    }
-  };
-  //! Usage: `wire::field("foo", wire::as_array(self.foo, to_string{})`. Consider `std::ref`.
-  constexpr as_array_filter<identity_> as_array{};
-
-
-  //! Indicates a field value should be written as an object
-  template<typename T, typename F, typename G>
-  struct as_object_
-  {
-    using map_type = typename unwrap_reference<T>::type;
-
-    T map;
-    F key_filter;   //!< Each key (`.first`) in `map` given to this callable before writing field key.
-    G value_filter; //!< Each value (`.second`) in `map` given to this callable before `write_bytes`.
-
-    //! \return `map` with `std::reference_wrapper` removed.
-    constexpr const map_type& get_map() const noexcept
-    {
-      return map;
-    }
-
-    //! \return `map` with `std::reference_wrapper` removed.
-    map_type& get_map() noexcept
-    {
-      return map;
-    }
-  };
-
-  //! Usage: `wire::field("foo", wire::as_object(self.foo, to_string{}, wire::as_array))`. Consider `std::ref`.
-  template<typename T, typename F = identity_, typename G = identity_>
-  inline constexpr as_object_<T, F, G> as_object(T map, F key_filter = F{}, G value_filter = G{})
-  {
-    return {std::move(map), std::move(key_filter), std::move(value_filter)};
-  }
-
+  }; 
 
   template<typename T, unsigned I>
   inline constexpr bool available(const field_<T, true, I>& elem) noexcept
@@ -223,5 +169,5 @@ namespace wire
   {
     return bool(elem.get_value());
   }
-}
+}}
 

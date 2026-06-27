@@ -49,7 +49,7 @@ namespace
   };
 
   //! \throw std::system_error by converting `code` into a std::error_code
-  [[noreturn]] void throw_json_error(const epee::span<const std::uint8_t> source, const rapidjson::Reader& reader, const wire::error::schema expected)
+  [[noreturn]] void throw_json_error(const epee::span<const std::uint8_t> source, const rapidjson::Reader& reader, const lwsf::wire::error::schema expected)
   {
     const std::size_t start = std::min(source.size(), reader.GetErrorOffset());
     const std::size_t end = start + std::min(snippet_size, source.size() - start);
@@ -59,16 +59,16 @@ namespace
     switch (parse_error)
     {
     default:
-      WIRE_DLOG_THROW(wire::error::rapidjson_e(parse_error), "near \"" << text << '"');
+      LWSF_WIRE_DLOG_THROW(lwsf::wire::error::rapidjson_e(parse_error), "near \"" << text << '"');
     case rapidjson::kParseErrorNone:
     case rapidjson::kParseErrorTermination: // the handler returned false
       break;
     }
-    WIRE_DLOG_THROW(expected, "near \"" << text << '"');
+    LWSF_WIRE_DLOG_THROW(expected, "near \"" << text << '"');
   }
 }
 
-namespace wire
+namespace lwsf { namespace wire
 {
   struct json_reader::rapidjson_sax
   {
@@ -203,12 +203,12 @@ namespace wire
   boost::string_ref json_reader::get_next_string()
   {
     if (get_next_token() != '"')
-      WIRE_DLOG_THROW_(error::schema::string);
+      LWSF_WIRE_DLOG_THROW_(error::schema::string);
     remaining_.remove_prefix(1);
 
     void const* const end = std::memchr(remaining_.data(), '"', remaining_.size());
     if (!end)
-      WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorStringMissQuotationMark));
+      LWSF_WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorStringMissQuotationMark));
 
     std::uint8_t const* const begin = remaining_.data();
     const std::size_t length = remaining_.remove_prefix(static_cast<const std::uint8_t*>(end) - remaining_.data() + 1);
@@ -224,7 +224,7 @@ namespace wire
   std::size_t json_reader::do_start_array(std::size_t)
   {
     if (get_next_token() != '[')
-      WIRE_DLOG_THROW_(error::schema::array);
+      LWSF_WIRE_DLOG_THROW_(error::schema::array);
     remaining_.remove_prefix(1);
     return 0;
   }
@@ -232,7 +232,7 @@ namespace wire
   std::size_t json_reader::do_start_object()
   {
     if (get_next_token() != '{')
-      WIRE_DLOG_THROW_(error::schema::object);
+      LWSF_WIRE_DLOG_THROW_(error::schema::object);
     remaining_.remove_prefix(1);
     return 0;
   }
@@ -246,7 +246,7 @@ namespace wire
   void json_reader::check_complete() const
   {
     if (depth())
-      WIRE_DLOG_THROW(error::rapidjson_e(rapidjson::kParseErrorUnspecificSyntaxError), "Unexpected end");
+      LWSF_WIRE_DLOG_THROW(error::rapidjson_e(rapidjson::kParseErrorUnspecificSyntaxError), "Unexpected end");
   }
 
   basic_value json_reader::basic()
@@ -271,7 +271,7 @@ namespace wire
     case error::schema::string:
       return {std::move(str_buffer_)};
     };
-    WIRE_DLOG_THROW(error::schema::number, "expected a boolean, integer, float or string");
+    LWSF_WIRE_DLOG_THROW(error::schema::number, "expected a boolean, integer, float or string");
   }
 
   bool json_reader::boolean()
@@ -295,7 +295,7 @@ namespace wire
     if (json_int.negative)
       return json_int.value.integer;
     if (static_cast<std::uintmax_t>(imax_limits::max()) < json_int.value.unsigned_integer)
-      WIRE_DLOG_THROW_(error::schema::smaller_integer);
+      LWSF_WIRE_DLOG_THROW_(error::schema::smaller_integer);
     return static_cast<std::intmax_t>(json_int.value.unsigned_integer);
   }
 
@@ -306,7 +306,7 @@ namespace wire
     if (!json_uint.negative)
       return json_uint.value.unsigned_integer;
     if (json_uint.value.integer < 0)
-      WIRE_DLOG_THROW_(error::schema::larger_integer);
+      LWSF_WIRE_DLOG_THROW_(error::schema::larger_integer);
     return static_cast<std::uintmax_t>(json_uint.value.integer);
   }
 
@@ -324,7 +324,7 @@ namespace wire
     if (is_string)
     {
       if (get_next_token() != '"')
-        WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorStringMissQuotationMark));
+        LWSF_WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorStringMissQuotationMark));
       remaining_.remove_prefix(1);
     }
     return out;
@@ -356,7 +356,7 @@ namespace wire
     if (!exact && str_buffer_.size() < dest.size())
       dest = {dest.data(), str_buffer_.size()};
     if (str_buffer_.size() != dest.size())
-      WIRE_DLOG_THROW(error::schema::string, "expected size " << dest.size() << " but got " << str_buffer_.size());
+      LWSF_WIRE_DLOG_THROW(error::schema::string, "expected size " << dest.size() << " but got " << str_buffer_.size());
     return dest.size();
 
   }
@@ -369,7 +369,7 @@ namespace wire
     out.put_n(0, value.size() / 2);
 
     if (!epee::from_hex::to_buffer(epee::to_mut_span(out), value))
-      WIRE_DLOG_THROW(error::schema::binary, "invalid hex");
+      LWSF_WIRE_DLOG_THROW(error::schema::binary, "invalid hex");
 
     return epee::byte_slice{std::move(out)};
   }
@@ -380,7 +380,7 @@ namespace wire
     if (!exact && value.size() / 2 <= dest.size())
       dest = {dest.data(), value.size() / 2}; // `from_hex` will ensure exact size
     if (!epee::from_hex::to_buffer(dest, value))
-      WIRE_DLOG_THROW(exact ? error::schema::fixed_binary : error::schema::binary, "invalid hex and/or expected size " << dest.size() * 2 << " but got " << value.size());
+      LWSF_WIRE_DLOG_THROW(exact ? error::schema::fixed_binary : error::schema::binary, "invalid hex and/or expected size " << dest.size() * 2 << " but got " << value.size());
     return dest.size();
   }
 
@@ -388,7 +388,7 @@ namespace wire
   {
     const char next = get_next_token();
     if (next == 0)
-      WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorArrayMissCommaOrSquareBracket));
+      LWSF_WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorArrayMissCommaOrSquareBracket));
     if (next == ']')
     {
       remaining_.remove_prefix(1);
@@ -398,7 +398,7 @@ namespace wire
     if (count)
     {
       if (next != ',')
-        WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorArrayMissCommaOrSquareBracket));
+        LWSF_WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorArrayMissCommaOrSquareBracket));
       remaining_.remove_prefix(1);
     }
     return false;
@@ -423,7 +423,7 @@ namespace wire
       // check for object or text end
       const char next = get_next_token();
       if (next == 0)
-        WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorObjectMissCommaOrCurlyBracket));
+        LWSF_WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorObjectMissCommaOrCurlyBracket));
       if (next == '}')
       {
         remaining_.remove_prefix(1);
@@ -434,7 +434,7 @@ namespace wire
       if (state)
       {
         if (next != ',')
-          WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorObjectMissCommaOrCurlyBracket));
+          LWSF_WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorObjectMissCommaOrCurlyBracket));
         remaining_.remove_prefix(1);
       }
       ++state;
@@ -443,7 +443,7 @@ namespace wire
       read_next_value(json_key);
       index = process_key(str_buffer_);
       if (get_next_token() != ':')
-        WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorObjectMissColon));
+        LWSF_WIRE_DLOG_THROW_(error::rapidjson_e(rapidjson::kParseErrorObjectMissColon));
       remaining_.remove_prefix(1);
 
       // parse value
@@ -453,5 +453,5 @@ namespace wire
     }
     return true;
   }
-}
+}}
 

@@ -39,10 +39,9 @@
 #include "span.h"       // monero/contrib/epee/include
 #include "wire/error.h"
 #include "wire/field.h"
-#include "wire/filters.h"
 #include "wire/traits.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   //! Interface for converting C/C++ objects to "wire" (byte) formats.
   struct writer
@@ -209,8 +208,8 @@ namespace wire_write
   inline constexpr std::size_t array_size(const W& dest, const T& source) noexcept
   { return array_size_(dest.need_array_size(), source); }
 
-  template<typename W, typename T, typename F = wire::identity_>
-  inline void array(W& dest, const T& source, F f = {})
+  template<typename W, typename T>
+  inline void array(W& dest, const T& source)
   {
     using value_type = typename T::value_type;
     static_assert(!std::is_same<value_type, char>::value, "write array of chars as binary");
@@ -218,7 +217,7 @@ namespace wire_write
 
     dest.start_array(array_size(dest, source));
     for (const auto& elem : source)
-      bytes(dest, f(elem));
+      bytes(dest, elem);
     dest.end_array();
   }
 
@@ -252,43 +251,14 @@ namespace wire_write
     const bool dummy[] = {field(dest, std::move(fields))...};
     dest.end_object();
   }
-
-  template<typename W, typename T, typename F, typename G>
-  inline void dynamic_object(W& dest, const T& values, F key_filter, G value_filter)
-  {
-    dest.start_object(array_size(dest, values));
-    for (const auto& elem : values)
-    {
-      dest.key(key_filter(elem.first));
-      bytes(dest, value_filter(elem.second));
-    }
-    dest.end_object();
-  }
 } // wire_write
 
 namespace wire
 {
-  template<typename W, typename T, typename F>
-  inline void write_bytes(W& dest, const as_array_<T, F> source)
-  {
-    wire_write::array(dest, source.get_value(), std::move(source.filter));
-  }
   template<typename W, typename T>
   inline std::enable_if_t<is_array<T>::value> write_bytes(W& dest, const T& source)
   {
     wire_write::array(dest, source);
-  }
-
-  template<typename W, typename T, typename F = identity_, typename G = identity_>
-  inline std::enable_if_t<std::is_base_of<writer, W>::value>
-  dynamic_object(W& dest, const T& source, F key_filter = F{}, G value_filter = G{})
-  {
-    wire_write::dynamic_object(dest, source, std::move(key_filter), std::move(value_filter));
-  }
-  template<typename W, typename T, typename F, typename G>
-  inline void write_bytes(W& dest, as_object_<T, F, G> source)
-  {
-    wire::dynamic_object(dest, source.get_map(), std::move(source.key_filter), std::move(source.value_filter));
   }
 
   template<typename W, typename... T>
@@ -296,4 +266,4 @@ namespace wire
   {
     wire_write::object(dest, std::move(fields)...);
   }
-}
+}}

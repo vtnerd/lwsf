@@ -34,10 +34,10 @@
 #include "wire/traits.h"
 
 //! An optional field that is omitted when a default value is used
-#define WIRE_FIELD_DEFAULTED(name, default_)                            \
-  ::wire::optional_field( #name , ::wire::defaulted(std::ref( self . name ), default_ ))
+#define LWSF_WIRE_FIELD_DEFAULTED(name, default_) \
+  ::lwsf::wire::optional_field( #name , ::lwsf::wire::defaulted(std::ref( self . name ), default_ ))
 
-namespace wire
+namespace lwsf { namespace wire
 {
   /*! A wrapper that tells `wire::writer`s to skip field generation when default
     value, and tells `wire::reader`s to use default value when field not present. */
@@ -74,5 +74,5 @@ namespace wire
      requirements for an optional type (optional fields are handled
      directly by the generic read/write code because the field name is omitted
      entirely when the value is "empty"). */
-} // wire
+}} // lwsf // wire
 

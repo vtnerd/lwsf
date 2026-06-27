@@ -33,7 +33,7 @@
 #include "wire/read.h"
 #include "wire/write.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   //! \brief Wrapper that removes read constraints
   template<typename T>
@@ -73,4 +73,4 @@ namespace wire
   {
     wire_write::array(dest, source.get_container());
   }
-}
+}}

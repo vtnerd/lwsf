@@ -27,7 +27,7 @@
 
 #include "error.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
 namespace error
 {
@@ -73,3 +73,4 @@ namespace error
   }
 } // error
 } // wire
+} // lwsf

@@ -36,12 +36,11 @@
 #include "byte_stream.h" // monero/contrib/epee/include
 #include "span.h"        // monero/contrib/epee/include
 #include "wire/field.h"
-#include "wire/filters.h"
 #include "wire/json/base.h"
 #include "wire/traits.h"
 #include "wire/write.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   constexpr const std::size_t uint_to_string_size =
     std::numeric_limits<std::uintmax_t>::digits10 + 2;
@@ -149,4 +148,4 @@ namespace wire
       flush();
     }
   };
-}
+}}

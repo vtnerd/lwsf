@@ -39,10 +39,10 @@
 #include "wire/read.h"
 #include "wire/write.h"
 
-#define WIRE_OPTION(name, type, cpp_name)                               \
+#define LWSF_WIRE_OPTION(name, type, cpp_name)                               \
   wire::optional_field(name, wire::option<type>(std::ref(cpp_name)))
 
-namespace wire
+namespace lwsf { namespace wire
 {
   [[noreturn]] void throw_variant_exception(error::schema type, const char* variant_name);
 
@@ -61,8 +61,8 @@ namespace wire
       auto variant = wire::variant(std::ref(self.field3));
       wire::object(format,
         ...
-        WIRE_OPTION("type1", type1, variant),
-        WIRE_OPTION("type2", type2, variant)
+        LWSF_WIRE_OPTION("type1", type1, variant),
+        LWSF_WIRE_OPTION("type2", type2, variant)
       );
     }
     ``` */
@@ -146,7 +146,7 @@ namespace wire
 
    The `wire::variant(std::ref(self.field3))` step in the example above can be
    omitted if only writing is needed. The `boost::variant` value should be
-   given directly to `wire::option<U>(...)` or `WIRE_OPTION` macro - only one
+   given directly to `wire::option<U>(...)` or `LWSF_WIRE_OPTION` macro - only one
    type is active so `wire::optional_field` will omit all other types/fields. */
   template<typename T, typename U>
   struct option_
@@ -217,4 +217,4 @@ namespace wire
   template<typename W, typename T, typename U>
   inline void write_bytes(W& dest, const option_<T, U>& source)
   { wire_write::bytes(dest, adapt::get<U>(source.get_variant())); }
-}
+}}

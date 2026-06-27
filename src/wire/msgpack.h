@@ -32,23 +32,23 @@
 #include "wire/msgpack/read.h"
 #include "wire/msgpack/write.h"
 
-#define WIRE_MSGPACK_DEFINE_ENUM(type, map)                         \
-  void read_bytes(::wire::msgpack_reader& source, type& dest)       \
-  {                                                                 \
-    dest = type(source.enumeration(map));                           \
-  }                                                                 \
-  void write_bytes(::wire::msgpack_writer& dest, const type source) \
-  {                                                                 \
-    dest.enumeration(std::size_t(source), map);                     \
+#define LWSF_WIRE_MSGPACK_DEFINE_ENUM(type, map)                          \
+  void read_bytes(::lwsf::wire::msgpack_reader& source, type& dest)       \
+  {                                                                       \
+    dest = type(source.enumeration(map));                                 \
+  }                                                                       \
+  void write_bytes(::lwsf::wire::msgpack_writer& dest, const type source) \
+  {                                                                       \
+    dest.enumeration(std::size_t(source), map);                           \
   }
 
-#define WIRE_MSGPACK_DEFINE_OBJECT(type, map)                        \
-  void read_bytes(::wire::msgpack_reader& source, type& dest)        \
-  {                                                                  \
-    map(source, dest);                                               \
-  }                                                                  \
-  void write_bytes(::wire::msgpack_writer& dest, const type& source) \
-  {                                                                  \
-    map(dest, source);                                               \
+#define LWSF_WIRE_MSGPACK_DEFINE_OBJECT(type, map)                         \
+  void read_bytes(::lwsf::wire::msgpack_reader& source, type& dest)        \
+  {                                                                        \
+    map(source, dest);                                                     \
+  }                                                                        \
+  void write_bytes(::lwsf::wire::msgpack_writer& dest, const type& source) \
+  {                                                                        \
+    map(dest, source);                                                     \
   }
 

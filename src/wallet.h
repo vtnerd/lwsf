@@ -733,7 +733,8 @@ namespace internal
     */
     virtual void setOffline(bool offline) override { /* TODO */ }
     virtual bool isOffline() const override { /* TODO */ return false; }
-    
+
+#ifndef LWSF_MASTER_ENABLE
     //! blackballs a set of outputs
     virtual bool blackballOutputs(const std::vector<std::string> &outputs, bool add) override { return false; }
 
@@ -742,6 +743,7 @@ namespace internal
 
     //! unblackballs an output
     virtual bool unblackballOutput(const std::string &amount, const std::string &offset) override { return false; }
+#endif // LWSF_MASTER_ENABLE
 
     //! gets the ring used for a key image, if any
     virtual bool getRing(const std::string &key_image, std::vector<uint64_t> &ring) const override { /* TODO */ return false; }

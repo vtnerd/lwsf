@@ -31,12 +31,12 @@
 #include "wire/read.h"
 #include "wire/write.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   template<typename F, typename T>
   void map_pair(F& format, T& self)
   {
-    wire::object(format, WIRE_FIELD_ID(0, first), WIRE_FIELD_ID(1, second));
+    wire::object(format, LWSF_WIRE_FIELD_ID(0, first), LWSF_WIRE_FIELD_ID(1, second));
   }
 
   template<typename R, typename T, typename U>
@@ -46,5 +46,5 @@ namespace wire
   template<typename W, typename T, typename U>
   void write_bytes(W& dest, const std::pair<T, U>& source)
   { map_pair(dest, source); }
-}
+}}
 

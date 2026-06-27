@@ -33,7 +33,7 @@
 #include "wire/write.h"
 #include "wire/wrapper/array.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   //
   // free functions for `array_` wrapper
@@ -77,4 +77,4 @@ namespace wire
     const auto wrap = [](const auto& val) -> inner_type { return {std::ref(val)}; };
     wire_write::array(dest, boost::adaptors::transform(wrapper.get_container(), wrap));
   }
-} // wire
+}} // lwsf // wire

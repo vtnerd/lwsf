@@ -100,5 +100,5 @@ namespace lwsf { namespace internal
     virtual std::vector<std::string> signersKeys() const override final { return {}; }
   };
 
-  WIRE_DECLARE_OBJECT(pending_transaction);
+  LWSF_WIRE_DECLARE_OBJECT(pending_transaction);
 }} // lwsf // internal

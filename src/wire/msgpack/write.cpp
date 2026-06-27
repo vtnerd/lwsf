@@ -47,13 +47,13 @@ namespace
   constexpr const unsigned flush_threshold = 100;
   constexpr const unsigned max_buffer = 4096;
 
-  void write_tag(epee::byte_stream& bytes, const wire::msgpack::tag value)
+  void write_tag(epee::byte_stream& bytes, const lwsf::wire::msgpack::tag value)
   {
     bytes.put(std::uint8_t(value));
   }
 
-  template<typename T, typename U, wire::msgpack::tag tag>
-  void write_endian(epee::byte_stream& bytes, const T value, const wire::msgpack::type<U, tag> type)
+  template<typename T, typename U, lwsf::wire::msgpack::tag tag>
+  void write_endian(epee::byte_stream& bytes, const T value, const lwsf::wire::msgpack::type<U, tag> type)
   {
     static_assert(std::is_integral<T>::value, "input not integral");
     static_assert(std::is_integral<U>::value, "output not integral");
@@ -85,7 +85,7 @@ namespace
       return true;
     };
     if (!boost::fusion::any(T{}, match_size))
-      WIRE_DLOG_THROW_(wire::error::msgpack::integer_encoding);
+      LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::msgpack::integer_encoding);
   }
 
   template<typename T, typename U>
@@ -98,7 +98,7 @@ namespace
   }
 }
 
-namespace wire
+namespace lwsf { namespace wire
 {
   void msgpack_writer::do_flush(epee::span<const std::uint8_t>)
   {}
@@ -126,7 +126,7 @@ namespace wire
       return true;
     };
     if (!boost::fusion::any(wire::msgpack::signed_types{}, match_size))
-      WIRE_DLOG_THROW_(wire::error::msgpack::integer_encoding);
+      LWSF_WIRE_DLOG_THROW_(wire::error::msgpack::integer_encoding);
   }
 
   void msgpack_writer::do_unsigned_integer(const std::uintmax_t value)
@@ -139,7 +139,7 @@ namespace wire
       return true;
     };
     if (!boost::fusion::any(wire::msgpack::unsigned_types{}, match_size))
-      WIRE_DLOG_THROW_(wire::error::msgpack::integer_encoding);
+      LWSF_WIRE_DLOG_THROW_(wire::error::msgpack::integer_encoding);
   }
 
   void msgpack_writer::check_complete()
@@ -209,4 +209,4 @@ namespace wire
   {
     dest.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
   }
-}
+}}
