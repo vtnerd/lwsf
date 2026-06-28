@@ -34,7 +34,7 @@
 
 #include "wire/fwd.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   /*! Can hold any non-recursive value. Implements optional field concept
     requirements. If used in a `optional_field`, the `nullptr` type/value
@@ -61,4 +61,4 @@ namespace wire
 
   void read_bytes(reader& source, basic_value& dest);
   void write_bytes(writer& dest, const basic_value& source);
-} // wire
+}} // lwsf // wire

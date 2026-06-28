@@ -81,7 +81,7 @@ namespace lwsf { namespace internal
     void write_bytes(wire::writer& dest, const std::shared_ptr<backend::transaction> src)
     {
       if (!src)
-        WIRE_DLOG_THROW_(error::unexpected_nullptr);
+        LWSF_WIRE_DLOG_THROW_(error::unexpected_nullptr);
       write_bytes(dest, *src);
     }
 
@@ -90,7 +90,7 @@ namespace lwsf { namespace internal
     {
       wire::object(format, wire::field("txes", wire::trusted_array(std::ref(self.txes))));
     }
-    WIRE_DEFINE_OBJECT(txes_file, txes_map);
+    LWSF_WIRE_DEFINE_OBJECT(txes_file, txes_map);
 
     cryptonote::transaction get_tx(expect<cryptonote::transaction>&& source)
     {

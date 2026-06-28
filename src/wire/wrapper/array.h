@@ -36,10 +36,10 @@
 /*! An array field with read constraint. See `array_` for more info. All (empty)
   arrays were "optional" (omitted) historically in epee, so this matches prior
   behavior. */
-#define WIRE_FIELD_ARRAY(name, read_constraint)         \
-  ::wire::optional_field( #name , ::wire::array< read_constraint >(std::ref( self . name )))
+#define LWSF_WIRE_FIELD_ARRAY(name, read_constraint)         \
+  ::lwsf::wire::optional_field( #name , ::lwsf::wire::array< read_constraint >(std::ref( self . name )))
 
-namespace wire
+namespace lwsf { namespace wire
 {
   /*! A wrapper that ensures `T` is written as an array, with `C` constraints
     when reading (`max_element_count` or `min_element_size`). `C` can be `void`
@@ -155,4 +155,4 @@ namespace wire
   /* Do not register with `is_optional_on_empty` trait, this allows selection
      on whether an array is mandatory on wire. */
 
-} // wire
+}} // lwsf // wire

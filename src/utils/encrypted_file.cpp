@@ -210,17 +210,17 @@ namespace lwsf { namespace internal
     void map_encrypted_file(F& format, T& self)
     {
       wire::object(format,
-        WIRE_FIELD(cipher),
-        WIRE_FIELD(pwhasher),
-        WIRE_FIELD(salt),
-        WIRE_FIELD(nonce),
-        WIRE_FIELD(epayload),
-        WIRE_FIELD(iterations),
-        WIRE_FIELD(memory)
+        LWSF_WIRE_FIELD(cipher),
+        LWSF_WIRE_FIELD(pwhasher),
+        LWSF_WIRE_FIELD(salt),
+        LWSF_WIRE_FIELD(nonce),
+        LWSF_WIRE_FIELD(epayload),
+        LWSF_WIRE_FIELD(iterations),
+        LWSF_WIRE_FIELD(memory)
       );
     }
 
-    WIRE_DEFINE_OBJECT(encrypted_file, map_encrypted_file);
+    LWSF_WIRE_DEFINE_OBJECT(encrypted_file, map_encrypted_file);
   }
 
   epee::byte_slice try_load(const std::string& filename, const std::string_view file_magic)

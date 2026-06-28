@@ -39,7 +39,7 @@
 #include "wire/read.h"
 #include "wire/write.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   struct msgpack
   {
@@ -177,5 +177,4 @@ namespace wire
       return wire_write::to_bytes<output_type>(dest, source);
     }
   };
-}
-
+}}

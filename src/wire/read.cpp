@@ -29,32 +29,32 @@
 
 #include <stdexcept>
 
-void wire::reader::increment_depth()
+void lwsf::wire::reader::increment_depth()
 {
   if (++depth_ == max_read_depth())
-    WIRE_DLOG_THROW_(error::schema::maximum_depth);
+    LWSF_WIRE_DLOG_THROW_(error::schema::maximum_depth);
 }
 
-void wire::reader::decrement_depth()
+void lwsf::wire::reader::decrement_depth()
 {
   if (!depth_)
     throw std::logic_error{"reader::decrement_depth() already at zero"};
   --depth_;
 }
 
-std::size_t wire::reader::start_array(std::size_t min_element_size)
+std::size_t lwsf::wire::reader::start_array(std::size_t min_element_size)
 {
   increment_depth();
   return do_start_array(min_element_size);
 }
 
-std::size_t wire::reader::start_object()
+std::size_t lwsf::wire::reader::start_object()
 {
   increment_depth();
   return do_start_object();
 }
 
-[[noreturn]] void wire::integer::throw_exception(const std::intmax_t source, const std::intmax_t min, const std::intmax_t max)
+[[noreturn]] void lwsf::wire::integer::throw_exception(const std::intmax_t source, const std::intmax_t min, const std::intmax_t max)
 {
   static_assert(0 <= std::numeric_limits<std::intmax_t>::max(), "expected 0 <= intmax_t::max");
   static_assert(
@@ -62,16 +62,16 @@ std::size_t wire::reader::start_object()
     "expected intmax_t::max <= uintmax_t::max"
   );
   if (source < 0)
-    WIRE_DLOG_THROW(error::schema::larger_integer, source << " given when " << min << " is minimum permitted");
+    LWSF_WIRE_DLOG_THROW(error::schema::larger_integer, source << " given when " << min << " is minimum permitted");
   else
     throw_exception(std::uintmax_t(source), std::uintmax_t(max));
 }
-[[noreturn]] void wire::integer::throw_exception(const std::uintmax_t source, const std::uintmax_t max)
+[[noreturn]] void lwsf::wire::integer::throw_exception(const std::uintmax_t source, const std::uintmax_t max)
 {
-  WIRE_DLOG_THROW(error::schema::smaller_integer, source << " given when " << max << " is maximum permitted");
+  LWSF_WIRE_DLOG_THROW(error::schema::smaller_integer, source << " given when " << max << " is maximum permitted");
 }
 
-[[noreturn]] void wire_read::throw_exception(const wire::error::schema code, const char* display, epee::span<char const* const> names)
+[[noreturn]] void lwsf::wire_read::throw_exception(const lwsf::wire::error::schema code, const char* display, epee::span<char const* const> names)
 {
   const char* name = nullptr;
   for (const char* elem : names)
@@ -82,6 +82,6 @@ std::size_t wire::reader::start_object()
       break;
     }
   }
-  WIRE_DLOG_THROW(code, display << (name ? name : ""));
+  LWSF_WIRE_DLOG_THROW(code, display << (name ? name : ""));
 }
 

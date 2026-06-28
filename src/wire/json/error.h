@@ -30,7 +30,7 @@
 #include <rapidjson/error/error.h>
 #include <system_error>
 
-namespace wire
+namespace lwsf { namespace wire
 {
 namespace error
 {
@@ -49,5 +49,5 @@ namespace error
     return std::error_code{int(value), rapidjson_category()};
   }
 }
-}
+}}
 

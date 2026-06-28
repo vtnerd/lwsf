@@ -99,7 +99,7 @@ namespace
     return out;
   }
 
-  void to_msgpack(wire::msgpack_writer& dest, const rapidjson::Value& src)
+  void to_msgpack(lwsf::wire::msgpack_writer& dest, const rapidjson::Value& src)
   {
     switch (src.GetType())
     {
@@ -159,7 +159,7 @@ namespace
     if (ir.HasParseError())
       throw std::runtime_error{GetParseError_En(ir.GetParseError())};
 
-    wire::msgpack_slice_writer dest{};
+    lwsf::wire::msgpack_slice_writer dest{};
     to_msgpack(dest, ir);
 
     const auto bytes = dest.take_sink();
@@ -187,14 +187,14 @@ namespace
     details account;
   };
 
-  void read_bytes(wire::reader& src, login::details& self)
+  void read_bytes(lwsf::wire::reader& src, login::details& self)
   {
-    wire::object(src, WIRE_FIELD(address), WIRE_FIELD(view_key));
+    lwsf::wire::object(src, LWSF_WIRE_FIELD(address), LWSF_WIRE_FIELD(view_key));
   }
 
-  void read_bytes(wire::reader& src, login& self)
+  void read_bytes(lwsf::wire::reader& src, login& self)
   {
-    wire::object(src, WIRE_FIELD(account));
+    lwsf::wire::object(src, LWSF_WIRE_FIELD(account));
   }
 
   struct response_loop : boost::asio::coroutine
@@ -1451,7 +1451,7 @@ LWS_CASE("backend::wallet /feed (websocket)")
       sub.erase(0, std::strlen("login:"));
 
       login user{};
-      EXPECT(wire::msgpack::from_bytes(epee::byte_slice{std::move(sub)}, user) == std::error_code{});
+      EXPECT(lwsf::wire::msgpack::from_bytes(epee::byte_slice{std::move(sub)}, user) == std::error_code{});
       EXPECT(user.account.address == wallet->get_spend_address({0, 0}));
       EXPECT(user.account.view_key == wallet->primary.view.sec);
     };

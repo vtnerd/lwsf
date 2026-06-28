@@ -30,11 +30,11 @@
 #include "span.h" // monero/contrib/epee/include
 #include "wire/traits.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   //! Enable span types for array output
   template<typename T>
   struct is_array<epee::span<T>>
     : std::true_type
   {};
-}
+}}

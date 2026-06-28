@@ -53,8 +53,8 @@
 
 namespace Monero
 {
-  WIRE_AS_INTEGER(TransactionInfo::Direction);
-  WIRE_AS_INTEGER(Monero::NetworkType);
+  LWSF_WIRE_AS_INTEGER(TransactionInfo::Direction);
+  LWSF_WIRE_AS_INTEGER(Monero::NetworkType);
 }
 
 namespace lwsf { namespace config
@@ -64,10 +64,10 @@ namespace lwsf { namespace config
     template<typename F, typename T>
     void map_lookahead(F& format, T& self)
     {
-      wire::object(format, WIRE_FIELD(major), WIRE_FIELD(minor));
+      wire::object(format, LWSF_WIRE_FIELD(major), LWSF_WIRE_FIELD(minor));
     }
   } // anonymous
-  WIRE_DEFINE_OBJECT(lookahead, map_lookahead);
+  LWSF_WIRE_DEFINE_OBJECT(lookahead, map_lookahead);
 
   constexpr bool operator==(const lookahead& lhs, const lookahead& rhs) noexcept
   { return lhs.major == rhs.major && lhs.minor == rhs.minor; }
@@ -163,16 +163,16 @@ namespace lwsf { namespace internal { namespace backend
     void map_address_book_entry(F& format, T& self)
     {
       wire::object(format,
-        WIRE_FIELD(address),
-        WIRE_FIELD(payment_id),
-        WIRE_FIELD(description)
+        LWSF_WIRE_FIELD(address),
+        LWSF_WIRE_FIELD(payment_id),
+        LWSF_WIRE_FIELD(description)
       );
     }
 
     template<typename F, typename T>
     void map_subaddress(F& format, T& self)
     {
-      wire::object(format, WIRE_FIELD(label));
+      wire::object(format, LWSF_WIRE_FIELD(label));
     }
 
     template<typename F, typename T>
@@ -181,7 +181,7 @@ namespace lwsf { namespace internal { namespace backend
       // do not store server lookahead, reset on each server connection
       wire::object(format,
         wire::optional_field("detail", wire::trusted_array(std::ref(self.detail))),
-        WIRE_FIELD_DEFAULTED(last, 0)
+        LWSF_WIRE_FIELD_DEFAULTED(last, 0)
       );
     }
 
@@ -189,10 +189,10 @@ namespace lwsf { namespace internal { namespace backend
     void map_transfer_spend(F& format, T& self)
     {
       wire::object(format,
-        WIRE_FIELD(amount),
-        WIRE_FIELD(sender),
-        WIRE_FIELD(tx_pub),
-        WIRE_FIELD(output_pub)
+        LWSF_WIRE_FIELD(amount),
+        LWSF_WIRE_FIELD(sender),
+        LWSF_WIRE_FIELD(tx_pub),
+        LWSF_WIRE_FIELD(output_pub)
       );
     }
 
@@ -200,19 +200,19 @@ namespace lwsf { namespace internal { namespace backend
     void map_transfer_in(F& format, T& self)
     {
       wire::object(format,
-        WIRE_FIELD(global_index),
-        WIRE_FIELD(amount),
-        WIRE_FIELD(recipient),
-        WIRE_FIELD(index),
-        WIRE_OPTIONAL_FIELD(rct_mask),
-        WIRE_FIELD(tx_pub)
+        LWSF_WIRE_FIELD(global_index),
+        LWSF_WIRE_FIELD(amount),
+        LWSF_WIRE_FIELD(recipient),
+        LWSF_WIRE_FIELD(index),
+        LWSF_WIRE_OPTIONAL_FIELD(rct_mask),
+        LWSF_WIRE_FIELD(tx_pub)
       );
     }
 
     template<typename F, typename T>
     void map_transfer_out(F& format, T& self)
     {
-      wire::object(format, WIRE_FIELD(address), WIRE_FIELD(amount), WIRE_FIELD(secret));
+      wire::object(format, LWSF_WIRE_FIELD(address), LWSF_WIRE_FIELD(amount), LWSF_WIRE_FIELD(secret));
     }
 
     template<typename F, typename T>
@@ -226,24 +226,24 @@ namespace lwsf { namespace internal { namespace backend
 
       auto payment_id = wire::variant(std::ref(self.payment_id));
       wire::object(format,
-        WIRE_FIELD(raw_bytes),
+        LWSF_WIRE_FIELD(raw_bytes),
         wire::optional_field("spends", wire::trusted_array(std::ref(self.spends))),
         wire::optional_field("receives", wire::trusted_array(std::ref(self.receives))),
         wire::optional_field("transfers", wire::trusted_array(std::ref(self.transfers))),
-        WIRE_FIELD(description),
+        LWSF_WIRE_FIELD(description),
         wire::optional_field("timestamp", std::ref(timestamp)),
-        WIRE_FIELD(amount),
-        WIRE_FIELD(fee),
-        WIRE_OPTIONAL_FIELD(height),
-        WIRE_FIELD(unlock_time),
-        WIRE_FIELD(direction),
-        WIRE_OPTION("payment_id0", rpc::empty, payment_id),
-        WIRE_OPTION("payment_id8", crypto::hash8, payment_id),
-        WIRE_OPTION("payment_id32", crypto::hash, payment_id),
-        WIRE_FIELD(id),
-        WIRE_FIELD(prefix),
-        WIRE_FIELD(coinbase),
-        WIRE_FIELD_DEFAULTED(failed, false)
+        LWSF_WIRE_FIELD(amount),
+        LWSF_WIRE_FIELD(fee),
+        LWSF_WIRE_OPTIONAL_FIELD(height),
+        LWSF_WIRE_FIELD(unlock_time),
+        LWSF_WIRE_FIELD(direction),
+        LWSF_WIRE_OPTION("payment_id0", rpc::empty, payment_id),
+        LWSF_WIRE_OPTION("payment_id8", crypto::hash8, payment_id),
+        LWSF_WIRE_OPTION("payment_id32", crypto::hash, payment_id),
+        LWSF_WIRE_FIELD(id),
+        LWSF_WIRE_FIELD(prefix),
+        LWSF_WIRE_FIELD(coinbase),
+        LWSF_WIRE_FIELD_DEFAULTED(failed, false)
       );
 
       if constexpr (!std::is_const<T>())
@@ -265,7 +265,7 @@ namespace lwsf { namespace internal { namespace backend
   static void write_bytes(wire::writer& dest, const std::pair<const crypto::hash, std::shared_ptr<transaction>>& source)
   {
     if (!source.second)
-      WIRE_DLOG_THROW(wire::error::schema::object, "Unexpected nullptr");
+      LWSF_WIRE_DLOG_THROW(wire::error::schema::object, "Unexpected nullptr");
     write_bytes(dest, *source.second);
   }
 
@@ -274,34 +274,34 @@ namespace lwsf { namespace internal { namespace backend
     template<typename F, typename T>
     void map_keypair(F& format, T& self)
     {
-      wire::object(format, WIRE_FIELD(sec), WIRE_FIELD(pub));
+      wire::object(format, LWSF_WIRE_FIELD(sec), LWSF_WIRE_FIELD(pub));
     }
 
     template<typename F, typename T>
     void map_account(F& format, T& self)
     {
       wire::object(format,
-        WIRE_FIELD(language),
-        WIRE_OPTIONAL_FIELD(poly),
+        LWSF_WIRE_FIELD(language),
+        LWSF_WIRE_OPTIONAL_FIELD(poly),
         wire::optional_field("addressbook", wire::trusted_array(std::ref(self.addressbook))),
         wire::optional_field("subaccounts", wire::trusted_array(std::ref(self.subaccounts))),
         wire::optional_field("txes", wire::trusted_array(std::ref(self.txes))),
         wire::optional_field("attributes", wire::trusted_array(std::ref(self.attributes))),
-        WIRE_FIELD(scan_height),
-        WIRE_FIELD(restore_height),
-        WIRE_FIELD(requested_start),
-        WIRE_FIELD_DEFAULTED(lookahead, config::default_lookahead),
-        WIRE_FIELD_DEFAULTED(type, Monero::MAINNET),
-        WIRE_FIELD(view),
-        WIRE_FIELD(spend),
-        WIRE_FIELD_DEFAULTED(generated_locally, true)
+        LWSF_WIRE_FIELD(scan_height),
+        LWSF_WIRE_FIELD(restore_height),
+        LWSF_WIRE_FIELD(requested_start),
+        LWSF_WIRE_FIELD_DEFAULTED(lookahead, config::default_lookahead),
+        LWSF_WIRE_FIELD_DEFAULTED(type, Monero::MAINNET),
+        LWSF_WIRE_FIELD(view),
+        LWSF_WIRE_FIELD(spend),
+        LWSF_WIRE_FIELD_DEFAULTED(generated_locally, true)
       );
     }
 
     template<typename F, typename T>
     void map_polyseed(F& format, T& self)
     {
-      wire::object(format, WIRE_FIELD(seed), WIRE_FIELD(passphrase));
+      wire::object(format, LWSF_WIRE_FIELD(seed), LWSF_WIRE_FIELD(passphrase));
     }
 
     rct::key get_mask(const crypto::secret_key& view_key, const rpc::output& source)
@@ -1233,15 +1233,15 @@ namespace lwsf { namespace internal { namespace backend
     { return {out, std::move(f)}; }
   } // anonymous
 
-  WIRE_DEFINE_OBJECT(address_book_entry, map_address_book_entry);
-  WIRE_DEFINE_OBJECT(subaddress, map_subaddress);
-  WIRE_DEFINE_OBJECT(sub_account, map_sub_account);
-  WIRE_DEFINE_OBJECT(transfer_spend, map_transfer_spend);
-  WIRE_DEFINE_OBJECT(transfer_in, map_transfer_in);
-  WIRE_DEFINE_OBJECT(transfer_out, map_transfer_out);
-  WIRE_DEFINE_OBJECT(transaction, map_transaction);
-  WIRE_DEFINE_OBJECT(keypair, map_keypair);
-  WIRE_DEFINE_OBJECT(account::polyseed, map_polyseed);
+  LWSF_WIRE_DEFINE_OBJECT(address_book_entry, map_address_book_entry);
+  LWSF_WIRE_DEFINE_OBJECT(subaddress, map_subaddress);
+  LWSF_WIRE_DEFINE_OBJECT(sub_account, map_sub_account);
+  LWSF_WIRE_DEFINE_OBJECT(transfer_spend, map_transfer_spend);
+  LWSF_WIRE_DEFINE_OBJECT(transfer_in, map_transfer_in);
+  LWSF_WIRE_DEFINE_OBJECT(transfer_out, map_transfer_out);
+  LWSF_WIRE_DEFINE_OBJECT(transaction, map_transaction);
+  LWSF_WIRE_DEFINE_OBJECT(keypair, map_keypair);
+  LWSF_WIRE_DEFINE_OBJECT(account::polyseed, map_polyseed);
   void read_bytes(wire::reader& source, account& dest)
   {
     map_account(source, dest);

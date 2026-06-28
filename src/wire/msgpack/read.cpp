@@ -41,23 +41,23 @@
 #include "wire/msgpack/error.h"
 
 // Expands to every possible fixed string tag value
-#define MLWS_FIXED_STRING_TAGS()                                \
-  case wire::msgpack::tag(0xa0): case wire::msgpack::tag(0xa1): \
-  case wire::msgpack::tag(0xa2): case wire::msgpack::tag(0xa3): \
-  case wire::msgpack::tag(0xa4): case wire::msgpack::tag(0xa5): \
-  case wire::msgpack::tag(0xa6): case wire::msgpack::tag(0xa7): \
-  case wire::msgpack::tag(0xa8): case wire::msgpack::tag(0xa9): \
-  case wire::msgpack::tag(0xaa): case wire::msgpack::tag(0xab): \
-  case wire::msgpack::tag(0xac): case wire::msgpack::tag(0xad): \
-  case wire::msgpack::tag(0xae): case wire::msgpack::tag(0xaf): \
-  case wire::msgpack::tag(0xb0): case wire::msgpack::tag(0xb1): \
-  case wire::msgpack::tag(0xb2): case wire::msgpack::tag(0xb3): \
-  case wire::msgpack::tag(0xb4): case wire::msgpack::tag(0xb5): \
-  case wire::msgpack::tag(0xb6): case wire::msgpack::tag(0xb7): \
-  case wire::msgpack::tag(0xb8): case wire::msgpack::tag(0xb9): \
-  case wire::msgpack::tag(0xba): case wire::msgpack::tag(0xbb): \
-  case wire::msgpack::tag(0xbc): case wire::msgpack::tag(0xbd): \
-  case wire::msgpack::tag(0xbe): case wire::msgpack::tag(0xbf):
+#define MLWS_FIXED_STRING_TAGS()                                            \
+  case lwsf::wire::msgpack::tag(0xa0): case lwsf::wire::msgpack::tag(0xa1): \
+  case lwsf::wire::msgpack::tag(0xa2): case lwsf::wire::msgpack::tag(0xa3): \
+  case lwsf::wire::msgpack::tag(0xa4): case lwsf::wire::msgpack::tag(0xa5): \
+  case lwsf::wire::msgpack::tag(0xa6): case lwsf::wire::msgpack::tag(0xa7): \
+  case lwsf::wire::msgpack::tag(0xa8): case lwsf::wire::msgpack::tag(0xa9): \
+  case lwsf::wire::msgpack::tag(0xaa): case lwsf::wire::msgpack::tag(0xab): \
+  case lwsf::wire::msgpack::tag(0xac): case lwsf::wire::msgpack::tag(0xad): \
+  case lwsf::wire::msgpack::tag(0xae): case lwsf::wire::msgpack::tag(0xaf): \
+  case lwsf::wire::msgpack::tag(0xb0): case lwsf::wire::msgpack::tag(0xb1): \
+  case lwsf::wire::msgpack::tag(0xb2): case lwsf::wire::msgpack::tag(0xb3): \
+  case lwsf::wire::msgpack::tag(0xb4): case lwsf::wire::msgpack::tag(0xb5): \
+  case lwsf::wire::msgpack::tag(0xb6): case lwsf::wire::msgpack::tag(0xb7): \
+  case lwsf::wire::msgpack::tag(0xb8): case lwsf::wire::msgpack::tag(0xb9): \
+  case lwsf::wire::msgpack::tag(0xba): case lwsf::wire::msgpack::tag(0xbb): \
+  case lwsf::wire::msgpack::tag(0xbc): case lwsf::wire::msgpack::tag(0xbd): \
+  case lwsf::wire::msgpack::tag(0xbe): case lwsf::wire::msgpack::tag(0xbf):
 
 namespace
 {
@@ -66,7 +66,7 @@ namespace
 
   //! \return True iif `value` matches a tag in `T` tuple.
   template<typename T>
-  bool matches(const wire::msgpack::tag tag)
+  bool matches(const lwsf::wire::msgpack::tag tag)
   {
     const auto matched_type = [tag] (const auto type)
     {
@@ -88,20 +88,20 @@ namespace
     buffer_type buffer;
     static_assert(sizeof(buffer) == sizeof(T), "unexpected buffer size");
     if (source.size() < sizeof(buffer))
-      WIRE_DLOG_THROW_(wire::error::msgpack::not_enough_bytes);
+      LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::msgpack::not_enough_bytes);
     std::memcpy(std::addressof(buffer), source.data(), sizeof(buffer));
     source.remove_prefix(sizeof(buffer));
     return buffer.value();
   }
 
   //! \return Integer `T` encoded as big endian in `source`.
-  template<typename T, wire::msgpack::tag U>
-  T read_endian(epee::span<const std::uint8_t>& source, const wire::msgpack::type<T, U>)
+  template<typename T, lwsf::wire::msgpack::tag U>
+  T read_endian(epee::span<const std::uint8_t>& source, const lwsf::wire::msgpack::type<T, U>)
   { return read_endian<T>(source); }
 
   //! \return Integer `T` whose encoding is specified by tag `next`
   template<typename T>
-  T read_integer(epee::span<const std::uint8_t>& source, const wire::msgpack::tag next)
+  T read_integer(epee::span<const std::uint8_t>& source, const lwsf::wire::msgpack::tag next)
   {
     try
     {
@@ -110,36 +110,36 @@ namespace
       {
         default:
           break;
-        case wire::msgpack::tag::int8:
+        case lwsf::wire::msgpack::tag::int8:
           return boost::numeric_cast<T>(read_endian<std::int8_t>(source));
-        case wire::msgpack::tag::uint8:
+        case lwsf::wire::msgpack::tag::uint8:
           return boost::numeric_cast<T>(read_endian<std::uint8_t>(source));
-        case wire::msgpack::tag::int16:
+        case lwsf::wire::msgpack::tag::int16:
           return boost::numeric_cast<T>(read_endian<std::int16_t>(source));
-        case wire::msgpack::tag::uint16:
+        case lwsf::wire::msgpack::tag::uint16:
           return boost::numeric_cast<T>(read_endian<std::uint16_t>(source));
-        case wire::msgpack::tag::int32:
+        case lwsf::wire::msgpack::tag::int32:
           return boost::numeric_cast<T>(read_endian<std::int32_t>(source));
-        case wire::msgpack::tag::uint32:
+        case lwsf::wire::msgpack::tag::uint32:
           return boost::numeric_cast<T>(read_endian<std::uint32_t>(source));
-        case wire::msgpack::tag::int64:
+        case lwsf::wire::msgpack::tag::int64:
           return boost::numeric_cast<T>(read_endian<std::int64_t>(source));
-        case wire::msgpack::tag::uint64:
+        case lwsf::wire::msgpack::tag::uint64:
           return boost::numeric_cast<T>(read_endian<std::uint64_t>(source));
       }
     }
     catch (const boost::numeric::positive_overflow&)
-    { WIRE_DLOG_THROW_(wire::error::schema::smaller_integer); }
+    { LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::schema::smaller_integer); }
     catch (const boost::numeric::negative_overflow&)
-    { WIRE_DLOG_THROW_(wire::error::schema::larger_integer); }
+    { LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::schema::larger_integer); }
     
-    WIRE_DLOG_THROW_(wire::error::schema::integer);
+    LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::schema::integer);
   }
 
   epee::span<const std::uint8_t> read_raw(epee::span<const std::uint8_t>& source, const std::size_t bytes)
   {
     if (source.size() < bytes)
-      WIRE_DLOG_THROW_(wire::error::msgpack::not_enough_bytes);
+      LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::msgpack::not_enough_bytes);
     const std::size_t actual = source.remove_prefix(bytes);
     return {source.data() - actual, actual};
   }
@@ -147,60 +147,60 @@ namespace
   template<typename T>
   epee::span<const std::uint8_t> read_raw(epee::span<const std::uint8_t>& source)
   {
-    return read_raw(source, wire::integer::cast_unsigned<std::size_t>(read_endian<T>(source)));
+    return read_raw(source, lwsf::wire::integer::cast_unsigned<std::size_t>(read_endian<T>(source)));
   }
 
-  epee::span<const std::uint8_t> read_string(epee::span<const std::uint8_t>& source, const wire::msgpack::tag next)
+  epee::span<const std::uint8_t> read_string(epee::span<const std::uint8_t>& source, const lwsf::wire::msgpack::tag next)
   {
     switch (next)
     {
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wswitch"
       MLWS_FIXED_STRING_TAGS()
-        return read_raw(source, wire::msgpack::ftag_string::extract(next));
+        return read_raw(source, lwsf::wire::msgpack::ftag_string::extract(next));
 #pragma GCC diagnostic pop
-      case wire::msgpack::tag::string8:
+      case lwsf::wire::msgpack::tag::string8:
         return read_raw<std::uint8_t>(source);
-      case wire::msgpack::tag::string16:
+      case lwsf::wire::msgpack::tag::string16:
         return read_raw<std::uint16_t>(source);
-      case wire::msgpack::tag::string32:
+      case lwsf::wire::msgpack::tag::string32:
         return read_raw<std::uint32_t>(source);
       default:
         break;
     }
-    WIRE_DLOG_THROW_(wire::error::schema::string);
+    LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::schema::string);
   }
 
   //! \return Binary blob encoded message
-  epee::span<const std::uint8_t> read_binary(epee::span<const std::uint8_t>& source, const wire::msgpack::tag next)
+  epee::span<const std::uint8_t> read_binary(epee::span<const std::uint8_t>& source, const lwsf::wire::msgpack::tag next)
   {
     switch (next)
     {
-      case wire::msgpack::tag::binary8:
+      case lwsf::wire::msgpack::tag::binary8:
         return read_raw<std::uint8_t>(source);
-      case wire::msgpack::tag::binary16:
+      case lwsf::wire::msgpack::tag::binary16:
         return read_raw<std::uint16_t>(source);
-      case wire::msgpack::tag::binary32:
+      case lwsf::wire::msgpack::tag::binary32:
         return read_raw<std::uint32_t>(source);
       default:
         break;
     }
-    WIRE_DLOG_THROW_(wire::error::schema::string);
+    LWSF_WIRE_DLOG_THROW_(lwsf::wire::error::schema::string);
   }
 }
 
-namespace wire
+namespace lwsf { namespace wire
 {
   void msgpack_reader::throw_wire_exception()
   {
-    WIRE_DLOG_THROW_(error::msgpack::underflow_tree);
+    LWSF_WIRE_DLOG_THROW_(error::msgpack::underflow_tree);
   }
 
   void msgpack_reader::skip_value()
   {
     assert(tags_remaining_);
     if (limits<std::size_t>::max() == tags_remaining_)
-      WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
+      LWSF_WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
 
     const std::size_t initial = tags_remaining_;
     do
@@ -304,7 +304,7 @@ namespace wire
       if (size == remaining_.size())
       {
         if (!msgpack::ftag_unsigned::matches(next) && !msgpack::ftag_signed::matches(next))
-          WIRE_DLOG_THROW_(error::msgpack::invalid);
+          LWSF_WIRE_DLOG_THROW_(error::msgpack::invalid);
         remaining_.remove_prefix(1);
       }
       update_tags_remaining();
@@ -314,7 +314,7 @@ namespace wire
   msgpack::tag msgpack_reader::peek_tag()
   {
     if (remaining_.empty())
-      WIRE_DLOG_THROW_(error::msgpack::not_enough_bytes);
+      LWSF_WIRE_DLOG_THROW_(error::msgpack::not_enough_bytes);
     return msgpack::tag(*remaining_.data());
   }
 
@@ -356,7 +356,7 @@ namespace wire
     };
 
     if (!boost::fusion::any(U{}, matched_type))
-      WIRE_DLOG_THROW_(expected);
+      LWSF_WIRE_DLOG_THROW_(expected);
 
     return out;
   }
@@ -364,7 +364,7 @@ namespace wire
   void msgpack_reader::check_complete() const
   {
     if (tags_remaining_)
-      WIRE_DLOG_THROW_(error::msgpack::incomplete);
+      LWSF_WIRE_DLOG_THROW_(error::msgpack::incomplete);
   }
 
   basic_value msgpack_reader::basic()
@@ -420,7 +420,7 @@ namespace wire
       default:
         break;
     }
-    WIRE_DLOG_THROW(error::schema::number, "expected a boolean, integer, float or string");
+    LWSF_WIRE_DLOG_THROW(error::schema::number, "expected a boolean, integer, float or string");
   }
 
   bool msgpack_reader::boolean()
@@ -435,7 +435,7 @@ namespace wire
       default:
         break;
     }
-    WIRE_DLOG_THROW_(error::schema::boolean);
+    LWSF_WIRE_DLOG_THROW_(error::schema::boolean);
   }
 
   double msgpack_reader::real()
@@ -445,7 +445,7 @@ namespace wire
     const auto read_float = [this](auto value)
     {
       if (remaining_.size() < sizeof(value))
-        WIRE_DLOG_THROW_(error::msgpack::not_enough_bytes);
+        LWSF_WIRE_DLOG_THROW_(error::msgpack::not_enough_bytes);
       std::memcpy(std::addressof(value), remaining_.data(), sizeof(value));
       remaining_.remove_prefix(sizeof(value));
       return value;
@@ -460,7 +460,7 @@ namespace wire
       default:
         break;
     }
-    WIRE_DLOG_THROW_(error::schema::number);
+    LWSF_WIRE_DLOG_THROW_(error::schema::number);
   }
 
   std::string msgpack_reader::string()
@@ -478,7 +478,7 @@ namespace wire
     if (!exact && bytes.size() < dest.size())
       dest = {dest.data(), bytes.size()};
     if (dest.size() != bytes.size())
-      WIRE_DLOG_THROW(error::schema::string, "of size " << dest.size() << " but got " << bytes.size());
+      LWSF_WIRE_DLOG_THROW(error::schema::string, "of size " << dest.size() << " but got " << bytes.size());
     std::memcpy(dest.data(), bytes.data(), dest.size());
     return dest.size();
   }
@@ -498,7 +498,7 @@ namespace wire
     if (!exact && bytes.size() < dest.size())
       dest = {dest.data(), bytes.size()};
     if (dest.size() != bytes.size())
-      WIRE_DLOG_THROW(error::schema::fixed_binary, "of size " << dest.size() << " but got " << bytes.size());
+      LWSF_WIRE_DLOG_THROW(error::schema::fixed_binary, "of size " << dest.size() << " but got " << bytes.size());
     std::memcpy(dest.data(), bytes.data(), dest.size());
     return dest.size();
   }
@@ -508,9 +508,9 @@ namespace wire
     const std::size_t upcoming =
       read_count<msgpack::ftag_array, msgpack::array_types>(error::schema::array);
     if (limits<std::size_t>::max() - tags_remaining_ < upcoming)
-      WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
+      LWSF_WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
     if (min_element_size && (remaining_.size() / min_element_size) < upcoming)
-      WIRE_DLOG_THROW(error::schema::array, upcoming << " array elements of at least " << min_element_size << " bytes each exceeds " << remaining_.size() << " remaining bytes");
+      LWSF_WIRE_DLOG_THROW(error::schema::array, upcoming << " array elements of at least " << min_element_size << " bytes each exceeds " << remaining_.size() << " remaining bytes");
 
     tags_remaining_ += upcoming;
     return upcoming;
@@ -529,9 +529,9 @@ namespace wire
     const std::size_t upcoming =
       read_count<msgpack::ftag_object, msgpack::object_types>(error::schema::object);
     if (limits<std::size_t>::max() / 2 < upcoming)
-      WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
+      LWSF_WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
     if (limits<std::size_t>::max() - tags_remaining_ < upcoming * 2)
-      WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
+      LWSF_WIRE_DLOG_THROW_(error::msgpack::max_tree_size);
     tags_remaining_ += upcoming * 2;
     return upcoming;
   }
@@ -572,7 +572,7 @@ namespace wire
         }
       }
       else
-        WIRE_DLOG_THROW(error::schema::invalid_key, "Invalid key type");
+        LWSF_WIRE_DLOG_THROW(error::schema::invalid_key, "Invalid key type");
 
       if (index < map.size())
       {
@@ -584,4 +584,4 @@ namespace wire
     update_tags_remaining(); // for end of object
     return false;
   }
-}
+}}

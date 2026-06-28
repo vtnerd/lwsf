@@ -34,19 +34,19 @@
 #include "misc_log_ex.h" // monero/contrib/epee/include
 
 //! Print default `code` message followed by optional message to debug log then throw `code`.
-#define WIRE_DLOG_THROW_(code, ...)					\
+#define LWSF_WIRE_DLOG_THROW_(code, ...)					\
   do									\
   {									\
     MDEBUG( get_string(code) __VA_ARGS__ );				\
-    throw ::wire::exception_t<decltype(code)>{code};			\
+    throw ::lwsf::wire::exception_t<decltype(code)>{code};			\
   }									\
   while (0)
 
 //! Print default `code` message followed by `msg` to debug log then throw `code`.
-#define WIRE_DLOG_THROW(code, msg)			\
-  WIRE_DLOG_THROW_(code, << ": " << msg)
+#define LWSF_WIRE_DLOG_THROW(code, msg)			  \
+  LWSF_WIRE_DLOG_THROW_(code, << ": " << msg)
 
-namespace wire
+namespace lwsf { namespace wire
 {
   namespace error
   {
@@ -126,12 +126,12 @@ namespace wire
       return make_error_code(value);
     }
   };
-}
+}}
 
 namespace std
 {
   template<>
-  struct is_error_code_enum<wire::error::schema>
+  struct is_error_code_enum<lwsf::wire::error::schema>
     : true_type
   {};
 }

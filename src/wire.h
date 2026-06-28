@@ -37,7 +37,7 @@
 #include "wire/read.h"
 #include "wire/write.h"
 
-#define WIRE_DEFINE_ENUM(type_, map)                                    \
+#define LWSF_WIRE_DEFINE_ENUM(type_, map)                                    \
   static_assert(std::is_enum<type_>::value, "get_string will fail");    \
   static_assert(!std::is_signed<type_>::value, "write_bytes will fail"); \
   const char* get_string(const type_ source) noexcept                   \
@@ -55,13 +55,13 @@
       if (elem != std::end(map))                                        \
         return type_(elem - std::begin(map));                           \
     }                                                                   \
-    return {::wire::error::schema::enumeration};                        \
+    return {::lwsf::wire::error::schema::enumeration};                  \
   }                                                                     \
   void read_bytes(::wire::reader& source, type_& dest)                  \
   {                                                                     \
     const auto val = type_ ## _from_string(source.string());            \
     if (!val)                                                           \
-      WIRE_DLOG_THROW(::wire::error::schema::enumeration, #type_);      \
+      LWSF_WIRE_DLOG_THROW(::lwsf::wire::error::schema::enumeration, #type_); \
     dest = *val;                                                        \
   }                                                                     \
   void write_bytes(::wire::writer& dest, const type_ source)            \
@@ -69,12 +69,12 @@
     dest.string(get_string(source));                                    \
   }
 
-#define WIRE_DEFINE_OBJECT(type, map)                          \
-  void read_bytes(::wire::reader& source, type& dest)          \
-  {                                                            \
-    map(source, dest);                                         \
-  }                                                            \
-  void write_bytes(::wire::writer& dest, const type& source)   \
-  {                                                            \
-    map(dest, source);                                         \
+#define LWSF_WIRE_DEFINE_OBJECT(type, map)                         \
+  void read_bytes(::lwsf::wire::reader& source, type& dest)        \
+  {                                                                \
+    map(source, dest);                                             \
+  }                                                                \
+  void write_bytes(::lwsf::wire::writer& dest, const type& source) \
+  {                                                                \
+    map(dest, source);                                             \
   }

@@ -77,7 +77,7 @@ namespace lwsf { namespace internal { namespace backend
     std::string payment_id;
     std::string description;
   };
-  WIRE_DECLARE_OBJECT(address_book_entry);
+  LWSF_WIRE_DECLARE_OBJECT(address_book_entry);
 
   struct subaddress
   {
@@ -95,7 +95,7 @@ namespace lwsf { namespace internal { namespace backend
       : label(std::move(label))
     {}
   };
-  WIRE_DECLARE_OBJECT(subaddress);
+  LWSF_WIRE_DECLARE_OBJECT(subaddress);
 
   struct sub_account
   {
@@ -111,7 +111,7 @@ namespace lwsf { namespace internal { namespace backend
     //! \return Primary label for account (`minor == 0` is "special").
     std::string_view primary_label() const noexcept;
   };
-  WIRE_DECLARE_OBJECT(sub_account);
+  LWSF_WIRE_DECLARE_OBJECT(sub_account);
 
   struct transfer_in
   {
@@ -157,7 +157,7 @@ namespace lwsf { namespace internal { namespace backend
       };
     }
   };
-  WIRE_DECLARE_OBJECT(transfer_in);
+  LWSF_WIRE_DECLARE_OBJECT(transfer_in);
 
   struct transfer_spend
   {
@@ -174,7 +174,7 @@ namespace lwsf { namespace internal { namespace backend
       : amount(src.amount), sender(src.recipient), tx_pub(src.tx_pub), output_pub(pub)
     {}
   };
-  WIRE_DECLARE_OBJECT(transfer_spend);
+  LWSF_WIRE_DECLARE_OBJECT(transfer_spend);
 
   struct transfer_out
   {
@@ -190,7 +190,7 @@ namespace lwsf { namespace internal { namespace backend
       : address(std::move(address)), amount(amount), secret{}
     {}
   };
-  WIRE_DECLARE_OBJECT(transfer_out);
+  LWSF_WIRE_DECLARE_OBJECT(transfer_out);
 
   struct transaction
   {
@@ -226,7 +226,7 @@ namespace lwsf { namespace internal { namespace backend
     bool coinbase;
     bool failed;
   };
-  WIRE_DECLARE_OBJECT(transaction);
+  LWSF_WIRE_DECLARE_OBJECT(transaction);
 
   struct keypair
   {
@@ -234,7 +234,7 @@ namespace lwsf { namespace internal { namespace backend
     crypto::secret_key sec;
     crypto::public_key pub;
   };
-  WIRE_DECLARE_OBJECT(keypair);
+  LWSF_WIRE_DECLARE_OBJECT(keypair);
 
   struct account
   {
@@ -265,8 +265,8 @@ namespace lwsf { namespace internal { namespace backend
     keypair spend;
     bool generated_locally; //!< True iff wallet was generated and not recovered
   };
-  WIRE_DECLARE_OBJECT(account);
-  WIRE_DECLARE_OBJECT(account::polyseed);
+  LWSF_WIRE_DECLARE_OBJECT(account);
+  LWSF_WIRE_DECLARE_OBJECT(account::polyseed);
 
   //! All functions should provide the strong-exception guarantee
   struct wallet

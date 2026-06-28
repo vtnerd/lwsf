@@ -27,5 +27,5 @@
 
 #include "write.h"
 
-wire::writer::~writer() noexcept
+lwsf::wire::writer::~writer() noexcept
 {}

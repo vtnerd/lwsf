@@ -63,36 +63,36 @@ namespace lwsf { namespace internal { namespace rpc
 
   void write_bytes(wire::writer& dest, const login& self)
   {
-    wire::object(dest, WIRE_FIELD(address), WIRE_FIELD(view_key));
+    wire::object(dest, LWSF_WIRE_FIELD(address), LWSF_WIRE_FIELD(view_key));
   }
  
   void write_bytes(wire::json_writer& dest, const login_request& self)
   {
     wire::object(dest,
-      WIRE_FIELD(address),
-      WIRE_FIELD(view_key),
-      WIRE_FIELD_DEFAULTED(lookahead, address_meta{}),
-      WIRE_FIELD(create_account),
-      WIRE_FIELD(generated_locally)
+      LWSF_WIRE_FIELD(address),
+      LWSF_WIRE_FIELD(view_key),
+      LWSF_WIRE_FIELD_DEFAULTED(lookahead, address_meta{}),
+      LWSF_WIRE_FIELD(create_account),
+      LWSF_WIRE_FIELD(generated_locally)
     );
   }
 
   void read_bytes(wire::json_reader& source, login_response& self)
   {
     wire::object(source,
-      WIRE_OPTIONAL_FIELD(start_height),
-      WIRE_OPTIONAL_FIELD(lookahead),
-      WIRE_FIELD(new_address)
+      LWSF_WIRE_OPTIONAL_FIELD(start_height),
+      LWSF_WIRE_OPTIONAL_FIELD(lookahead),
+      LWSF_WIRE_FIELD(new_address)
     );
   }
 
   void read_bytes(wire::json_reader& source, daemon_status& self)
   {
     wire::object(source, 
-      WIRE_FIELD(outgoing_connections_count),
-      WIRE_FIELD(incoming_connections_count),
-      WIRE_FIELD(height),
-      WIRE_FIELD(target_height)
+      LWSF_WIRE_FIELD(outgoing_connections_count),
+      LWSF_WIRE_FIELD(incoming_connections_count),
+      LWSF_WIRE_FIELD(height),
+      LWSF_WIRE_FIELD(target_height)
     );
   }
 
@@ -115,7 +115,7 @@ namespace lwsf { namespace internal { namespace rpc
           return out;
         }
         else
-          WIRE_DLOG_THROW(wire::error::schema::fixed_binary, "Invalid payment_id size");
+          LWSF_WIRE_DLOG_THROW(wire::error::schema::fixed_binary, "Invalid payment_id size");
       }
 
       return empty{};
@@ -126,28 +126,28 @@ namespace lwsf { namespace internal { namespace rpc
   { wire::object(source); }
 
   static void read_bytes(wire::msgpack_reader& source, feed_tx::legacy_id& self)
-  { wire::object(source, WIRE_FIELD(amount), WIRE_FIELD(index)); }
+  { wire::object(source, LWSF_WIRE_FIELD(amount), LWSF_WIRE_FIELD(index)); }
 
   static void read_bytes(wire::msgpack_reader& source, feed_tx::output_id& self)
-  { wire::object(source, WIRE_FIELD(legacy)); }
+  { wire::object(source, LWSF_WIRE_FIELD(legacy)); }
 
   static void read_bytes(wire::msgpack_reader& source, feed_tx::receive& self)
   {
     static constexpr std::uint64_t max = std::numeric_limits<std::uint64_t>::max();
     static constexpr auto txpool = feed_tx::output_id{feed_tx::legacy_id{max, max}};
     wire::object(source,
-      WIRE_FIELD(amount),
-      WIRE_FIELD_DEFAULTED(id, txpool),
-      WIRE_FIELD_DEFAULTED(recipient, address_meta{}),
-      WIRE_FIELD(index),
-      WIRE_OPTIONAL_FIELD(rct),
-      WIRE_FIELD(public_key),
-      WIRE_FIELD(tx_pub_key)
+      LWSF_WIRE_FIELD(amount),
+      LWSF_WIRE_FIELD_DEFAULTED(id, txpool),
+      LWSF_WIRE_FIELD_DEFAULTED(recipient, address_meta{}),
+      LWSF_WIRE_FIELD(index),
+      LWSF_WIRE_OPTIONAL_FIELD(rct),
+      LWSF_WIRE_FIELD(public_key),
+      LWSF_WIRE_FIELD(tx_pub_key)
     );
   }
 
   static void read_bytes(wire::msgpack_reader& source, feed_tx::spend& self)
-  { wire::object(source, WIRE_FIELD(id), WIRE_FIELD(key_image)); }
+  { wire::object(source, LWSF_WIRE_FIELD(id), LWSF_WIRE_FIELD(key_image)); }
 
   void read_bytes(wire::msgpack_reader& source, feed_tx& self)
   {
@@ -159,18 +159,18 @@ namespace lwsf { namespace internal { namespace rpc
     boost::optional<epee::byte_slice> payment_id;
 
     wire::object(source,
-      WIRE_FIELD_ARRAY(receives, min_receive),
-      WIRE_FIELD_ARRAY(spends, min_spend),
-      WIRE_FIELD(fee),
-      WIRE_FIELD(unlock_time),
-      WIRE_FIELD_DEFAULTED(height, feed_tx::txpool()),
+      LWSF_WIRE_FIELD_ARRAY(receives, min_receive),
+      LWSF_WIRE_FIELD_ARRAY(spends, min_spend),
+      LWSF_WIRE_FIELD(fee),
+      LWSF_WIRE_FIELD(unlock_time),
+      LWSF_WIRE_FIELD_DEFAULTED(height, feed_tx::txpool()),
       wire::field("timestamp", std::ref(timestamp)),
-      WIRE_FIELD_DEFAULTED(mixin, std::numeric_limits<std::uint32_t>::max()),
+      LWSF_WIRE_FIELD_DEFAULTED(mixin, std::numeric_limits<std::uint32_t>::max()),
       wire::optional_field("payment_id", std::ref(payment_id)),
-      WIRE_FIELD(hash),
-      WIRE_FIELD(prefix_hash),
-      WIRE_FIELD_DEFAULTED(coinbase, false),
-      WIRE_FIELD_DEFAULTED(mempool, false)
+      LWSF_WIRE_FIELD(hash),
+      LWSF_WIRE_FIELD(prefix_hash),
+      LWSF_WIRE_FIELD_DEFAULTED(coinbase, false),
+      LWSF_WIRE_FIELD_DEFAULTED(mempool, false)
     );
 
     self.payment_id = make_payment_id(payment_id);
@@ -181,37 +181,37 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::msgpack_reader& source, feed_blocks& self)
   {
     wire::object(source,
-      WIRE_FIELD_ARRAY(transactions, min_tx_size),
-      WIRE_FIELD(scan_start),
-      WIRE_FIELD(scan_end),
-      WIRE_FIELD(blockchain_height),
-      WIRE_OPTIONAL_FIELD(lookahead_fail),
-      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
+      LWSF_WIRE_FIELD_ARRAY(transactions, min_tx_size),
+      LWSF_WIRE_FIELD(scan_start),
+      LWSF_WIRE_FIELD(scan_end),
+      LWSF_WIRE_FIELD(blockchain_height),
+      LWSF_WIRE_OPTIONAL_FIELD(lookahead_fail),
+      LWSF_WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
     );
   }
 
   void read_bytes(wire::msgpack_reader& source, feed_error& self)
-  { wire::object(source, WIRE_FIELD(msg), WIRE_FIELD(code)); }
+  { wire::object(source, LWSF_WIRE_FIELD(msg), LWSF_WIRE_FIELD(code)); }
 
   void write_bytes(wire::msgpack_writer& dest, const feed_login& self)
-  { wire::object(dest, WIRE_FIELD(account)); }
+  { wire::object(dest, LWSF_WIRE_FIELD(account)); }
 
   void read_bytes(wire::msgpack_reader& source, feed_mempool& self)
   {
     boost::optional<epee::byte_slice> payment_id;
     wire::object(source,
-      WIRE_FIELD(amount),
-      WIRE_FIELD(fee),
-      WIRE_FIELD(unlock_time),
-      WIRE_FIELD_DEFAULTED(recipient, address_meta{}),
-      WIRE_FIELD_DEFAULTED(mixin, std::numeric_limits<std::uint32_t>::max()),
+      LWSF_WIRE_FIELD(amount),
+      LWSF_WIRE_FIELD(fee),
+      LWSF_WIRE_FIELD(unlock_time),
+      LWSF_WIRE_FIELD_DEFAULTED(recipient, address_meta{}),
+      LWSF_WIRE_FIELD_DEFAULTED(mixin, std::numeric_limits<std::uint32_t>::max()),
       wire::optional_field("payment_id", std::ref(payment_id)),
-      WIRE_OPTIONAL_FIELD(rct),
-      WIRE_FIELD(hash),
-      WIRE_FIELD(prefix_hash),
-      WIRE_FIELD(public_key),
-      WIRE_FIELD(tx_pub_key),
-      WIRE_FIELD(index)
+      LWSF_WIRE_OPTIONAL_FIELD(rct),
+      LWSF_WIRE_FIELD(hash),
+      LWSF_WIRE_FIELD(prefix_hash),
+      LWSF_WIRE_FIELD(public_key),
+      LWSF_WIRE_FIELD(tx_pub_key),
+      LWSF_WIRE_FIELD(index)
     );
 
     self.payment_id = make_payment_id(payment_id);
@@ -220,17 +220,17 @@ namespace lwsf { namespace internal { namespace rpc
   void read_bytes(wire::msgpack_reader& source, feed_tx_sync& self)
   {
     wire::object(source,
-      WIRE_FIELD_ARRAY(transactions, min_tx_size),
-      WIRE_FIELD(scanned_block_height),
-      WIRE_FIELD(start_height),
-      WIRE_FIELD(blockchain_height),
-      WIRE_OPTIONAL_FIELD(lookahead_fail),
-      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
+      LWSF_WIRE_FIELD_ARRAY(transactions, min_tx_size),
+      LWSF_WIRE_FIELD(scanned_block_height),
+      LWSF_WIRE_FIELD(start_height),
+      LWSF_WIRE_FIELD(blockchain_height),
+      LWSF_WIRE_OPTIONAL_FIELD(lookahead_fail),
+      LWSF_WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
     );
   }
 
   void read_bytes(wire::msgpack_reader& source, feed_warning& self)
-  { wire::object(source, WIRE_FIELD(msg), WIRE_FIELD(height), WIRE_FIELD(code)); }
+  { wire::object(source, LWSF_WIRE_FIELD(msg), LWSF_WIRE_FIELD(height), LWSF_WIRE_FIELD(code)); }
 
   void write_bytes(wire::json_writer& dest, const uint64_string source)
   {
@@ -248,20 +248,20 @@ namespace lwsf { namespace internal { namespace rpc
     template<typename F, typename T>
     void map_address_meta(F& format, T& self)
     {
-      wire::object(format, WIRE_FIELD(maj_i), WIRE_FIELD(min_i));
+      wire::object(format, LWSF_WIRE_FIELD(maj_i), LWSF_WIRE_FIELD(min_i));
     }
   }
 
-  WIRE_DEFINE_OBJECT(address_meta, map_address_meta);
+  LWSF_WIRE_DEFINE_OBJECT(address_meta, map_address_meta);
 
   void read_bytes(wire::json_reader& source, transaction_spend& self)
   {
     wire::object(source,
-      WIRE_FIELD(amount),
-      WIRE_OPTIONAL_FIELD(sender),
-      WIRE_FIELD(out_index),
-      WIRE_FIELD(key_image),
-      WIRE_FIELD(tx_pub_key)
+      LWSF_WIRE_FIELD(amount),
+      LWSF_WIRE_OPTIONAL_FIELD(sender),
+      LWSF_WIRE_FIELD(out_index),
+      LWSF_WIRE_FIELD(key_image),
+      LWSF_WIRE_FIELD(tx_pub_key)
     );
   }
 
@@ -272,16 +272,16 @@ namespace lwsf { namespace internal { namespace rpc
     boost::optional<std::string> timestamp;
     boost::optional<epee::byte_slice> payment_id;
     wire::object(source,
-      WIRE_FIELD_ARRAY(spent_outputs, min_spent),
+      LWSF_WIRE_FIELD_ARRAY(spent_outputs, min_spent),
       wire::optional_field("payment_id", std::ref(payment_id)),
       wire::optional_field("timestamp", std::ref(timestamp)),
-      WIRE_OPTIONAL_FIELD(fee),
-      WIRE_FIELD(total_received),
-      WIRE_FIELD(unlock_time),
-      WIRE_OPTIONAL_FIELD(height),
-      WIRE_FIELD(hash),
-      WIRE_FIELD(coinbase),
-      WIRE_FIELD(mempool)
+      LWSF_WIRE_OPTIONAL_FIELD(fee),
+      LWSF_WIRE_FIELD(total_received),
+      LWSF_WIRE_FIELD(unlock_time),
+      LWSF_WIRE_OPTIONAL_FIELD(height),
+      LWSF_WIRE_FIELD(hash),
+      LWSF_WIRE_FIELD(coinbase),
+      LWSF_WIRE_FIELD(mempool)
     );
 
     self.payment_id = make_payment_id(payment_id);
@@ -293,7 +293,7 @@ namespace lwsf { namespace internal { namespace rpc
       namespace qi = boost::spirit::qi;
       std::tm fields{};
       if (!qi::parse(timestamp->begin(), timestamp->end(), qi::ushort_ >> '-' >> qi::ushort_ >> '-' >> qi::ushort_ >> 'T' >> qi::ushort_ >> ':' >> qi::ushort_ >> ':' >> qi::ushort_ >> 'Z', fields.tm_year, fields.tm_mon, fields.tm_mday, fields.tm_hour, fields.tm_min, fields.tm_sec))
-        WIRE_DLOG_THROW(wire::error::schema::string, "Timestamp string invalid format");
+        LWSF_WIRE_DLOG_THROW(wire::error::schema::string, "Timestamp string invalid format");
 
       fields.tm_year -= 1900;
       --fields.tm_mon;
@@ -304,19 +304,19 @@ namespace lwsf { namespace internal { namespace rpc
 
   void read_bytes(wire::json_reader& source, get_version& self)
   {
-    wire::object(source, WIRE_FIELD_DEFAULTED(max_subaddresses, unsigned(0)));
+    wire::object(source, LWSF_WIRE_FIELD_DEFAULTED(max_subaddresses, unsigned(0)));
   }
 
   void read_bytes(wire::json_reader& source, get_address_txs& self)
   {
     using min_tx_size = wire::min_element_size<sizeof(crypto::hash) + 7>;
     wire::object(source,
-      WIRE_FIELD_ARRAY(transactions, min_tx_size),
-      WIRE_OPTIONAL_FIELD(lookahead_fail),
-      WIRE_FIELD(scanned_block_height),
-      WIRE_FIELD(start_height),
-      WIRE_FIELD(blockchain_height),
-      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
+      LWSF_WIRE_FIELD_ARRAY(transactions, min_tx_size),
+      LWSF_WIRE_OPTIONAL_FIELD(lookahead_fail),
+      LWSF_WIRE_FIELD(scanned_block_height),
+      LWSF_WIRE_FIELD(start_height),
+      LWSF_WIRE_FIELD(blockchain_height),
+      LWSF_WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
     );
   }
 
@@ -325,32 +325,32 @@ namespace lwsf { namespace internal { namespace rpc
   {
     epee::byte_slice rct;
     wire::object(source,
-      WIRE_FIELD(global_index),
-      WIRE_FIELD(public_key),
+      LWSF_WIRE_FIELD(global_index),
+      LWSF_WIRE_FIELD(public_key),
       wire::field("rct", std::ref(rct))
     );
 
     if (rct.size() < sizeof(self.rct))
-      WIRE_DLOG_THROW_(wire::error::schema::fixed_binary);
+      LWSF_WIRE_DLOG_THROW_(wire::error::schema::fixed_binary);
     std::memcpy(std::addressof(self.rct), rct.data(), sizeof(self.rct));
   }
 
   void read_bytes(wire::json_reader& source, random_outputs& self)
   {
     using max_ring = wire::max_element_count<config::max_ring_size_in_rpc>;
-    wire::object(source, WIRE_FIELD_ARRAY(outputs, max_ring), WIRE_FIELD(amount));
+    wire::object(source, LWSF_WIRE_FIELD_ARRAY(outputs, max_ring), LWSF_WIRE_FIELD(amount));
   }
 
   void write_bytes(wire::json_writer& dest, const get_random_outs_request& self)
   {
     using unused = wire::max_element_count<0>;
-    wire::object(dest, WIRE_FIELD_ARRAY(amounts, unused), WIRE_FIELD(count));
+    wire::object(dest, LWSF_WIRE_FIELD_ARRAY(amounts, unused), LWSF_WIRE_FIELD(count));
   }
 
   void read_bytes(wire::json_reader& source, get_random_outs_response& self)
   {
     using max_inputs = wire::max_element_count<config::max_inputs_in_rpc>;
-    wire::object(source, WIRE_FIELD_ARRAY(amount_outs, max_inputs));
+    wire::object(source, LWSF_WIRE_FIELD_ARRAY(amount_outs, max_inputs));
   }
 
 
@@ -456,17 +456,17 @@ namespace lwsf { namespace internal { namespace rpc
   {
     wire_read::array(source, self.value, wire::min_element_size<2>{});
     if (!self.is_valid())
-      WIRE_DLOG_THROW(wire::error::schema::array, "invalid array mapping");
+      LWSF_WIRE_DLOG_THROW(wire::error::schema::array, "invalid array mapping");
   } 
   void write_bytes(wire::json_writer& dest, const subaddrs& self)
   {
     wire_write::array(dest, self.value);
   }
 
-  WIRE_JSON_DEFINE_OBJECT(get_subaddrs::mapped_type, map_subaddr);
+  LWSF_WIRE_JSON_DEFINE_OBJECT(get_subaddrs::mapped_type, map_subaddr);
   void read_bytes(wire::json_reader& source, get_subaddrs& self)
   {
-    wire::object(source, WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs));
+    wire::object(source, LWSF_WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs));
   }
 
   namespace
@@ -500,7 +500,7 @@ namespace lwsf { namespace internal { namespace rpc
         {
           ringct_triplet rct{};
           if (!epee::from_hex::to_buffer(epee::as_mut_byte_span(rct), source))
-            WIRE_DLOG_THROW(wire::error::schema::binary, "Invalid hex for ringct");
+            LWSF_WIRE_DLOG_THROW(wire::error::schema::binary, "Invalid hex for ringct");
           if (rct.amount == rct::key{} && rct.mask == rct::identity())
             return ringct{rct::identity(), ringct::format::unencrypted};
           return ringct{rct.mask, ringct::format::encrypted}; 
@@ -512,7 +512,7 @@ namespace lwsf { namespace internal { namespace rpc
       template<typename T>
       ringct operator()(const T&) const
       {
-        WIRE_DLOG_THROW(wire::error::schema::string, "Expected string or null");
+        LWSF_WIRE_DLOG_THROW(wire::error::schema::string, "Expected string or null");
       }
     };
   }
@@ -521,15 +521,15 @@ namespace lwsf { namespace internal { namespace rpc
   {
     wire::basic_value raw_rct{};
     wire::object(source,
-      WIRE_FIELD(amount),
-      WIRE_FIELD(index),
-      WIRE_FIELD(global_index),
-      WIRE_OPTIONAL_FIELD(recipient),
+      LWSF_WIRE_FIELD(amount),
+      LWSF_WIRE_FIELD(index),
+      LWSF_WIRE_FIELD(global_index),
+      LWSF_WIRE_OPTIONAL_FIELD(recipient),
       wire::optional_field("rct", std::ref(raw_rct)),
-      WIRE_FIELD(tx_hash),
-      WIRE_FIELD(tx_prefix_hash),
-      WIRE_FIELD(public_key),
-      WIRE_FIELD(tx_pub_key)
+      LWSF_WIRE_FIELD(tx_hash),
+      LWSF_WIRE_FIELD(tx_prefix_hash),
+      LWSF_WIRE_FIELD(public_key),
+      LWSF_WIRE_FIELD(tx_pub_key)
     );
     self.rct = std::visit(convert_rct{}, raw_rct.value);
   }
@@ -539,9 +539,9 @@ namespace lwsf { namespace internal { namespace rpc
     wire::object(dest,
       wire::field("address", std::cref(self.creds.address)),
       wire::field("view_key", std::cref(self.creds.view_key)),
-      WIRE_FIELD_COPY(amount),
-      WIRE_FIELD_COPY(mixin),
-      WIRE_FIELD_COPY(use_dust)
+      LWSF_WIRE_FIELD_COPY(amount),
+      LWSF_WIRE_FIELD_COPY(mixin),
+      LWSF_WIRE_FIELD_COPY(use_dust)
     ); 
   }
 
@@ -552,10 +552,10 @@ namespace lwsf { namespace internal { namespace rpc
     >;
     using max_fees = wire::max_element_count<8>;
     wire::object(source,
-      WIRE_FIELD_ARRAY(outputs, min_output_size),
-      WIRE_FIELD_ARRAY(fees, max_fees),
-      WIRE_FIELD(per_byte_fee),
-      WIRE_FIELD(fee_mask)
+      LWSF_WIRE_FIELD_ARRAY(outputs, min_output_size),
+      LWSF_WIRE_FIELD_ARRAY(fees, max_fees),
+      LWSF_WIRE_FIELD(per_byte_fee),
+      LWSF_WIRE_FIELD(fee_mask)
     );
   }
 
@@ -565,21 +565,21 @@ namespace lwsf { namespace internal { namespace rpc
     wire::object(source,
       wire::field("address", std::cref(self.creds.address)),
       wire::field("view_key", std::cref(self.creds.view_key)),
-      WIRE_FIELD_DEFAULTED(from_height, unsigned(0)),
-      WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
+      LWSF_WIRE_FIELD_DEFAULTED(from_height, unsigned(0)),
+      LWSF_WIRE_FIELD_DEFAULTED(lookahead, address_meta{})
     );
   }
 
   void read_bytes(wire::json_reader& source, import_response& self)
   {
     wire::object(source,
-      WIRE_OPTIONAL_FIELD(payment_address),
-      WIRE_OPTIONAL_FIELD(payment_id),
-      WIRE_OPTIONAL_FIELD(import_fee),
-      WIRE_OPTIONAL_FIELD(lookahead),
-      WIRE_FIELD(status),
-      WIRE_FIELD(new_request),
-      WIRE_FIELD(request_fulfilled)
+      LWSF_WIRE_OPTIONAL_FIELD(payment_address),
+      LWSF_WIRE_OPTIONAL_FIELD(payment_id),
+      LWSF_WIRE_OPTIONAL_FIELD(import_fee),
+      LWSF_WIRE_OPTIONAL_FIELD(lookahead),
+      LWSF_WIRE_FIELD(status),
+      LWSF_WIRE_FIELD(new_request),
+      LWSF_WIRE_FIELD(request_fulfilled)
     );
   }
 
@@ -589,31 +589,31 @@ namespace lwsf { namespace internal { namespace rpc
     wire::object(dest,
       wire::field("address", std::cref(self.creds.address)),
       wire::field("view_key", std::cref(self.creds.view_key)),
-      WIRE_FIELD_COPY(maj_i),
-      WIRE_FIELD_COPY(min_i),
-      WIRE_FIELD_COPY(n_maj),
-      WIRE_FIELD_COPY(n_min),
-      WIRE_FIELD_COPY(get_all)
+      LWSF_WIRE_FIELD_COPY(maj_i),
+      LWSF_WIRE_FIELD_COPY(min_i),
+      LWSF_WIRE_FIELD_COPY(n_maj),
+      LWSF_WIRE_FIELD_COPY(n_min),
+      LWSF_WIRE_FIELD_COPY(get_all)
     );
   }
 
   void read_bytes(wire::json_reader& source, provision_subaddrs_response& self)
   {
     wire::object(source,
-      WIRE_FIELD_ARRAY(new_subaddrs, max_subaddrs), 
-      WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs)
+      LWSF_WIRE_FIELD_ARRAY(new_subaddrs, max_subaddrs), 
+      LWSF_WIRE_FIELD_ARRAY(all_subaddrs, max_subaddrs)
     );
   }
 
 
   void write_bytes(wire::json_writer& dest, const submit_raw_tx_request& self)
   {
-    wire::object(dest, WIRE_FIELD(tx));
+    wire::object(dest, LWSF_WIRE_FIELD(tx));
   }
 
   void read_bytes(wire::json_reader& source, submit_raw_tx_response& self)
   {
-    wire::object(source, WIRE_FIELD(status));
+    wire::object(source, LWSF_WIRE_FIELD(status));
   }
 
 
@@ -623,7 +623,7 @@ namespace lwsf { namespace internal { namespace rpc
       wire::field("address", std::cref(self.creds.address)),
       wire::field("view_key", std::ref(self.creds.view_key)),
       wire::field("subaddrs", wire::array(std::ref(self.subaddrs_))), // always write field (not optional)
-      WIRE_FIELD_COPY(get_all)
+      LWSF_WIRE_FIELD_COPY(get_all)
     );
   }
 

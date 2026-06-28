@@ -30,10 +30,10 @@
 #include <boost/uuid/uuid.hpp>
 #include <type_traits>
 
-namespace wire
+namespace lwsf { namespace wire
 {
   template<>
   struct is_blob<boost::uuids::uuid>
     : std::true_type
   {};
-}
+}}

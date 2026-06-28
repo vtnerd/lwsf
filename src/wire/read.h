@@ -41,8 +41,8 @@
 
 /*
   Custom types (e.g. `type` in namespace `ns`) can define an input function by:
-    * `namespace wire { template<> struct is_blob<ns::type> : std::true_type {}; }`
-    * `namespace wire { void read_bytes(writer&, ns::type&); }`
+    * `namespace lwsf { namespace wire { template<> struct is_blob<ns::type> : std::true_type {}; }`
+    * `namespace lwsf { namespace wire { void read_bytes(writer&, ns::type&); }`
     * `namespace ns { void read_bytes(wire::writer&, type&); }`
 
   See `traits.h` for `is_blob` requirements. `read_bytes` function can also
@@ -52,7 +52,7 @@
   functions not defined by base interface. Using base interface allows for
   multiple formats with minimal instruction count. */
 
-namespace wire
+namespace lwsf { namespace wire
 {
   //! Interface for converting "wire" (byte) formats to C/C++ objects without a DOM.
   class reader
@@ -544,4 +544,4 @@ namespace wire
   {
     wire::object(source, std::forward<T>(fields)...);
   }
-}
+}}

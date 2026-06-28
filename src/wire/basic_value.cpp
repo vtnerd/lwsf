@@ -31,7 +31,7 @@
 #include "wire/read.h"
 #include "wire/write.h"
 
-namespace wire
+namespace lwsf { namespace wire
 {
   static void write_bytes(writer& dest, const std::nullptr_t&)
   {
@@ -51,4 +51,4 @@ namespace wire
   {
     std::visit([&dest] (const auto& val) { wire_write::bytes(dest, val); }, source.value);
   }
-}
+}}
