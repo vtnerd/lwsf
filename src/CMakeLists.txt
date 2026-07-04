@@ -40,6 +40,7 @@ set(lwsf_sources
   subaddress_minor.cpp
   transaction_history.cpp
   transaction_info.cpp
+  utils/ascii.cpp
   utils/encrypted_file.cpp
   wallet.cpp
   wallet_manager.cpp
@@ -52,6 +53,7 @@ set(lwsf_headers
   pending_transaction.h
   transaction_history.h
   transaction_info.h
+  utils/ascii.h
   utils/encrypted_file.h
   utils/numeric.h
   wallet.h

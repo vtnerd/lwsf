@@ -53,6 +53,15 @@ cmake_path(CONVERT "${MONERO_SOURCE_DIR}" TO_CMAKE_PATH_LIST MONERO_SOURCE_DIR_C
 include(FetchContent)
 FetchContent_Declare(monero SOURCE_DIR ${MONERO_SOURCE_DIR_CONVERTED} EXCLUDE_FROM_ALL)
 
+if (NOT LWSF_MASTER_ENABLE)
+  set(Boost_NO_BOOST_CMAKE ON)
+endif ()
+
+if(STATIC)
+  set(Boost_USE_STATIC_LIBS ON)
+  set(Boost_USE_STATIC_RUNTIME ON)
+endif()
+
 if (NOT monero_POPULATED)
   FetchContent_MakeAvailable(monero)
 endif ()
@@ -64,12 +73,11 @@ endif ()
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 
-set(Boost_NO_BOOST_CMAKE ON)
-if(STATIC)
-  set(Boost_USE_STATIC_LIBS ON)
-  set(Boost_USE_STATIC_RUNTIME ON)
+if (LWSF_MASTER_ENABLE)
+  find_package(Boost 1.66 QUIET REQUIRED COMPONENTS filesystem program_options thread CONFIG)
+else ()
+  find_package(Boost 1.66 QUIET REQUIRED COMPONENTS filesystem program_options thread)
 endif()
-find_package(Boost 1.66 QUIET REQUIRED COMPONENTS filesystem program_options thread)
 
 list(INSERT CMAKE_MODULE_PATH 0
   "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
