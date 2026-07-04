@@ -1828,7 +1828,7 @@ namespace lwsf { namespace internal { namespace backend
               {
   ws_connect:
                 BOOST_ASIO_CORO_YIELD self.client.ws_async(
-                  rpc::feed::endpoint(), rpc::feed::protocol(), store(&self.feed, wrap(self_ptr, *this))
+                  rpc::feed::endpoint(), rpc::feed::protocol(), wrap(self_ptr, store(&self.feed, wrap(self_ptr, *this)))
                 );
 
                 if (!error && self.feed)
