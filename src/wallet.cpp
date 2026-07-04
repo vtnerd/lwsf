@@ -1595,6 +1595,8 @@ namespace lwsf { namespace internal
                 const auto ring = std::lower_bound(decoys.begin(), decoys.end(), amount, by_amount{});
                 if (ring == decoys.end() || ring->amount != rpc::uint64_string(amount))
                   throw std::runtime_error{"Missing requested decoys"};
+                if (ring->outputs.size() != mixin_count)
+                  throw std::runtime_error{"Unexpected decoy (mixin) count from server"};
 
                 for (const auto& decoy : ring->outputs)
                   entry.outputs.emplace_back(std::uint64_t(decoy.global_index), rct::ctkey{decoy.public_key, decoy.rct});
