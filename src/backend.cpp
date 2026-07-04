@@ -716,8 +716,19 @@ namespace lwsf { namespace internal { namespace backend
       if (!merged.new_transactions.empty() || new_height - orig_height)
         listener.updated();
 
-      for (std::uint64_t i = orig_height; i < new_height; ++i)
+      // Call `listener.newBlock` a max of `config::notify_block_limit` times
+      const std::uint64_t diff = new_height - orig_height;
+      const std::uint64_t shift =
+        std::max(diff / config::notify_block_limit, std::uint64_t(1));
+      for (std::uint64_t i = orig_height; i < new_height; i += shift)
+      {
         listener.newBlock(i);
+        if (std::numeric_limits<std::uint64_t>::max() - shift < i)
+          break;
+      }
+
+      if (diff && diff % shift != 0)
+        listener.newBlock(new_height - 1);
 
       for (const auto& tx : merged.new_transactions)
       {
@@ -1868,7 +1879,7 @@ namespace lwsf { namespace internal { namespace backend
             }
           }
 
-          frame_->orig_scan_height = self.primary.scan_height;
+          frame_->orig_scan_height = std::max(self.primary.scan_height, self.primary.restore_height);
           frame_->login = rpc::login{self.primary.address, self.primary.view.sec};
           BOOST_ASIO_CORO_YIELD rpc::invoke_async(
             self.client, frame_->login, std::addressof(frame_->txs_response), wrap(self_ptr, *this)
