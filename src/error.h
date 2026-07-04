@@ -54,6 +54,7 @@ namespace lwsf
     import_pending,     //!< `import_wallet_request` not fulfilled/approved
     invalid_scheme,     //!< Invalid network scheme
     network_type,       //!< Mismatch on network type
+    send_not_ok,        //!< `send_tx` status was NOT `OK`.
     subaddr_ahead,      //!< Server limits on subaddresses affects lookahead
     subaddr_disabled,   //!< Server has subaddresses disabled
     subaddr_local,      //!< Local limits on subaddresses too small

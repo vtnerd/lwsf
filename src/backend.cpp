@@ -43,6 +43,7 @@
 #include "lwsf_config.h"
 #include "net/websocket.h"
 #include "ringct/rctOps.h"
+#include "utils/ascii.h"
 #include "wire.h"
 #include "wire/adapted/crypto.h"
 #include "wire/adapted/pair.h"
@@ -2399,7 +2400,12 @@ namespace lwsf { namespace internal { namespace backend
             std::addressof(frame_->response),
             *this
           );
-          frame_->f(error);
+          if (error)
+            frame_->f(error);
+          else if (!ascii_nocase_compare(frame_->response.status, "OK"))
+            frame_->f(error::send_not_ok);
+          else
+            frame_->f({});
         }
       }
     };

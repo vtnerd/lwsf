@@ -60,6 +60,8 @@ namespace lwsf
       return "Import/restore from height is awaiting approval";
     case error::network_type:
       return "Mismatch on network type";
+    case error::send_not_ok:
+      return "send_tx status was NOT ok";
     case error::subaddr_ahead:
       return "server has limits too low for requested subaddress lookahead";
     case error::subaddr_disabled:
