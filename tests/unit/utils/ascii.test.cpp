@@ -27,7 +27,7 @@
 
 #include "framework.test.h"
 
-#include "util/ascii.h"
+#include "utils/ascii.h"
 
 LWS_CASE("util::ascii")
 {

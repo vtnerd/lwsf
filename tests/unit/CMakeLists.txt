@@ -33,5 +33,6 @@ target_link_libraries(lwsf-unit-framework)
 add_executable(lwsf-unit main.cpp backend.test.cpp rpc.test.cpp)
 
 add_subdirectory(net)
-target_link_libraries(lwsf-unit lwsf-api lwsf-unit-framework lwsf-unit-net monero::libraries)
+add_subdirectory(utils)
+target_link_libraries(lwsf-unit lwsf-api lwsf-unit-framework lwsf-unit-net lwsf-unit-utils monero::libraries)
 add_test(NAME lwsf-unit COMMAND lwsf-unit -v)
