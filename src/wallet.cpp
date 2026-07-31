@@ -2017,7 +2017,88 @@ namespace lwsf { namespace internal
   uint64_t wallet::estimateTransactionFee(const std::vector<std::pair<std::string, uint64_t>> &destinations,
                                           Monero::PendingTransaction::Priority priority) const
   {
-    throw std::runtime_error{"Not Implemented yet"};
+    // Weight-based fee estimate. Local only — no tx build, no network. Gathers
+    // the (cached) unspent outputs and greedily counts how many inputs cover
+    // the amount + fee, so the estimate tracks fragmented wallets, then models
+    // tx_extra to account for subaddress destinations.
+    const unsigned priority_int = priority <= 0 ? 1 : unsigned(priority) - 1;
+    const std::size_t n_outputs = destinations.size() + 1; // + change
+
+    std::uint64_t per_byte_fee = 0;
+    std::uint64_t fee_mask = 0;
+    cryptonote::network_type ctype{};
+    std::vector<std::uint64_t> unspent_amounts;
+    {
+      const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+      fee_mask = data_.wallet->fee_mask;
+      if (data_.wallet->per_byte_fee.empty() || !fee_mask)
+        return 0; // no fee info yet (not logged in / not synced)
+      per_byte_fee = (data_.wallet->per_byte_fee.size() <= priority_int)
+        ? data_.wallet->per_byte_fee.back()
+        : data_.wallet->per_byte_fee[priority_int];
+      ctype = data_.wallet->get_net_type();
+
+      // Gather spendable outputs for account 0,
+      // mirroring createTransactionMultDest: unlocked, minus already-spent.
+      const std::uint64_t height = data_.wallet->blockchain_height;
+      const Monero::NetworkType mtype = data_.wallet->primary.type;
+      std::unordered_map<crypto::public_key, std::uint64_t> unspent;
+      for (const auto& tx : data_.wallet->primary.txes)
+      {
+        if (!tx.second->is_unlocked(height, mtype))
+          continue;
+        for (const auto& receive : tx.second->receives)
+        {
+          const std::uint64_t amt = receive.second.amount;
+          if (amt && receive.second.recipient.maj_i == 0)
+            unspent[receive.first] = amt;
+        }
+      }
+      for (const auto& tx : data_.wallet->primary.txes)
+        for (const auto& spend : tx.second->spends)
+          unspent.erase(spend.second.output_pub);
+
+      unspent_amounts.reserve(unspent.size());
+      for (const auto& u : unspent)
+        unspent_amounts.push_back(u.second);
+    }
+
+    // Model tx_extra realistically: the tx public key (33) + an 8-byte
+    // payment-id nonce (real for integrated addresses, the dummy Monero adds
+    // otherwise) + additional tx public keys (one per output) when any
+    // destination is a subaddress. A flat 44 misses the subaddress case.
+    std::size_t extra_size = 33 + 11;
+    bool any_subaddress = false;
+    for (const auto& dest : destinations)
+    {
+      cryptonote::address_parse_info info{};
+      if (cryptonote::get_account_address_from_str(info, ctype, dest.first) && info.is_subaddress)
+        any_subaddress = true;
+    }
+    if (any_subaddress)
+      extra_size += 2 + 32 * n_outputs; // additional pub keys
+
+    std::uint64_t total = 0;
+    for (const auto& dest : destinations)
+      total += dest.second;
+
+    // Greedily take the largest outputs until they cover amount + fee,
+    // recomputing the fee as the input count grows (fee depends on size).
+    std::sort(unspent_amounts.begin(), unspent_amounts.end(), std::greater<std::uint64_t>());
+    std::uint64_t selected = 0;
+    std::size_t n_inputs = 0;
+    for (const std::uint64_t amt : unspent_amounts)
+    {
+      selected += amt;
+      ++n_inputs;
+      const std::uint64_t fee = estimate_fee(per_byte_fee, n_inputs, n_outputs, mixin_, extra_size, fee_mask);
+      if (selected >= total + fee)
+        break;
+    }
+    if (n_inputs == 0)
+      n_inputs = 1; // no unspent info cached; fall back to a single input
+
+    return estimate_fee(per_byte_fee, n_inputs, n_outputs, mixin_, extra_size, fee_mask);
   }
 
   bool wallet::exportKeyImages(const std::string &filename, bool all)
