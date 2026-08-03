@@ -2098,6 +2098,10 @@ namespace lwsf { namespace internal
     if (n_inputs == 0)
       n_inputs = 1; // no unspent info cached; fall back to a single input
 
+    // Real txs merge dust in as a 2nd input when one would suffice; mirror it.
+    if (n_inputs < 2 && unspent_amounts.size() >= 2)
+      n_inputs = 2;
+
     return estimate_fee(per_byte_fee, n_inputs, n_outputs, mixin_, extra_size, fee_mask);
   }
 
