@@ -40,6 +40,7 @@
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "error.h"
 #include "hex.h"               // monero/src
+#include "int-util.h"          // monero/contrib/epee/include
 #include "lwsf_config.h"
 #include "net/websocket.h"
 #include "ringct/rctOps.h"
