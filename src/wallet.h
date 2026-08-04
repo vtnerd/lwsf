@@ -229,6 +229,14 @@ namespace internal
      */
     virtual bool init(const std::string &daemon_address, uint64_t, const std::string &daemon_username = "", const std::string &daemon_password = "", bool use_ssl = false, bool lightWallet = false, const std::string &proxy_address = "") override;
 
+#ifdef LWSF_MASTER_ENABLE
+    virtual void allowMismatchedDaemonVersion(bool allow_mismatch) override
+    {}
+
+    virtual void setRingDatabase(const std::string &path) override
+    { throw std::logic_error{"lwsf does not support ring database"}; }
+#endif
+
    /*!
     * \brief createWatchOnly - Creates a watch only wallet
     * \param path - where to store the wallet
