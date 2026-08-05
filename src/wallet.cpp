@@ -2087,14 +2087,22 @@ namespace lwsf { namespace internal
     std::sort(unspent_amounts.begin(), unspent_amounts.end(), std::greater<std::uint64_t>());
     std::uint64_t selected = 0;
     std::size_t n_inputs = 0;
+    bool covered = false;
     for (const std::uint64_t amt : unspent_amounts)
     {
       selected += amt;
       ++n_inputs;
       const std::uint64_t fee = estimate_fee(per_byte_fee, n_inputs, n_outputs, mixin_, extra_size, fee_mask);
       if (selected >= total + fee)
+      {
+        covered = true;
         break;
+      }
     }
+
+    if (!unspent_amounts.empty() && !covered)
+      return 0;
+
     if (n_inputs == 0)
       n_inputs = 1; // no unspent info cached; fall back to a single input
 
