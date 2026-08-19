@@ -13,7 +13,7 @@ env:
         echo "Acquire::Retries \"3\";"         | sudo tee -a /etc/apt/apt.conf.d/80-custom
         echo "Acquire::http::Timeout \"120\";" | sudo tee -a /etc/apt/apt.conf.d/80-custom
         echo "Acquire::ftp::Timeout \"120\";"  | sudo tee -a /etc/apt/apt.conf.d/80-custom
-  BREW_INSTALL_MAC: 'HOMEBREW_NO_AUTO_UPDATE=1 brew install boost hidapi openssl zmq libpgm miniupnpc expat libunwind-headers protobuf unbound'
+  BREW_INSTALL_MAC: 'HOMEBREW_NO_AUTO_UPDATE=1 brew install boost hidapi openssl zmq libpgm miniupnpc expat libunwind-headers protobuf rust unbound'
   CONFIGURE: '-B "$GITHUB_WORKSPACE/lwsf/build" -DCMAKE_BUILD_TYPE=Release -DMONERO_SOURCE_DIR="$GITHUB_WORKSPACE/monero" -DLWSF_BUILD_TESTS=ON -S "$GITHUB_WORKSPACE/lwsf"'
   BUILD: 'cmake --build "$GITHUB_WORKSPACE/lwsf/build" -j$(nproc)'
   RUN: 'ctest --test-dir "$GITHUB_WORKSPACE/lwsf/build" --output-on-failure'
@@ -61,11 +61,23 @@ jobs:
         run: |
           apt update
           ${{env.APT_INSTALL_LINUX}}
+      - name: Install Cargo (rustup)
+        if: matrix.distro == 'debian:bookworm-slim'
+        run: |
+          apt -y install curl
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          . "$HOME/.cargo/env"
+          rustup default stable
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+      - name: Install Cargo (Debian/apt)
+        if: matrix.distro == 'debian:trixie-slim'
+        run: apt -y install cargo
       - name: Install Dependencies (Arch/pacman)
         if: matrix.distro == 'archlinux:base-devel'
         run: |
           sudo pacman --noconfirm -Syu
-          sudo pacman --noconfirm -S cmake boost boost-libs git hidapi libsodium miniupnpc openssl unbound zeromq 
+          sudo pacman --noconfirm -S cmake boost boost-libs git hidapi libsodium miniupnpc openssl rustup unbound zeromq
+          rustup default stable
       - name: Checkout Monero Source
         uses: actions/checkout@v4
         with:
@@ -96,6 +108,7 @@ jobs:
           ${{env.APT_SET_CONF}}
           sudo apt update
           sudo ${{env.APT_INSTALL_LINUX}}
+          sudo apt -y install cargo
       - name: Install dependencies (MacOS)
         if: matrix.os == 'macos-15' || matrix.os == 'macos-26'
         run: ${{env.BREW_INSTALL_MAC}}
@@ -142,8 +155,11 @@ jobs:
             mingw-w64-x86_64-hidapi
             mingw-w64-x86_64-miniupnpc
             mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-rustup
             mingw-w64-x86_64-unbound
             mingw-w64-x86_64-zeromq
+      - name: Install rust/cargo
+        run: rustup default stable
       - name: Checkout Monero Source
         uses: actions/checkout@v4
         with:
