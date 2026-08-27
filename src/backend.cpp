@@ -1540,7 +1540,7 @@ namespace lwsf { namespace internal { namespace backend
   cryptonote::account_keys wallet::get_primary_keys() const
   {
     return {
-      {primary.view.pub, primary.spend.pub}, primary.spend.sec, primary.view.sec
+      {primary.spend.pub, primary.view.pub}, primary.spend.sec, primary.view.sec
     }; 
   }
 
