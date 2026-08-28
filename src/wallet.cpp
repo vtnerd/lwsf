@@ -1576,6 +1576,7 @@ namespace lwsf { namespace internal
 
             std::unordered_map<crypto::public_key, cryptonote::subaddress_index> subs;
             std::vector<cryptonote::tx_source_entry> sources;
+            subs.emplace(change_account.m_spend_public_key, cryptonote::subaddress_index{subaddr_account, 0});
             for (const auto& spend : spending)
             {
               const auto& source = spend.second->receives.at(spend.first);
