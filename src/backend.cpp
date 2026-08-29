@@ -528,9 +528,12 @@ namespace lwsf { namespace internal { namespace backend
       {
         if (tx.second)
         {
-          const bool rescanning =
-            source.scanned_block_height < tx.second->height.value_or(0);
-          if (rescanning || tx.second->has_metadata())
+          const std::uint64_t tx_height = tx.second->height.value_or(0);
+          const bool rescanning = source.scanned_block_height < tx_height;
+          // Don't drop a local tx just because the server didn't report it: a freshly-switched
+          // server hasn't scanned blocks below its start_height yet (a full resync scans from 0).
+          const bool below_server_scan = tx_height <= std::uint64_t(source.start_height);
+          if (rescanning || below_server_scan || tx.second->has_metadata())
           {
             const auto iter = updated_txes.emplace(tx.first, nullptr).first;
             if (!iter->second)
@@ -539,7 +542,9 @@ namespace lwsf { namespace internal { namespace backend
               for (const auto& spend : tx.second->spends)
                 images.emplace(spend.first, iter->second);
 
-              if (!rescanning)
+              // Leave below_server_scan txes confirmed (the new server won't re-scan them); only
+              // clear height on the rest, so the server can re-confirm them.
+              if (!rescanning && !below_server_scan)
               {
                 iter->second->height = boost::none;
                 iter->second->failed = false;
@@ -1912,8 +1917,9 @@ namespace lwsf { namespace internal { namespace backend
   txs_merged:
           if (!self.import_error && self.primary.requested_start < self.primary.restore_height)
           {
+            // Resume from the last-seen height, not the wallet birthday.
             BOOST_ASIO_CORO_YIELD restore_height(
-              self_ptr, self.primary.requested_start, wrap(self_ptr, *this)
+              self_ptr, frame_->orig_scan_height, wrap(self_ptr, *this)
             );
             import_called = true;
           }
