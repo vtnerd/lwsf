@@ -2100,7 +2100,7 @@ namespace lwsf { namespace internal
       }
     }
 
-    if (!unspent_amounts.empty() && !covered)
+    if (!covered)
       return 0;
 
     if (n_inputs == 0)
