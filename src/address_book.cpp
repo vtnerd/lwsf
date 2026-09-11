@@ -28,9 +28,10 @@
 
 #include "address_book.h"
 
+#include "backend.h"
+
 #include <boost/thread/lock_guard.hpp>
 #include <utility>
-#include "backend.h"
 #include "cryptonote_basic/cryptonote_basic_impl.h"
 #include "error.h"
 
