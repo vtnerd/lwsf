@@ -28,12 +28,13 @@
 
 #include "transaction_history.h"
 
+#include "backend.h"
+
 #include <boost/thread/lock_guard.hpp>
 #include <limits>
 #include <map>
 #include <stdexcept>
 
-#include "backend.h"
 #include "error.h"
 #include "hex.h" // monero/contrib/epee/include
 #include "transaction_info.h"
