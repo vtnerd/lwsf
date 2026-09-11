@@ -708,6 +708,14 @@ namespace internal
      * \return true if the signature verified, false otherwise
      */
     virtual bool verifySignedMessage(const std::string &message, const std::string &addres, const std::string &signature) const override { /* TODO */ return false; }
+    /*!
+     * \brief verifySignedMessageWithDetails - verify a signature and identify the signing key and algorithm
+     * \param message - the message (arbitrary byte data)
+     * \param address - the address the signature claims to be made with
+     * \param signature - the signature
+     * \return the verification result, including the signature version and key type
+     */
+    virtual MessageSignatureResult verifySignedMessageWithDetails(const std::string &message, const std::string &address, const std::string &signature) const override { return {}; }
 
     /*!
      * \brief signMultisigParticipant   signs given message with the multisig public signer key
