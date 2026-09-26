@@ -41,7 +41,7 @@
 #include "lwsf_config.h"
 #include "lwsf_rpc.h"
 #include "lws_frontend.h"
-#ifdef LWSF_POLYSEED_ENABLE
+#if defined(LWSF_POLYSEED_ENABLE) || defined(LWSF_MASTER_ENABLE)
   #include "polyseed.h"
 #endif
 #include "net/context.h"
@@ -264,7 +264,7 @@ namespace lwsf
 	return nullptr;
       }
 
-#ifdef LWSF_POLYSEED_ENABLE
+#if defined(LWSF_POLYSEED_ENABLE) || defined(LWSF_MASTER_ENABLE)
     /*!
      * \brief creates a wallet from a polyseed mnemonic phrase
      * \param path                         Name of the wallet file to be created
@@ -294,6 +294,7 @@ namespace lwsf
         }
       };
 
+      bool is_crypted = false;
       std::uint64_t birthday{};
       crypto::secret_key base{};
       std::string language{};
@@ -310,7 +311,8 @@ namespace lwsf
 
 	language = polyseed_get_lang_name(lang);
 
-        if (polyseed_is_encrypted(temp))
+        is_crypted = polyseed_is_encrypted(temp);
+        if (is_crypted)
           polyseed_crypt(temp, passphrase.c_str());
 
 	birthday = polyseed_get_birthday(temp);
@@ -324,7 +326,7 @@ namespace lwsf
 	  throw std::bad_alloc{};
       } // cleanup polyseed
 
-      if (!passphrase.empty())
+      if (!is_crypted && !passphrase.empty())
         base = cryptonote::decrypt_key(base, passphrase);
 
       cryptonote::account_base keys{};

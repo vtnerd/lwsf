@@ -1108,57 +1108,90 @@ namespace lwsf { namespace internal
     return data_.wallet->blockchain_height == data_.wallet->primary.scan_height;
   }
 
-#ifdef LWSF_POLYSEED_ENABLE
+#if defined(LWS_POLYSEED_ENABLE) || defined(LWSF_MASTER_ENABLE)
+  namespace
+  {
+    bool get_polyseed(const backend::account& src, std::string &seed, std::uint64_t& birthday, bool& is_encrypted)
+    {
+      struct release_polyseed
+      {
+        void operator()(polyseed_data* ptr) const noexcept
+        {
+          if (ptr) polyseed_free(ptr);
+        }
+      };
+
+      if (!src.poly)
+        return false;
+
+      if (src.poly->seed.size() != sizeof(polyseed_storage))
+        return false;
+     
+      polyseed_data* temp = nullptr;
+      if (polyseed_load(src.poly->seed.data(), &temp) != POLYSEED_OK || !temp)
+        return false;
+
+      const std::unique_ptr<polyseed_data, release_polyseed> cleanup{temp};
+
+      const polyseed_lang* lang = nullptr;
+      const int langs = polyseed_get_num_langs();
+      for (int i = 0; i < langs; ++i)
+      {
+        lang = polyseed_get_lang(i);
+        if (lang && polyseed_get_lang_name(lang) == src.language)
+          break;
+      }
+
+      if (!lang)
+        return false;
+
+      seed.resize(POLYSEED_STR_SIZE);
+      seed.resize(polyseed_encode(temp, lang, POLYSEED_MONERO, &seed[0]));
+      birthday = polyseed_get_birthday(temp);
+      is_encrypted = polyseed_is_encrypted(temp);
+      return true;
+    }
+
+  }
+#endif
+
+#if defined(LWSF_POLYSEED_ENABLE) || defined(LWSF_MASTER_ENABLE)
   void wallet::setPolyseed(epee::byte_slice seed, std::string passphrase)
   {
     const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
     data_.wallet->primary.poly = backend::account::polyseed{std::move(seed), std::move(passphrase)};
   }
+#endif
 
+#ifdef LWSF_POLYSEED_ENABLE
   bool wallet::getPolyseed(std::string &seed, std::string &passphrase) const
   {
-    struct release_polyseed
-    {
-      void operator()(polyseed_data* ptr) const noexcept
-      {
-        if (ptr) polyseed_free(ptr);
-      }
-    };
-
-    std::unique_ptr<polyseed_data, release_polyseed> cleanup{};
-
     seed.clear();
     passphrase.clear();
 
     const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
-    if (!data_.wallet->primary.poly)
-      return false;
-    if (data_.wallet->primary.poly->seed.size() != sizeof(polyseed_storage))
+
+    bool is_encrypted = false;
+    std::uint64_t birthday = 0;
+    if (!data_.wallet || !get_polyseed(data_.wallet->primary, seed, birthday, is_encrypted))
       return false;
    
-    polyseed_data* temp = nullptr;
-    if (polyseed_load(data_.wallet->primary.poly->seed.data(), &temp) != POLYSEED_OK)
-      return false;
-    cleanup.reset(temp);
-
-    const polyseed_lang* lang = nullptr;
-    const int langs = polyseed_get_num_langs();
-    for (int i = 0; i < langs; ++i)
-    {
-      lang = polyseed_get_lang(i);
-      if (lang && polyseed_get_lang_name(lang) == data_.wallet->primary.language)
-	break;
-    }
-
-    if (!lang)
-      return false;
-
-    seed.resize(POLYSEED_STR_SIZE);
-    seed.resize(polyseed_encode(temp, lang, POLYSEED_MONERO, &seed[0]));
     passphrase = data_.wallet->primary.poly->passphrase;
     return true;
   }
 #endif // LWSF_POLYSEED_ENABLE
+
+#ifdef LWSF_MASTER_ENABLE
+  bool wallet::getPolyseed(std::string &seed, uint64_t& birthday, bool& is_encrypted) const
+  {
+    is_encrypted = false;
+    birthday = 0;
+    seed.clear();
+
+    const boost::lock_guard<boost::mutex> lock{data_.wallet->sync};
+    return data_.wallet && get_polyseed(data_.wallet->primary, seed, birthday, is_encrypted);
+  }
+#endif
 
   void wallet::startRefresh()
   {

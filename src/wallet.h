@@ -349,9 +349,16 @@ namespace internal
      */
     virtual bool synchronized() const override;
 
-#ifdef LWSF_POLYSEED_ENABLE
+#if defined(LWSF_POLYSEED_ENABLE) || defined(LWSF_MASTER_ENABLE)
     void setPolyseed(epee::byte_slice seed, std::string passphrase);
+#endif
+
+#ifdef LWSF_POLYSEED_ENABLE
     virtual bool getPolyseed(std::string &seed, std::string &passphrase) const override;
+#endif
+
+#ifdef LWSF_MASTER_ENABLE
+    virtual bool getPolyseed(std::string &seed, uint64_t& birthday, bool& is_encrypted) const override;
 #endif
 
    /**
