@@ -89,12 +89,18 @@ find_package(Sodium REQUIRED)
 
 add_library(monero::libraries INTERFACE IMPORTED)
 
+set(POLYSEED_DIR "")
+if (LWSF_MASTER_ENABLE)
+  set(POLYSEED_DIR "${MONERO_SOURCE_DIR}/external/polyseed/include")
+endif ()
+
 set_property(TARGET monero::libraries PROPERTY
   INTERFACE_INCLUDE_DIRECTORIES
     ${Boost_INCLUDE_DIR}
     "${MONERO_SOURCE_DIR}/contrib/epee/include"
     "${MONERO_SOURCE_DIR}/external"
     "${MONERO_SOURCE_DIR}/external/easylogging++"
+    "${POLYSEED_DIR}"
     "${MONERO_SOURCE_DIR}/external/rapidjson/include"
     "${MONERO_SOURCE_DIR}/external/supercop/include"
     "${MONERO_SOURCE_DIR}/src"
