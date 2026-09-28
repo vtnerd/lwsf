@@ -100,10 +100,10 @@ jobs:
       fail-fast: false
       matrix:
         branch: [master, release-v0.18]
-        os: [macos-15, macos-26, ubuntu-22.04, ubuntu-24.04]
+        os: [macos-15, macos-26, ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
     steps:
       - name: Install Dependencies (Ubuntu)
-        if: matrix.os == 'ubuntu-22.04' || matrix.os == 'ubuntu-24.04'
+        if: matrix.os == 'ubuntu-22.04' || matrix.os == 'ubuntu-24.04' || matrix.os == 'ubuntu-26.04'
         run: |
           ${{env.APT_SET_CONF}}
           sudo apt update
