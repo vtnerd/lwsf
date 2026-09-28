@@ -27,7 +27,8 @@
 
 #include "framework.test.h"
 
-#include <optional>
+#include <memory>
+#include <string>
 #include "lws_frontend.h"
 
 namespace
