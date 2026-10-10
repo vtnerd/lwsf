@@ -33,6 +33,13 @@ enable_language(CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(WIN32)
+  # Keep windows.h from pulling in WinSock1: boost::asio needs WinSock2, and
+  # headers that include windows.h first would otherwise make its
+  # socket_types.hpp fail with "WinSock.h has already been included".
+  add_compile_definitions(WIN32_LEAN_AND_MEAN)
+endif()
+
 option(LWSF_BUILD_TESTS "Build Tests" OFF)
 option(LWSF_SANITIZER "Use specific sanitizer" OFF)
 if(NOT LWSF_SANITIZER STREQUAL "OFF")

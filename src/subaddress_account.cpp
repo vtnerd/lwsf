@@ -28,10 +28,11 @@
 
 #include "subaddress_account.h"
 
+#include "backend.h"
+
 #include <boost/thread/lock_guard.hpp>
 #include <ctime>
 #include <utility>
-#include "backend.h"
 #include "cryptonote_basic/cryptonote_format_utils.h" // monero/src
 #include "error.h"
 

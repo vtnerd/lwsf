@@ -126,11 +126,21 @@ namespace lwsf { namespace internal { namespace http
 
         void init(boost::optional<std::uint64_t> const& content_length, boost::system::error_code& ec)
         {
-          static_assert(
-            std::numeric_limits<std::uint64_t>::max() <= std::numeric_limits<std::size_t>::max()
-          );
           if (content_length)
-            body_.reserve(*content_length);
+          {
+            // size_t is 32-bit on some targets (armv7): a Content-Length that
+            // can't fit is not a body we could hold, so reject it rather than
+            // truncate the reserve.
+            if constexpr (std::numeric_limits<std::uint64_t>::max() > std::numeric_limits<std::size_t>::max())
+            {
+              if (*content_length > std::numeric_limits<std::size_t>::max())
+              {
+                ec = boost::beast::http::error::body_limit;
+                return;
+              }
+            }
+            body_.reserve(static_cast<std::size_t>(*content_length));
+          }
           ec = {};
         }
 
