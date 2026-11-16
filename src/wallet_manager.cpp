@@ -41,7 +41,7 @@
 #include "lwsf_config.h"
 #include "lwsf_rpc.h"
 #include "lws_frontend.h"
-#if defined(LWSF_POLYSEED_ENABLE) || defined(LWSF_MASTER_ENABLE)
+#if defined(LWSF_POLYSEED_ENABLE)
   #include "polyseed.h"
 #endif
 #include "net/context.h"
@@ -264,7 +264,7 @@ namespace lwsf
 	return nullptr;
       }
 
-#if defined(LWSF_POLYSEED_ENABLE) || defined(LWSF_MASTER_ENABLE)
+#if defined(LWSF_POLYSEED_ENABLE)
     /*!
      * \brief creates a wallet from a polyseed mnemonic phrase
      * \param path                         Name of the wallet file to be created

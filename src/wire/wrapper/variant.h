@@ -39,8 +39,8 @@
 #include "wire/read.h"
 #include "wire/write.h"
 
-#define LWSF_WIRE_OPTION(name, type, cpp_name)                               \
-  wire::optional_field(name, wire::option<type>(std::ref(cpp_name)))
+#define LWSF_WIRE_OPTION(name, type, cpp_name)                                       \
+  ::lwsf::wire::optional_field(name, ::lwsf::wire::option<type>(std::ref(cpp_name)))
 
 namespace lwsf { namespace wire
 {

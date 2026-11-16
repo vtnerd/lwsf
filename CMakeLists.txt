@@ -101,6 +101,7 @@ set_property(TARGET monero::libraries PROPERTY
     "${MONERO_SOURCE_DIR}/external"
     "${MONERO_SOURCE_DIR}/external/easylogging++"
     "${POLYSEED_DIR}"
+    "${MONERO_SOURCE_DIR}/external/mx25519/include"
     "${MONERO_SOURCE_DIR}/external/rapidjson/include"
     "${MONERO_SOURCE_DIR}/external/supercop/include"
     "${MONERO_SOURCE_DIR}/src"
@@ -112,6 +113,7 @@ set_property(TARGET monero::libraries PROPERTY
     epee
     mnemonics
     qrcodegen
+    serialization
     wallet_api
 )
 
